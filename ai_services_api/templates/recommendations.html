@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Expert Recommendations by ORCID</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-900 text-gray-100">
+    <div class="container mx-auto py-8">
+        <header class="mb-8">
+            <h1 class="text-3xl font-bold text-center">Expert Recommendations</h1>
+            <p class="text-center text-gray-400 mt-2">Find similar experts based on ORCID</p>
+        </header>
+
+        <main>
+            <div class="max-w-md mx-auto">
+                <div class="bg-gray-800 rounded-lg shadow-md p-6 border border-gray-700">
+                    <h2 class="text-xl font-semibold mb-4">Enter ORCID</h2>
+                    <form id="recommendationForm" class="space-y-4">
+                        <div>
+                            <label for="orcid" class="block mb-2 font-medium">ORCID:</label>
+                            <input 
+                                type="text" 
+                                id="orcid" 
+                                name="orcid" 
+                                class="bg-gray-700 text-gray-100 rounded-md px-4 py-2 w-full" 
+                                placeholder="0000-0002-1825-0097"
+                                pattern="\d{4}-\d{4}-\d{4}-\d{3}[\dX]"
+                                title="Please enter a valid ORCID (e.g., 0000-0002-1825-0097)"
+                                required
+                            >
+                        </div>
+                        <button type="submit" class="bg-green-500 hover:bg-green-600 text-white font-medium px-4 py-2 rounded-md w-full">Find Similar Experts</button>
+                    </form>
+                </div>
+            </div>
+
+            <div class="mt-8">
+                <div class="loading text-center hidden" id="loading">
+                    <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div>
+                    <p class="mt-2">Finding similar experts...</p>
+                </div>
+                <div class="recommendations-list grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" id="recommendations"></div>
+            </div>
+        </main>
+
+        <footer class="mt-8 text-center text-gray-400">
+            <p>&copy; 2024 Expert Recommendation System</p>
+        </footer>
+    </div>
+
+    <script>
+        const recommendationForm = document.getElementById('recommendationForm');
+
+        recommendationForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const rawOrcid = event.target.orcid.value.trim();
+            const fullOrcid = `https://orcid.org/${rawOrcid}`;
+
+            try {
+                showLoading();
+                const response = await fetch(`http://localhost:8000/recommendation/recommendation/?orcid=${encodeURIComponent(fullOrcid)}`, {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                displayRecommendations(data);
+                hideLoading();
+            } catch (error) {
+                hideLoading();
+                displayError('Error fetching recommendations', error.message);
+            }
+        });
+
+        function displayRecommendations(experts) {
+            const recommendationsContainer = document.getElementById('recommendations');
+            recommendationsContainer.innerHTML = '';
+
+            if (experts.length === 0) {
+                displayError('No recommendations found', 'No similar experts were found for this ORCID.');
+                return;
+            }
+
+            experts.forEach(expert => {
+                const card = document.createElement('div');
+                card.classList.add('bg-gray-800', 'rounded-lg', 'shadow-md', 'hover:shadow-xl', 'transition-shadow', 'p-6', 'border', 'border-gray-700');
+
+                const name = document.createElement('h3');
+                name.classList.add('text-xl', 'font-semibold', 'mb-2');
+                name.textContent = expert.name;
+
+                const orcid = document.createElement('div');
+                orcid.classList.add('text-gray-400', 'mb-2');
+                orcid.textContent = `ORCID: ${expert.orcid.replace('https://orcid.org/', '')}`;
+
+                const domains = document.createElement('div');
+                domains.classList.add('text-gray-300', 'mb-2');
+                domains.textContent = `Shared Domains: ${expert.shared_domains.join(', ')}`;
+
+                const score = document.createElement('div');
+                score.classList.add('text-green-400', 'font-medium');
+                score.textContent = `Similarity Score: ${expert.similarity_score.toFixed(1)}`;
+
+                card.appendChild(name);
+                card.appendChild(orcid);
+                card.appendChild(domains);
+                card.appendChild(score);
+
+                recommendationsContainer.appendChild(card);
+            });
+        }
+
+        function showLoading() {
+            document.getElementById('loading').classList.remove('hidden');
+            document.getElementById('recommendations').innerHTML = '';
+        }
+
+        function hideLoading() {
+            document.getElementById('loading').classList.add('hidden');
+        }
+
+        function displayError(error, details) {
+            const errorContainer = document.createElement('div');
+            errorContainer.classList.add('bg-red-600', 'rounded-lg', 'shadow-md', 'p-6', 'text-white', 'mx-auto', 'max-w-md');
+            
+            const errorTitle = document.createElement('h3');
+            errorTitle.classList.add('font-semibold', 'text-lg', 'mb-2');
+            errorTitle.textContent = error;
+            errorContainer.appendChild(errorTitle);
+
+            if (details) {
+                const detailsElement = document.createElement('p');
+                detailsElement.classList.add('text-gray-100', 'text-sm');
+                detailsElement.textContent = details;
+                errorContainer.appendChild(detailsElement);
+            }
+
+            const recommendationsContainer = document.getElementById('recommendations');
+            recommendationsContainer.innerHTML = '';
+            recommendationsContainer.appendChild(errorContainer);
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Book Summary</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet">
+    <!-- Add Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body class="bg-gray-900 min-h-screen">
+    <nav class="bg-gray-800 shadow-lg">
+        <div class="max-w-7xl mx-auto px-4">
+            <div class="flex justify-between h-16">
+                <div class="flex items-center">
+                    <span class="text-2xl font-bold text-green-500">AI Book Summary</span>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <main class="max-w-7xl mx-auto py-12 px-4 flex justify-center">
+        <div class="w-full max-w-lg">
+            <div class="bg-gray-800 rounded-lg shadow-xl border border-gray-700 overflow-hidden">
+                <!-- Search Section -->
+                <div class="p-4">
+                    <div class="relative">
+                        <input 
+                            id="search-input" 
+                            type="text" 
+                            placeholder="Enter book title..." 
+                            class="w-full bg-gray-700 text-gray-100 rounded-lg pl-4 pr-12 py-3 focus:outline-none focus:ring-2 focus:ring-green-500 border border-gray-600"
+                            autocomplete="on"
+                        />
+                        <button 
+                            onclick="summarizeBook()" 
+                            class="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-green-500 transition-colors duration-200 p-2"
+                        >
+                            <i data-lucide="book" class="w-5 h-5"></i>
+                        </button>
+                    </div>
+
+                    <!-- Summary Display -->
+                    <div id="summary-section" class="mt-6 text-gray-100 hidden">
+                        <h3 class="text-lg font-bold">Book Summary:</h3>
+                        <p id="book-summary" class="mt-2 text-sm"></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        // Initialize Lucide icons
+        lucide.createIcons();
+
+        async function summarizeBook() {
+            const bookTitle = document.getElementById("search-input").value;
+            if (!bookTitle) return;
+
+            try {
+                const response = await fetch("http://localhost:8000/summarize", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ "title": bookTitle }),
+                });
+
+                if (!response.ok) {
+                    throw new Error("Failed to fetch summary");
+                }
+
+                const summaryData = await response.json();
+                if (summaryData.summary) {
+                    document.getElementById("book-summary").textContent = summaryData.summary;
+                    document.getElementById("summary-section").classList.remove("hidden");
+                } else {
+                    alert("No summary found for this book.");
+                }
+            } catch (error) {
+                console.error("Error:", error);
+                alert("There was an error. Please try again.");
+            }
+        }
+
+        // Add event listener for Enter key
+        document.getElementById("search-input").addEventListener("keypress", function(event) {
+            if (event.key === "Enter") {
+                summarizeBook();
+            }
+        });
+    </script>
+</body>
+</html>

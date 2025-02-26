@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Semantic Search</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-900 text-gray-100">
+    <!-- Summary Modal -->
+    <div id="summary-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+        <div class="bg-gray-800 p-6 rounded-lg max-w-2xl w-full mx-4 relative">
+            <button id="close-modal" class="absolute top-4 right-4 text-gray-400 hover:text-white">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+            </button>
+            <h3 class="text-xl font-bold mb-4">Summary</h3>
+            <div id="modal-summary-content" class="text-gray-300 whitespace-pre-wrap"></div>
+        </div>
+    </div>
+
+    <div class="container mx-auto px-4 py-8">
+        <header class="mb-8 text-center">
+            <h1 class="text-4xl font-bold mb-2">Semantic Search</h1>
+            <p class="text-gray-400">Find relevant research papers quickly</p>
+        </header>
+
+        <main class="max-w-4xl mx-auto">
+            <!-- Search Form -->
+            <div class="bg-gray-800 rounded-lg p-6 mb-8 shadow-lg border border-gray-700">
+                <form id="search-form" class="space-y-4">
+                    <div class="relative">
+                        <label for="search-input" class="block text-lg mb-2">Search Query:</label>
+                        <input 
+                            type="text" 
+                            id="search-input"
+                            class="w-full bg-gray-700 text-white px-4 py-3 rounded-lg focus:ring-2 focus:ring-green-500 focus:outline-none"
+                            placeholder="Enter your search query..."
+                            autocomplete="off"
+                            required
+                        >
+                        <div id="predictions-dropdown" class="hidden absolute w-full bg-gray-700 mt-1 rounded-lg shadow-xl z-50 max-h-60 overflow-y-auto border border-gray-600"></div>
+                    </div>
+                    <button type="submit" class="w-full bg-green-600 hover:bg-green-700 text-white font-medium py-3 rounded-lg transition duration-150">
+                        Search
+                    </button>
+                </form>
+            </div>
+
+            <div id="loading" class="hidden">
+                <div class="flex justify-center items-center py-8">
+                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-green-500"></div>
+                </div>
+            </div>
+
+            <div id="error" class="hidden bg-red-900/50 border border-red-700 text-white p-4 rounded-lg mb-6"></div>
+
+            <div id="results-container" class="space-y-4"></div>
+        </main>
+    </div>
+
+    <script>
+        // Constants and DOM Elements
+        const searchEndpoint = '/search/search';
+        const predictEndpoint = '/search/search/predict';
+        const elements = {
+            form: document.getElementById('search-form'),
+            input: document.getElementById('search-input'),
+            predictions: document.getElementById('predictions-dropdown'),
+            results: document.getElementById('results-container'),
+            loading: document.getElementById('loading'),
+            error: document.getElementById('error'),
+            modal: document.getElementById('summary-modal'),
+            modalContent: document.getElementById('modal-summary-content'),
+            closeModal: document.getElementById('close-modal')
+        };
+
+        // Prediction state
+        let currentPrediction = '';
+        let userInput = '';
+        let predictionTimeout;
+        let lastPredictionQuery = '';
+        let lastSearchQuery = '';
+        let abortController;
+        const DEBOUNCE_DELAY = 150; // Reduced from 200ms to 150ms
+
+        // Modal Functions
+        function showSummaryModal(summary) {
+            if (!summary) return;
+            elements.modalContent.textContent = summary;
+            elements.modal.classList.remove('hidden');
+            elements.modal.classList.add('flex');
+        }
+
+        function closeSummaryModal() {
+            elements.modal.classList.add('hidden');
+            elements.modal.classList.remove('flex');
+            elements.modalContent.textContent = '';
+        }
+
+        // Prediction Functions
+        async function getPredictions(query) {
+            // Don't make a request if the query is the same as the last one
+            if (query === lastPredictionQuery) {
+                return [];
+            }
+            lastPredictionQuery = query;
+
+            // Cancel any ongoing prediction request
+            if (abortController) {
+                abortController.abort();
+            }
+            abortController = new AbortController();
+
+            try {
+                const response = await fetch(
+                    `${predictEndpoint}?partial_query=${encodeURIComponent(query)}&limit=5`,
+                    { signal: abortController.signal }
+                );
+                
+                if (!response.ok) {
+                    throw new Error(`Failed to get predictions: ${response.status}`);
+                }
+                
+                const predictions = await response.json();
+                return predictions || [];
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    return []; // Quietly handle aborted requests
+                }
+                console.error('Prediction error:', error);
+                return [];
+            }
+        }
+
+        function displayPrediction(prediction) {
+            if (!prediction) return;
+            
+            const input = elements.input;
+            const userText = input.value;
+            
+            if (prediction.toLowerCase().startsWith(userText.toLowerCase())) {
+                currentPrediction = prediction;
+                input.value = userText + prediction.slice(userText.length);
+                
+                // Select the predicted text
+                input.setSelectionRange(userText.length, prediction.length);
+            }
+        }
+
+        function handleInput(e) {
+            const input = e.target;
+            userInput = input.value.trim();
+
+            // Clear any existing timeout
+            if (predictionTimeout) {
+                clearTimeout(predictionTimeout);
+            }
+
+            // Reset prediction if backspace was pressed or input is too short
+            if (e.inputType === 'deleteContentBackward' || userInput.length < 2) {
+                currentPrediction = '';
+                return;
+            }
+
+            // Cache check - if we already have this prediction, use it immediately
+            if (currentPrediction && currentPrediction.toLowerCase().startsWith(userInput.toLowerCase())) {
+                displayPrediction(currentPrediction);
+                return;
+            }
+
+            // Set a new timeout for predictions with reduced delay
+            predictionTimeout = setTimeout(async () => {
+                if (userInput.length >= 2) {
+                    const predictions = await getPredictions(userInput);
+                    if (predictions && predictions.length > 0) {
+                        displayPrediction(predictions[0]);
+                    }
+                }
+            }, DEBOUNCE_DELAY);
+        }
+
+        // Handle special keys
+        function handleKeydown(e) {
+            if (currentPrediction) {
+                switch (e.key) {
+                    case 'ArrowRight':
+                    case 'Tab':
+                        if (elements.input.selectionStart < elements.input.value.length) {
+                            e.preventDefault();
+                            elements.input.setSelectionRange(elements.input.value.length, elements.input.value.length);
+                        }
+                        break;
+                    case 'Escape':
+                        e.preventDefault();
+                        elements.input.value = userInput;
+                        currentPrediction = '';
+                        break;
+                }
+            }
+        }
+
+        // Event Listeners
+        elements.closeModal.addEventListener('click', closeSummaryModal);
+        elements.modal.addEventListener('click', (e) => {
+            if (e.target === elements.modal) closeSummaryModal();
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && !elements.modal.classList.contains('hidden')) {
+                closeSummaryModal();
+            }
+        });
+
+        // Add input event listeners for predictions
+        elements.input.addEventListener('input', handleInput);
+        elements.input.addEventListener('keydown', handleKeydown);
+
+        // Display Results Function
+        function displayResults(results) {
+            elements.results.innerHTML = '';
+            
+            if (!results || results.length === 0) {
+                elements.results.innerHTML = `
+                    <div class="bg-gray-800 rounded-lg p-6 text-center text-gray-400">
+                        No results found
+                    </div>
+                `;
+                return;
+            }
+
+            results.forEach(result => {
+                const resultElement = document.createElement('div');
+                resultElement.className = 'bg-gray-800 rounded-lg p-6 border border-gray-700 mb-4';
+                
+                resultElement.innerHTML = `
+                    <div class="flex flex-col gap-4">
+                        <div class="flex justify-between items-start gap-4">
+                            <div class="flex-grow">
+                                <a href="https://doi.org/${result.doi}" 
+                                   target="_blank" 
+                                   class="text-xl font-semibold text-blue-400 hover:text-blue-300 hover:underline inline-block">
+                                    ${result.title || 'Untitled'}
+                                </a>
+                            </div>
+                            ${result.summary ? `
+                                <button type="button" class="summary-btn bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm flex-shrink-0 transition duration-150">
+                                    View Summary
+                                </button>
+                            ` : ''}
+                        </div>
+                        ${result.authors ? `
+                            <p class="text-gray-400">
+                                <span class="font-medium">Authors:</span> ${result.authors}
+                            </p>
+                        ` : ''}
+                    </div>
+                `;
+
+                if (result.summary) {
+                    const summaryBtn = resultElement.querySelector('.summary-btn');
+                    summaryBtn.addEventListener('click', () => {
+                        showSummaryModal(result.summary);
+                    });
+                }
+
+                elements.results.appendChild(resultElement);
+            });
+        }
+
+        // Search form submission
+        elements.form.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const query = elements.input.value.trim();
+            
+            if (!query || query === lastSearchQuery) return;
+            lastSearchQuery = query;
+
+            elements.predictions.classList.add('hidden');
+            elements.loading.classList.remove('hidden');
+            elements.error.classList.add('hidden');
+            elements.results.innerHTML = '';
+
+            // Cancel any ongoing search request
+            if (abortController) {
+                abortController.abort();
+            }
+            abortController = new AbortController();
+
+            try {
+                const response = await fetch(
+                    `${searchEndpoint}?query=${encodeURIComponent(query)}&limit=5`,
+                    { signal: abortController.signal }
+                );
+                if (!response.ok) throw new Error('Search failed');
+                const results = await response.json();
+                displayResults(results);
+            } catch (err) {
+                if (err.name !== 'AbortError') {
+                    console.error('Search error:', err);
+                    elements.error.textContent = 'Failed to perform search. Please try again.';
+                    elements.error.classList.remove('hidden');
+                }
+            } finally {
+                elements.loading.classList.add('hidden');
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,106 @@
+[tool.poetry]
+name = "ai-api-services"
+version = "0.1.0"
+description = "AI Services API with FastAPI and LangChain"
+authors = ["kimu90 <briankimutai@icloud.com>"]
+readme = "README.md"
+packages = [
+    { include = "ai_services_api" }
+]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.12"
+fastapi = "0.99.1"
+pydantic = "1.10.13"
+langchain = "^0.1.12"
+redis = "^4.2.0"
+neo4j = "^5.11.0"
+python-dotenv = "^1.0.1"
+langchain-google-genai = "^0.0.11"
+numpy = "^1.26.4"
+uvicorn = "^0.27.1"
+pandas = "^2.2.1"
+pyarrow = "^15.0.1"
+aiohttp = "^3.9.3"
+asyncio = "^3.4.3"
+backoff = "^2.2.1"
+psycopg2-binary = "^2.9.10"
+webdriver-manager = "^4.0.1"
+
+python-multipart = "^0.0.17"
+jinja2 = "^3.1.4"
+slowapi = "^0.1.9"
+selenium = "^4.16.0"
+plotly = "^5.17.0"
+streamlit = "^1.26.0"
+beautifulsoup4 = "^4.12.2"
+lxml = "^4.9.3"
+matplotlib = "^3.8.0"
+email-validator = "1.3.1"
+flask-session = "^0.4.0"
+apache-airflow = "2.7.3"
+apache-airflow-providers-celery = "3.3.1"
+apache-airflow-providers-postgres = "5.6.0"
+apache-airflow-providers-redis = "3.3.1"
+apache-airflow-providers-http = "4.1.0"
+apache-airflow-providers-common-sql = "1.10.0"
+croniter = "^2.0.1"
+celery = "^5.3.6"
+colorlog = ">=4.0.2,<5.0"
+cryptography = "^42.0.0"
+alembic = "^1.13.1"
+sqlalchemy = "1.4.51"
+Flask = "2.2.5"
+importlib-metadata = "^7.0.1"
+typing-extensions = "^4.9.0"
+pendulum = "2.1.2"
+pypdf2 = "^3.0.0"
+pymupdf = "^1.25.3"
+asyncpg = "^0.30.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.2"
+pytest-asyncio = "^0.23.5"
+pytest-cov = "^4.1.0"
+black = "^24.2.0"
+isort = "^5.13.2"
+flake8 = "^7.0.0"
+mypy = "^1.8.0"
+httpx = "^0.27.0"
+pytest-mock = "^3.12.0"
+pytest-env = "^1.1.3"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+start = "ai_services_api.main:start"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+env = [
+    "TESTING=True",
+    "DATABASE_URL=postgresql://postgres:p0stgres@db:5432/aphrc"
+]
+
+[tool.coverage.run]
+source = ["ai_services_api"]
+omit = [
+    "tests/*",
+    "**/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "pass",
+    "raise ImportError",
+]

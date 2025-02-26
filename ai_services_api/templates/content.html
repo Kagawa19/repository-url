@@ -1,0 +1,137 @@
+<div class="container mx-auto py-8">
+    <header class="mb-8">
+        <h1 class="text-3xl font-bold text-center">Content Classification</h1>
+        <p class="text-center text-gray-400 mt-2">Explore APHRC Knowledge Products</p>
+    </header>
+
+    <main class="max-w-4xl mx-auto">
+        <div class="bg-gray-800 rounded-lg shadow-md p-6 border border-gray-700 mb-6">
+            <form id="filterForm" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <!-- Existing Filters -->
+                <div>
+                    <label class="block mb-2 text-sm font-medium">Content Type</label>
+                    <select class="w-full bg-gray-700 text-gray-100 rounded-md px-3 py-2" id="contentTypeFilter">
+                        <option value="">All Types</option>
+                        <option value="text">Text</option>
+                        <option value="video">Video</option>
+                        <option value="audio">Audio</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block mb-2 text-sm font-medium">Author</label>
+                    <input type="text" id="authorFilter" class="w-full bg-gray-700 text-gray-100 rounded-md px-3 py-2" placeholder="Enter author name">
+                </div>
+
+                <div>
+                    <label class="block mb-2 text-sm font-medium">Domain</label>
+                    <select class="w-full bg-gray-700 text-gray-100 rounded-md px-3 py-2" id="domainFilter">
+                        <option value="">All Domains</option>
+                        <option value="health">Health</option>
+                        <option value="education">Education</option>
+                        <option value="economics">Economics</option>
+                        <option value="social-science">Social Science</option>
+                    </select>
+                </div>
+
+                <!-- New Filters -->
+                <div>
+                    <label class="block mb-2 text-sm font-medium">Field</label>
+                    <input type="text" id="fieldFilter" class="w-full bg-gray-700 text-gray-100 rounded-md px-3 py-2" placeholder="Enter field">
+                </div>
+
+                <div>
+                    <label class="block mb-2 text-sm font-medium">Subfield</label>
+                    <input type="text" id="subfieldFilter" class="w-full bg-gray-700 text-gray-100 rounded-md px-3 py-2" placeholder="Enter subfield">
+                </div>
+            </form>
+            <div class="mt-4 flex space-x-4">
+                <input type="text" id="searchInput" class="flex-grow bg-gray-700 text-gray-100 rounded-md px-3 py-2" placeholder="Search by title or subtitle">
+                <button id="searchButton" class="bg-green-500 hover:bg-green-600 text-white font-medium px-4 py-2 rounded-md">Search</button>
+            </div>
+        </div>
+
+        <!-- Loading and Content Results sections -->
+        <div id="loadingIndicator" class="hidden text-center text-white">Loading...</div>
+        <div id="contentResults" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <!-- Content results will appear here -->
+        </div>
+    </main>
+</div>
+
+<script>
+    const filterForm = document.getElementById('filterForm');
+    const searchInput = document.getElementById('searchInput');
+    const searchButton = document.getElementById('searchButton');
+    const contentResults = document.getElementById('contentResults');
+    const loadingIndicator = document.getElementById('loadingIndicator');
+
+    function fetchContent() {
+        const contentType = document.getElementById('contentTypeFilter').value;
+        const author = document.getElementById('authorFilter').value;
+        const domain = document.getElementById('domainFilter').value;
+        const field = document.getElementById('fieldFilter').value;
+        const subfield = document.getElementById('subfieldFilter').value;
+        const searchTerm = searchInput.value;
+
+        // Show loading
+        loadingIndicator.classList.remove('hidden');
+        contentResults.innerHTML = '';
+
+        // Simulated fetch - replace with actual API endpoint
+        fetch(`/content?type=${contentType}&author=${author}&domain=${domain}&field=${field}&subfield=${subfield}&search=${searchTerm}`)
+            .then(response => response.json())
+            .then(contents => {
+                loadingIndicator.classList.add('hidden');
+                if (contents.length === 0) {
+                    contentResults.innerHTML = `
+                        <div class="col-span-full text-center text-gray-400">
+                            No content found matching your filters.
+                        </div>
+                    `;
+                    return;
+                }
+
+                contents.forEach(content => {
+                    const card = document.createElement('div');
+                    card.classList.add('bg-gray-800', 'rounded-lg', 'shadow-md', 'p-6', 'border', 'border-gray-700');
+                    card.innerHTML = `
+                        <div class="flex justify-between items-center mb-2">
+                            <span class="px-2 py-1 bg-green-600 text-white rounded text-xs uppercase">
+                                ${content.type}
+                            </span>
+                            <span class="text-sm text-gray-400">${content.domain}</span>
+                        </div>
+                        <h3 class="text-xl font-semibold mb-2 text-white">${content.title}</h3>
+                        <p class="text-gray-400 mb-4">${content.subtitle || 'No subtitle'}</p>
+                        <div class="flex items-center">
+                            <img src="/api/placeholder/40/40" alt="Author" class="w-10 h-10 rounded-full mr-3">
+                            <div>
+                                <p class="font-medium text-white">${content.author}</p>
+                                <p class="text-xs text-gray-500">${content.authorAffiliation || 'APHRC'}</p>
+                            </div>
+                        </div>
+                    `;
+                    contentResults.appendChild(card);
+                });
+            })
+            .catch(error => {
+                loadingIndicator.classList.add('hidden');
+                contentResults.innerHTML = `
+                    <div class="col-span-full text-center text-red-500">
+                        Error loading content: ${error.message}
+                    </div>
+                `;
+            });
+    }
+
+    // Event listeners
+    searchButton.addEventListener('click', fetchContent);
+    filterForm.addEventListener('change', fetchContent);
+    searchInput.addEventListener('keyup', (e) => {
+        if (e.key === 'Enter') fetchContent();
+    });
+
+    // Initial load
+    fetchContent();
+</script>

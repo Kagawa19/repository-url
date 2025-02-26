@@ -1,0 +1,368 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    command: bash /app/scripts/init-script.sh
+    volumes:
+      - ./:/app:rw
+      - ./logs/api:/app/logs:rw
+      - ./ai_services_api/services/search/models:/app/ai_services_api/services/search/models:rw
+      - ./cache:/app/cache:rw
+      - ./scripts/init-script.sh:/app/scripts/init-script.sh:ro
+      - /dev/shm:/dev/shm:rw
+      - chrome_data:/tmp/chrome-data
+      - chrome_profile:/tmp/chrome-profile
+      - chrome_run:/var/run/chrome
+    environment: 
+      - REDIS_URL=redis://redis:6379
+      - NEO4J_URI=bolt://neo4j:7687
+      - DEBUG=True
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-aphrc}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-p0stgres}
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password123456789!}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+      - DOCKER_ENV=true
+      - TRANSFORMERS_CACHE=/app/cache
+      - HF_HOME=/app/cache
+      - MODEL_PATH=/app/models/search
+      - BASE_DIR=/app
+      - SKIP_OPENALEX=${SKIP_OPENALEX:-false}
+      - SKIP_PUBLICATIONS=${SKIP_PUBLICATIONS:-false}
+      - SKIP_GRAPH=${SKIP_GRAPH:-false}
+      - SKIP_SEARCH=${SKIP_SEARCH:-false}
+      - SKIP_DATABASE=${SKIP_DATABASE:-false}
+      - SKIP_EXPERTS=${SKIP_EXPERTS:-false}
+      - SKIP_SCRAPING=${SKIP_SCRAPING:-false}
+      - SKIP_CLASSIFICATION=${SKIP_CLASSIFICATION:-false}
+      - SKIP_REDIS=${SKIP_REDIS:-false}
+      - CHROME_BIN=/usr/bin/chromium
+      - CHROME_BINARY=/usr/bin/chromium
+      - CHROMEDRIVER_PATH=/usr/bin/chromedriver
+      - CHROME_TMPDIR=/tmp/chrome-data
+      - DISPLAY=:99
+      - CHROME_PROFILE_DIR=/tmp/chrome-profile
+      - PYTHONUNBUFFERED=1
+    user: "${UID:-1001}:${GID:-125}"
+    security_opt:
+      - seccomp=unconfined
+    shm_size: 3g
+    cap_add:
+      - SYS_ADMIN
+    depends_on:
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - aphrc-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 50s
+      timeout: 10s
+      retries: 3
+      start_period: 100s
+    env_file:
+      - .env
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+
+  redis:
+    image: redis:latest
+    container_name: redis-standalone
+    hostname: redis
+    restart: always
+    networks:
+      - aphrc-network
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+      - ./logs/redis:/var/log/redis:rw
+    command: redis-server --appendonly yes --loglevel notice --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "-h", "localhost", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      - REDIS_MAXMEMORY=256mb
+      - REDIS_MAXMEMORY_POLICY=allkeys-lru
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  neo4j:
+    image: neo4j:5.12.0
+    container_name: neo4j
+    hostname: neo4j
+    restart: always
+    networks:
+      - aphrc-network
+    ports:
+      - "7474:7474" 
+      - "7687:7687"
+    entrypoint: ["/startup/docker-entrypoint.sh", "neo4j"]
+    environment:
+      NEO4J_AUTH: none
+      environment:
+      NEO4J_server_memory_pagecache_size: 512M
+      NEO4J_server_memory_heap_initial__size: 512M
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_dbms_transaction_timeout: 300s
+      NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      NEO4J_dbms_security_procedures_allowlist: "apoc.*"
+      NEO4J_server_directories_logs: /logs
+      NEO4J_db_transaction_timeout: 300s
+    volumes:
+      - neo4j-data:/data
+      - ./logs/neo4j:/logs:rw
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:7474"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+        reservations:
+          memory: 2G
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    restart: always
+    networks:
+      - aphrc-network
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-aphrc}"
+      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-p0stgres}"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./logs/postgres:/var/log/postgresql:rw
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    restart: always
+    networks:
+      - aphrc-network
+    environment:
+      PGADMIN_DEFAULT_EMAIL: "${PGADMIN_EMAIL:-brianp0stgres97@gmail.com}"
+      PGADMIN_DEFAULT_PASSWORD: "${PGADMIN_PASSWORD:-p0stgres}"
+    ports:
+      - "5050:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  dashboard:
+    build: . 
+    ports:
+      - "8501:8501"
+    command: streamlit run /app/ai_services_api/services/analytics/app.py --server.headless true
+    volumes:
+      - ./:/app:rw
+      - ./logs/dashboard:/app/logs:rw
+    environment: 
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-aphrc}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-p0stgres}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+      - DOCKER_ENV=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - aphrc-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 50s
+      timeout: 10s
+      retries: 3
+      start_period: 100s
+    user: "${UID:-1001}:${GID:-125}"
+    restart: unless-stopped
+
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: airflow webserver
+    ports:
+      - "8080:8080"
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=CeleryExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-p0stgres}@postgres/${POSTGRES_DB:-aphrc}
+      - AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-p0stgres}@postgres/${POSTGRES_DB:-aphrc}
+      - AIRFLOW__CELERY__BROKER_URL=redis://:@redis:6379/0
+      - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW__WEBSERVER__SECRET_KEY}
+      - AIRFLOW_HOME=/opt/airflow
+      - PYTHONPATH=/app
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./:/app:ro
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - aphrc-network
+    user: "${UID:-1001}:${GID:-125}"
+    restart: always
+
+  airflow-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: airflow scheduler
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=CeleryExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-p0stgres}@postgres/${POSTGRES_DB:-aphrc}
+      - AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-p0stgres}@postgres/${POSTGRES_DB:-aphrc}
+      - AIRFLOW__CELERY__BROKER_URL=redis://:@redis:6379/0
+      - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW_HOME=/opt/airflow
+      - AIRFLOW__SMTP__SMTP_HOST=smtp.gmail.com
+      - AIRFLOW__SMTP__SMTP_USER=briankimu97@gmail.com
+      - AIRFLOW__SMTP__SMTP_PASSWORD=Rooney10!
+      - AIRFLOW__SMTP__SMTP_PORT=587
+      - AIRFLOW__SMTP__SMTP_MAIL_FROM=briankimu97@gmail.com
+      - AIRFLOW__EMAIL__EMAIL_BACKEND=airflow.utils.email.send_email_smtp
+      - PYTHONPATH=/app
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./:/app:ro
+    depends_on:
+      - airflow-webserver
+    networks:
+      - aphrc-network
+    user: "${UID:-1001}:${GID:-125}"
+    restart: always
+
+  airflow-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: airflow celery worker
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=CeleryExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-p0stgres}@postgres/${POSTGRES_DB:-aphrc}
+      - AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-p0stgres}@postgres/${POSTGRES_DB:-aphrc}
+      - AIRFLOW__CELERY__BROKER_URL=redis://:@redis:6379/0
+      - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
+      - AIRFLOW_HOME=/opt/airflow
+      - AIRFLOW__SMTP__SMTP_HOST=smtp.gmail.com
+      - AIRFLOW__SMTP__SMTP_USER=briankimu97@gmail.com
+      - AIRFLOW__SMTP__SMTP_PASSWORD=Rooney10!
+      - AIRFLOW__SMTP__SMTP_PORT=587
+      - AIRFLOW__SMTP__SMTP_MAIL_FROM=briankimu97@gmail.com
+      - AIRFLOW__EMAIL__EMAIL_BACKEND=airflow.utils.email.send_email_smtp
+      - PYTHONPATH=/app
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./:/app:rw
+    depends_on:
+      - airflow-scheduler
+    networks:
+      - aphrc-network
+    user: "${UID:-1001}:${GID:-125}"
+    restart: always
+
+  airflow-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      bash -c '
+        airflow db migrate &&
+        airflow users create --username brian --firstname kimutai --lastname kimu --role Admin --email briankimu97@gmail.com --password movie
+      '
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=CeleryExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-p0stgres}@postgres/${POSTGRES_DB:-aphrc}
+      - AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-p0stgres}@postgres/${POSTGRES_DB:-aphrc}
+      - AIRFLOW__CELERY__BROKER_URL=redis://:@redis:6379/0
+      - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW_HOME=/opt/airflow
+      - AIRFLOW__SMTP__SMTP_HOST=smtp.gmail.com
+      - AIRFLW__SMTP__SMTP_USER=briankimu97@gmail.com
+      - AIRFLOW__SMTP__SMTOP_PASSWORD=Rooney10!
+      - AIRFLOW__SMTP__SMTP_PORT=587
+      - AIRFLOW__SMTP__SMTP_MAIL_FROM=briankimu97@gmail.com
+      - AIRFLOW__EMAIL__EMAIL_BACKEND=airflow.utils.email.send_email_smtp
+    user: "0:0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - aphrc-network
+
+networks:
+  aphrc-network:
+    name: aphrc-network
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  neo4j-data:
+  chrome_data:
+  chrome_profile:
+  chrome_run:

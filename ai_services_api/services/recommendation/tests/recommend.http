@@ -1,0 +1,10 @@
+GRAPH.QUERY reco_graph "MATCH (e1:Expert)-[:RELATED_TO]->(f:Field)<-[:RELATED_TO]-(e2:Expert), (e1)-[:RELATED_TO]->(sf:Subfield)<-[:RELATED_TO]-(e2) WHERE e1 <> e2 RETURN e1.orcid AS expert_1_orcid, e2.orcid AS expert_2_orcid, f.name AS shared_field, sf.name AS shared_subfield"
+
+GRAPH.QUERY reco_graph "MATCH (e1:Expert {orcid: 'https://orcid.org/0000-0002-3417-7926'})-[s:RELATED_TO]->(f:Field), 
+                                (e1)-[:RELATED_TO]->(sf:Subfield), 
+                                (e2:Expert {orcid: 'https://orcid.org/0000-0002-3041-6336'})-[s2:RELATED_TO]->(f), 
+                                (e2)-[:RELATED_TO]->(sf) 
+                         RETURN e1.orcid AS orcid_1, e2.orcid AS orcid_2, f.name AS field, sf.name AS subfield"
+
+
+GRAPH.QUERY reco_graph "MATCH (e1:Expert {orcid: 'https://orcid.org/0000-0002-3417-7926'})-[s:RELATED_TO]->(f:Field), (e1)-[:RELATED_TO]->(sf:Subfield), (e2:Expert)-[s2:RELATED_TO]->(f), (e2)-[:RELATED_TO]->(sf) WHERE e1 <> e2 RETURN e2.orcid AS similar_orcid, e2.name AS name, f.name AS shared_field, sf.name AS shared_subfield"
