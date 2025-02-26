@@ -11,7 +11,7 @@ services:
     # Replace the command with debug-enabled entrypoint
     command: >
       bash -c "pip install debugpy &&
-              python /app/debug_wrapper.py"
+              python /app/setup.py"
     volumes:
       - ./:/app:rw
       - ./logs/api:/app/logs:rw
@@ -35,6 +35,12 @@ services:
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password123456789!}
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
       - DOCKER_ENV=true
+      - PYDEVD_DISABLE_FILE_VALIDATION=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - PYDEVD_DISABLE_FILE_VALIDATION=1
+      - PYDEVD_DEBUG_FILE_VALIDATION=1
+      - PYTHONBREAKPOINT=debugpy.breakpoint
       - TRANSFORMERS_CACHE=/app/cache
       - HF_HOME=/app/cache
       - MODEL_PATH=/app/models/search

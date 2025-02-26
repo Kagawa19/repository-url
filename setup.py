@@ -13,6 +13,14 @@ from dataclasses import dataclass
 import time
 from typing import Optional
 from dotenv import load_dotenv
+#!/usr/bin/env python
+import debugpy
+import subprocess
+import sys
+import os
+import time
+
+
 
 from ai_services_api.services.centralized_repository.openalex.openalex_processor import OpenAlexProcessor
 from ai_services_api.services.centralized_repository.publication_processor import PublicationProcessor
@@ -29,6 +37,11 @@ from ai_services_api.services.centralized_repository.openalex.expert_processor i
 from ai_services_api.services.centralized_repository.web_content.services.processor import WebContentProcessor  
 from ai_services_api.services.centralized_repository.database_manager import DatabaseManager
 
+# Setup debugpy and wait for connection
+debugpy.listen(("0.0.0.0", 5678))
+print("Waiting for debugger to attach at 0.0.0.0:5678...")
+debugpy.wait_for_client()
+print("Debugger attached! Starting your application...")
 
 
 # Configure logging
@@ -456,6 +469,7 @@ class SystemInitializer:
         except Exception as e:
             logger.error(f"Error processing web content: {str(e)}")
             raise
+
 
     async def initialize_system(self) -> None:
         """Main initialization flow"""
