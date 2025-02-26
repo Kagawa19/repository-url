@@ -100,7 +100,7 @@ class GeminiLLMManager:
         return ChatGoogleGenerativeAI(
             google_api_key=self.api_key,
             stream=True,
-            model="gemini-pro",
+            model="gemini-1.5-pro-latest",
             convert_system_message_to_human=True,
             callbacks=[self.callback],
             temperature=0.7,

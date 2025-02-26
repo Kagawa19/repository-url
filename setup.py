@@ -177,27 +177,42 @@ class SystemInitializer:
             return False
 
     async def classify_all_publications(self, summarizer: Optional[TextSummarizer] = None) -> None:
+        """
+        Classify all publications in the corpus.
+        
+        Args:
+            summarizer: Optional text summarizer instance
+        """
         try:
             # Create a summarizer if not provided
             if summarizer is None:
                 summarizer = TextSummarizer()
+                print("🔧 Created default TextSummarizer")
             
             # Skip if classification is disabled
             if self.config.skip_classification:
                 logger.info("Skipping corpus classification as requested")
+                print("[SKIP] Corpus classification disabled in configuration")
                 return
             
             # First, analyze existing publications
             logger.info("Analyzing existing publications for field classification...")
+            print("🔍 Starting publication classification process...")
+            
             existing_publications = self.db.get_all_publications()
             
             if not existing_publications:
                 logger.warning("No publications found for corpus analysis. Skipping classification.")
+                print("⚠️ No publications available for classification")
                 return
             
             # Perform corpus analysis to identify fields
+            logger.info("Performing corpus content analysis...")
+            print("📊 Analyzing corpus to discover field structure...")
+            
             field_structure = summarizer.analyze_content_corpus(existing_publications)
             logger.info(f"Discovered field structure: {json.dumps(field_structure, indent=2)}")
+            print(f"🌐 Field Structure: {json.dumps(field_structure, indent=2)}")
             
             # Get all publications that need classification
             results = self.db.execute("""
@@ -208,13 +223,18 @@ class SystemInitializer:
             
             if not results:
                 logger.info("No publications found requiring classification.")
+                print("✅ All publications are already classified")
                 return
             
             # Process each publication
             total_classified = 0
-            for row in results:
+            total_publications = len(results)
+            
+            for idx, row in enumerate(results, 1):
                 try:
                     publication_id, title, abstract, domains, source = row
+                    
+                    print(f"🏷️ Classifying Publication {idx}/{total_publications}: {title}")
                     
                     # Directly use the field structure for classification
                     field, subfield = self._classify_publication(
@@ -229,16 +249,21 @@ class SystemInitializer:
                     """, (field, subfield, publication_id))
                     
                     logger.info(f"Classified {source} publication - {title}: {field}/{subfield}")
+                    print(f"✔️ Classified: {title} → {field}/{subfield}")
+                    
                     total_classified += 1
                     
                 except Exception as e:
                     logger.error(f"Error classifying publication {row[1]}: {e}")
+                    print(f"❌ Classification error for {row[1]}: {e}")
                     continue
             
             logger.info(f"Classification complete! Classified {total_classified} publications.")
+            print(f"🎉 Classification Complete! Classified {total_classified}/{total_publications} publications")
         
         except Exception as e:
             logger.error(f"Error in publication classification: {e}")
+            print(f"💥 Critical Error in Publication Classification: {e}")
             raise
 
     def _classify_publication(self, title: str, abstract: str, domains: List[str], field_structure: Dict) -> Tuple[str, str]:
@@ -254,20 +279,33 @@ class SystemInitializer:
         Returns:
             Tuple of (field, subfield)
         """
+        # Logging classification attempt details
+        print(f"🔬 Attempting to classify: {title}")
+        logger.info(f"Classification attempt for publication: {title}")
+        
         # If no field structure, fallback to a generic classification
         if not field_structure:
+            logger.warning("No field structure available. Using generic classification.")
+            print("⚠️ No field structure found. Using generic classification.")
             return "Unclassified", "General"
         
         # Simple classification logic
-        # You might want to replace this with a more sophisticated method
         for field, subfields in field_structure.items():
             # Basic matching logic (can be made more complex)
             if any(keyword.lower() in (title + " " + abstract).lower() for keyword in subfields):
-                return field, subfields[0]
+                classification_result = (field, subfields[0])
+                logger.info(f"Matched classification: {classification_result}")
+                print(f"✔️ Matched Classification: {field}/{subfields[0]}")
+                return classification_result
         
         # If no match found, return the first field and its first subfield
         first_field = list(field_structure.keys())[0]
-        return first_field, field_structure[first_field][0]
+        default_classification = (first_field, field_structure[first_field][0])
+        
+        logger.info(f"No direct match. Using default classification: {default_classification}")
+        print(f"❓ No direct match. Using default: {default_classification[0]}/{default_classification[1]}")
+        
+        return default_classification
 
     async def process_publications(self, summarizer: Optional[TextSummarizer] = None) -> None:
         """

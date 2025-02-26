@@ -16,7 +16,7 @@ load_dotenv()
 
 # Configure Gemini
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
-model = genai.GenerativeModel('gemini-pro')
+model = genai.GenerativeModel('gemini-1.5-pro-latest')
 
 # Configure logging
 logging.basicConfig(
