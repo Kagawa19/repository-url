@@ -9,4 +9,6 @@ python -c "import secrets; print(secrets.token_hex(16))"
 
 docker-compose -f docker-compose.debug.yml up postgres redis neo4j -d
 docker-compose -f docker-compose.debug.yml up api
+docker-compose -f docker-compose.debug.yml up api dashboard
+
               python /app/setup.py --skip-database --skip-openalex --skip-publications --skip-graph --skip-search --skip-redis --skip-scraping --skip-classification &&

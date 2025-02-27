@@ -10,8 +10,8 @@ services:
     # Command remains the same
     command: >
       bash -c "pip install debugpy &&
-              python /app/setup.py --skip-database --skip-openalex --skip-publications --skip-graph --skip-search --skip-redis --skip-scraping --skip-classification &&
-              python /app/ai_services_api/main.py"
+            python /app/setup.py --skip-database --skip-openalex --skip-publications --skip-graph --skip-search --skip-redis --skip-scraping --skip-classification &&
+            python /app/ai_services_api/main.py"
     volumes:
       - ./:/app:rw
       - ./logs/api:/app/logs:rw
@@ -87,6 +87,34 @@ services:
         reservations:
           memory: 1G
 
+  dashboard:
+    build: . 
+    ports:
+      - "8501:8501"
+    command: streamlit run /app/ai_services_api/services/analytics/app.py --server.headless true
+    volumes:
+      - ./:/app:rw
+      - ./logs/dashboard:/app/logs:rw
+    environment: 
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-aphrc}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-p0stgres}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+      - DOCKER_ENV=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - aphrc-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 50s
+      timeout: 10s
+      retries: 3
+      start_period: 100s
+    user: "0:0"
+    restart: unless-stopped
 
   redis:
     image: redis:latest
