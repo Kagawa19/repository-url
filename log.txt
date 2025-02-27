@@ -1,0 +1,41 @@
+airflow-worker-1  | [[34m2025-02-27T19:08:34.134+0000[0m] {[34mconfiguration.py:[0m2049} INFO[0m - Creating new FAB webserver config file in: /opt/airflow/webserver_config.py[0m
+airflow-worker-1  | [2025-02-27 19:08:41 +0000] [20] [INFO] Starting gunicorn 23.0.0
+airflow-worker-1  | [2025-02-27 19:08:41 +0000] [20] [INFO] Listening at: http://[::]:8793 (20)
+airflow-worker-1  | [2025-02-27 19:08:41 +0000] [20] [INFO] Using worker: sync
+airflow-worker-1  | [2025-02-27 19:08:41 +0000] [21] [INFO] Booting worker with pid: 21
+airflow-worker-1  | [2025-02-27 19:08:41 +0000] [22] [INFO] Booting worker with pid: 22
+airflow-worker-1  |  
+airflow-worker-1  |  -------------- celery@f437f81703d9 v5.4.0 (opalescent)
+airflow-worker-1  | --- ***** ----- 
+airflow-worker-1  | -- ******* ---- Linux-6.5.0-1025-azure-x86_64-with-glibc2.36 2025-02-27 19:08:44
+airflow-worker-1  | - *** --- * --- 
+airflow-worker-1  | - ** ---------- [config]
+airflow-worker-1  | - ** ---------- .> app:         airflow.providers.celery.executors.celery_executor:0x761c0a906450
+airflow-worker-1  | - ** ---------- .> transport:   redis://redis:6379/0
+airflow-worker-1  | - ** ---------- .> results:     postgresql://postgres:**@postgres/aphrc
+airflow-worker-1  | - *** --- * --- .> concurrency: 16 (prefork)
+airflow-worker-1  | -- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+airflow-worker-1  | --- ***** ----- 
+airflow-worker-1  |  -------------- [queues]
+airflow-worker-1  |                 .> default          exchange=default(direct) key=default
+airflow-worker-1  |                 
+airflow-worker-1  | 
+airflow-worker-1  | [tasks]
+airflow-worker-1  |   . airflow.providers.celery.executors.celery_executor_utils.execute_command
+airflow-worker-1  | 
+airflow-worker-1  | [2025-02-27 19:08:50,676: WARNING/MainProcess] /usr/local/lib/python3.11/site-packages/celery/worker/consumer/consumer.py:508: CPendingDeprecationWarning: The broker_connection_retry configuration setting will no longer determine
+airflow-worker-1  | whether broker connection retries are made during startup in Celery 6.0 and above.
+airflow-worker-1  | If you wish to retain the existing behavior for retrying connections on startup,
+airflow-worker-1  | you should set broker_connection_retry_on_startup to True.
+airflow-worker-1  |   warnings.warn(
+airflow-worker-1  | 
+airflow-worker-1  | [2025-02-27 19:08:50,705: INFO/MainProcess] Connected to redis://redis:6379/0
+airflow-worker-1  | [2025-02-27 19:08:50,710: WARNING/MainProcess] /usr/local/lib/python3.11/site-packages/celery/worker/consumer/consumer.py:508: CPendingDeprecationWarning: The broker_connection_retry configuration setting will no longer determine
+airflow-worker-1  | whether broker connection retries are made during startup in Celery 6.0 and above.
+airflow-worker-1  | If you wish to retain the existing behavior for retrying connections on startup,
+airflow-worker-1  | you should set broker_connection_retry_on_startup to True.
+airflow-worker-1  |   warnings.warn(
+airflow-worker-1  | 
+airflow-worker-1  | [2025-02-27 19:08:50,716: INFO/MainProcess] mingle: searching for neighbors
+airflow-worker-1  | [2025-02-27 19:08:51,727: INFO/MainProcess] mingle: all alone
+airflow-worker-1  | [2025-02-27 19:08:51,745: INFO/MainProcess] celery@f437f81703d9 ready.
