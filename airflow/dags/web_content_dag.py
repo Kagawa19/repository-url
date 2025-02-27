@@ -6,7 +6,7 @@ import time
 from airflow_utils import setup_logging, load_environment_variables
 
 # Import web content processor
-from ai_services_api.services.web_content.services.processor import WebContentProcessor
+from ai_services_api.services.centralized_repository.web_content.services.processor import WebContentProcessor
 
 # Configure logging
 logger = setup_logging()
