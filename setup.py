@@ -14,7 +14,6 @@ import time
 from typing import Optional
 from dotenv import load_dotenv
 #!/usr/bin/env python
-import debugpy
 import subprocess
 import sys
 import os
@@ -39,45 +38,6 @@ from ai_services_api.services.centralized_repository.database_manager import Dat
 import os
 import subprocess
 
-# Fix permissions for FAISS indexing directory
-os.makedirs('/app/ai_services_api/services/search/indexing/models', exist_ok=True)
-
-# Instead of trying to chmod, just ensure new files are created with appropriate permissions
-try:
-    # Create empty placeholder files with the right permissions if they don't exist
-    faiss_index_path = '/app/ai_services_api/services/search/indexing/models/expert_faiss_index.idx'
-    mapping_path = '/app/ai_services_api/services/search/indexing/models/expert_mapping.pkl'
-    
-    # Only create if they don't exist
-    if not os.path.exists(faiss_index_path):
-        with open(faiss_index_path, 'wb') as f:
-            pass  # Create empty file
-    
-    if not os.path.exists(mapping_path):
-        with open(mapping_path, 'wb') as f:
-            pass  # Create empty file
-            
-    # Also check for other model directories that might need files
-    models_path = '/app/ai_services_api/services/search/models'
-    os.makedirs(models_path, exist_ok=True)
-    
-    search_models_path = '/app/ai_services_api/services/search/search/models'
-    os.makedirs(search_models_path, exist_ok=True)
-    
-    print("FAISS indexing directory and placeholder files created successfully")
-except Exception as e:
-    print(f"Error creating FAISS index placeholder files: {e}")
-
-# Setup debugpy and wait for connection
-# Setup debugpy and wait for connection only if DEBUGPY_WAIT is set
-debugpy.listen(("0.0.0.0", 5678))
-if os.environ.get("DEBUGPY_WAIT", "false").lower() == "true":
-    print("Waiting for debugger to attach at 0.0.0.0:5678...")
-    debugpy.wait_for_client()
-    print("Debugger attached! Starting your application...")
-else:
-    print("Debugger available at 0.0.0.0:5678 (not waiting for connection)")
-
 
 # Configure logging
 logging.basicConfig(
@@ -86,6 +46,7 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
 @dataclass
 class SetupConfig:
     """Configuration class for system setup"""

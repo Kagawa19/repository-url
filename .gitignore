@@ -1,6 +1,6 @@
 hosts.ini
 .devcontainer
-cron_logs
+
 ai-services/.model_cache/
 ai-services/cache/models
 ai-services/ai_services_api/cache/
@@ -13,7 +13,6 @@ ai-services/.model_cache/models--sentence-transformers--all-MiniLM-L6-v2/blobs/*
 cache
 /cache
 # Logs
-logs/
 
 # Binary files and executables
 nvim-linux-x86_64/

@@ -240,6 +240,9 @@ services:
       - AIRFLOW__CORE__LOAD_EXAMPLES=false
       - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW__WEBSERVER__SECRET_KEY}
       - AIRFLOW_HOME=/opt/airflow
+      - AIRFLOW__LOGGING__LOGGING_LEVEL=INFO
+      - AIRFLOW__LOGGING__DAG_PROCESSOR_LOG_TARGET=/opt/airflow/logs/dag_processor
+      - AIRFLOW__CORE__DEFAULT_TIMEZONE=UTC
       - PYTHONPATH=/app
     volumes:
       - ./airflow/dags:/opt/airflow/dags
@@ -274,12 +277,6 @@ services:
       - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
       - AIRFLOW__CORE__LOAD_EXAMPLES=false
       - AIRFLOW_HOME=/opt/airflow
-      - AIRFLOW__SMTP__SMTP_HOST=smtp.gmail.com
-      - AIRFLOW__SMTP__SMTP_USER=briankimu97@gmail.com
-      - AIRFLOW__SMTP__SMTP_PASSWORD=Rooney10!
-      - AIRFLOW__SMTP__SMTP_PORT=587
-      - AIRFLOW__SMTP__SMTP_MAIL_FROM=briankimu97@gmail.com
-      - AIRFLOW__EMAIL__EMAIL_BACKEND=airflow.utils.email.send_email_smtp
       - PYTHONPATH=/app
     volumes:
       - ./airflow/dags:/opt/airflow/dags
@@ -305,12 +302,6 @@ services:
       - AIRFLOW__CELERY__BROKER_URL=redis://:@redis:6379/0
       - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
       - AIRFLOW_HOME=/opt/airflow
-      - AIRFLOW__SMTP__SMTP_HOST=smtp.gmail.com
-      - AIRFLOW__SMTP__SMTP_USER=briankimu97@gmail.com
-      - AIRFLOW__SMTP__SMTP_PASSWORD=Rooney10!
-      - AIRFLOW__SMTP__SMTP_PORT=587
-      - AIRFLOW__SMTP__SMTP_MAIL_FROM=briankimu97@gmail.com
-      - AIRFLOW__EMAIL__EMAIL_BACKEND=airflow.utils.email.send_email_smtp
       - PYTHONPATH=/app
     volumes:
       - ./airflow/dags:/opt/airflow/dags
@@ -341,13 +332,7 @@ services:
       - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
       - AIRFLOW__CORE__LOAD_EXAMPLES=false
       - AIRFLOW_HOME=/opt/airflow
-      - AIRFLOW__SMTP__SMTP_HOST=smtp.gmail.com
-      - AIRFLW__SMTP__SMTP_USER=briankimu97@gmail.com
-      - AIRFLOW__SMTP__SMTOP_PASSWORD=Rooney10!
-      - AIRFLOW__SMTP__SMTP_PORT=587
-      - AIRFLOW__SMTP__SMTP_MAIL_FROM=briankimu97@gmail.com
-      - AIRFLOW__EMAIL__EMAIL_BACKEND=airflow.utils.email.send_email_smtp
-    user: "0:0"
+    user: "${UID:-1001}:${GID:-125}"
     depends_on:
       postgres:
         condition: service_healthy
