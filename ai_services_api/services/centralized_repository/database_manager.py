@@ -151,6 +151,10 @@ class DatabaseManager:
             # Convert authors list to JSON if provided
             authors_json = json.dumps(authors) if authors is not None else None
             
+            # Convert publication_year to string if it's an integer
+            if publication_year is not None:
+                publication_year = str(publication_year)
+            
             # Update or insert in a single operation
             update_result = self.execute("""
                 UPDATE resources_resource
@@ -170,12 +174,19 @@ class DatabaseManager:
             
             # If no existing record, insert new publication
             if not update_result:
+                # Get the next available ID
+                max_id_result = self.execute("SELECT MAX(id) FROM resources_resource")
+                next_id = 1
+                if max_id_result and max_id_result[0][0] is not None:
+                    next_id = max_id_result[0][0] + 1
+                    
+                # Add ID explicitly to the insert statement
                 self.execute("""
                     INSERT INTO resources_resource 
-                    (doi, title, summary, source, type, authors, domains, publication_year)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    (id, doi, title, summary, source, type, authors, domains, publication_year)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
-                    doi, title, summary, source, type, authors_json, domains, publication_year
+                    next_id, doi, title, summary, source, type, authors_json, domains, publication_year
                 ))
                 logger.info(f"Added new publication: {title}")
             else:

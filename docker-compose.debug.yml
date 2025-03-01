@@ -10,7 +10,7 @@ services:
     # Command remains the same
     command: >
       bash -c "pip install debugpy &&
-            python /app/setup.py --skip-database --skip-openalex --skip-publications --skip-graph --skip-search --skip-redis --skip-scraping --skip-classification &&
+            python /app/setup.py &&
             python /app/ai_services_api/main.py"
     volumes:
       - ./:/app:rw

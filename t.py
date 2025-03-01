@@ -187,7 +187,7 @@ class SchemaManager:
                 """,
                 'resources_resource': """
                     CREATE TABLE IF NOT EXISTS resources_resource (
-                        id integer NOT NULL,
+                        id integer NOT NULL PRIMARY KEY,
                         doi character varying(255),
                         title text NOT NULL,
                         abstract text,
@@ -205,7 +205,8 @@ class SchemaManager:
                         created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
                         updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
                         source character varying(50),
-                        authors jsonb
+                        authors jsonb,
+                        publication_year VARCHAR(255)
                     )
                 """,
                 'content_hashes': """
@@ -226,8 +227,8 @@ class SchemaManager:
                     )
                 """,
                 'experts_expert': """
-                    CREATE TABLE public.experts_expert (
-                        id integer NOT NULL,
+                    CREATE TABLE IF NOT EXISTS experts_expert (
+                        id integer NOT NULL PRIMARY KEY,
                         first_name character varying(255) NOT NULL,
                         last_name character varying(255) NOT NULL,
                         designation character varying(255),
@@ -322,9 +323,9 @@ class SchemaManager:
                         expert_id VARCHAR(255) NOT NULL,
                         rank_position INTEGER,
                         similarity_score FLOAT,
+                        clicked BOOLEAN DEFAULT FALSE,
                         timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (search_id) REFERENCES search_sessions(id)
-
                     )
                 """,
                 'user_recommendations': """
@@ -854,31 +855,39 @@ class ExpertManager:
                         existing_expert[0]
                     ))
                 else:
+                    # Generate a new ID for insert
+                    cur.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM experts_expert")
+                    next_id = cur.fetchone()[0]
+                    
                     cur.execute("""
                         INSERT INTO experts_expert (
-                            first_name, last_name, designation, theme, unit,
+                            id, first_name, last_name, designation, theme, unit,
                             contact_details, knowledge_expertise, email,
                             created_at, updated_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 
                                 CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                         RETURNING id
                     """, (
-                        first_name, last_name, designation, theme, unit,
+                        next_id, first_name, last_name, designation, theme, unit,
                         contact_details,
                         json.dumps(expertise_list) if expertise_list else None,
                         email
                     ))
             else:
+                # Generate a new ID for insert
+                cur.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM experts_expert")
+                next_id = cur.fetchone()[0]
+                
                 cur.execute("""
                     INSERT INTO experts_expert (
-                        first_name, last_name, designation, theme, unit,
+                        id, first_name, last_name, designation, theme, unit,
                         contact_details, knowledge_expertise,
                         created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s,
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
                             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     RETURNING id
                 """, (
-                    first_name, last_name, designation, theme, unit,
+                    next_id, first_name, last_name, designation, theme, unit,
                     contact_details,
                     json.dumps(expertise_list) if expertise_list else None
                 ))

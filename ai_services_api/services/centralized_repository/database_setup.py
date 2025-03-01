@@ -135,26 +135,16 @@ class SchemaManager:
                         FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id)
                     )
                 """,
-                'chatbot_logs': """
-                    CREATE TABLE IF NOT EXISTS chatbot_logs (
-                        id SERIAL PRIMARY KEY,
-                        user_id VARCHAR(255) NOT NULL,
-                        query TEXT NOT NULL,
-                        response TEXT NOT NULL,
-                        response_time FLOAT NOT NULL,
-                        timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                    )
-                """,
-                'response_quality_metrics': """
-                    CREATE TABLE IF NOT EXISTS response_quality_metrics (
+                'sentiment_metrics': """
+                    CREATE TABLE IF NOT EXISTS sentiment_metrics (
                         id SERIAL PRIMARY KEY,
                         interaction_id INTEGER NOT NULL,
-                        helpfulness_score FLOAT,
-                        hallucination_risk FLOAT,
-                        factual_grounding_score FLOAT,
-                        unclear_elements TEXT[],
-                        potentially_fabricated_elements TEXT[],
-                        FOREIGN KEY (interaction_id) REFERENCES chatbot_logs(id)
+                        sentiment_score FLOAT,
+                        emotion_labels TEXT[],
+                        satisfaction_score FLOAT,
+                        urgency_score FLOAT,
+                        clarity_score FLOAT,
+                        FOREIGN KEY (interaction_id) REFERENCES chat_interactions(id)
                     )
                 """,
                 'chat_analytics': """
@@ -197,18 +187,28 @@ class SchemaManager:
                 """,
                 'resources_resource': """
                     CREATE TABLE IF NOT EXISTS resources_resource (
-                        id SERIAL PRIMARY KEY,
-                        title TEXT NOT NULL,
-                        doi VARCHAR(255) UNIQUE,
-                        authors JSON,
-                        domains TEXT[],
-                        type VARCHAR(50) DEFAULT 'publication',
-                        publication_year INTEGER,
-                        summary TEXT,
-                        source VARCHAR(50) DEFAULT 'openalex',
-                        field VARCHAR(50),  -- Added field
-                        subfield VARCHAR(50),  -- Added subfield
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                        id integer NOT NULL PRIMARY KEY,
+                        doi character varying(255),
+                        title text NOT NULL,
+                        abstract text,
+                        summary text,
+                        domains text[],  
+                        topics JSONB,   
+                        description text,
+                        expert_id integer,
+                        type character varying(100),
+                        subtitles jsonb,
+                        publishers jsonb,
+                        collection character varying(255),
+                        date_issue character varying(255),
+                        citation character varying(255),
+                        language character varying(255),
+                        identifiers jsonb,
+                        created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+                        updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+                        source character varying(50),
+                        authors jsonb,
+                        publication_year VARCHAR(255)
                     )
                 """,
                 'content_hashes': """
@@ -230,28 +230,37 @@ class SchemaManager:
                 """,
                 'experts_expert': """
                     CREATE TABLE IF NOT EXISTS experts_expert (
-                        id SERIAL PRIMARY KEY,
-                        first_name VARCHAR(255) NOT NULL,
-                        last_name VARCHAR(255) NOT NULL,
-                        designation VARCHAR(255),
-                        theme VARCHAR(255),
-                        unit VARCHAR(255),
-                        contact_details VARCHAR(255),
-                        knowledge_expertise JSONB,
-                        orcid VARCHAR(255),
-                        domains TEXT[],
-                        fields TEXT[],
-                        subfields TEXT[],
-                        is_superuser BOOLEAN DEFAULT FALSE,
-                        is_staff BOOLEAN DEFAULT FALSE,
-                        is_active BOOLEAN DEFAULT TRUE,
-                        last_login TIMESTAMP WITH TIME ZONE,
-                        date_joined TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                        bio TEXT,
-                        email VARCHAR(200),
-                        middle_name VARCHAR(200)
+                        id integer NOT NULL PRIMARY KEY,
+                        first_name character varying(255) NOT NULL,
+                        last_name character varying(255) NOT NULL,
+                        designation character varying(255),
+                        theme character varying(255),
+                        unit character varying(255),
+                        email character varying(255),
+                        knowledge_expertise jsonb,
+                        orcid character varying(255),
+                        domains text[],
+                        fields text[],
+                        subfields text[],
+                        password character varying(255),
+                        is_superuser boolean DEFAULT false,
+                        is_staff boolean DEFAULT false,
+                        is_active boolean DEFAULT true,
+                        last_login timestamp with time zone,
+                        date_joined timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+                        created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+                        updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+                        bio text,
+                        middle_name character varying(200),
+                        role_id bigint,
+                        normalized_domains text[] DEFAULT '{}'::text[],
+                        normalized_fields text[] DEFAULT '{}'::text[],
+                        normalized_skills text[] DEFAULT '{}'::text[],
+                        keywords text[] DEFAULT '{}'::text[],
+                        search_text text,
+                        last_updated timestamp with time zone DEFAULT now(),
+                        contact_details character varying(255),
+                        photo character varying
                     )
                 """,
                 'expert_resource_links': """
@@ -266,8 +275,17 @@ class SchemaManager:
                         FOREIGN KEY (resource_id) REFERENCES resources_resource(id) ON DELETE CASCADE,
                         UNIQUE(expert_id, resource_id)
                     )
+                """,
+                'chatbot_logs': """
+                    CREATE TABLE IF NOT EXISTS chatbot_logs (
+                        id SERIAL PRIMARY KEY,
+                        user_id VARCHAR(255) NOT NULL,
+                        query TEXT NOT NULL,
+                        response TEXT NOT NULL,
+                        response_time FLOAT NOT NULL,
+                        timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    )
                 """
-                
             },
             'analytics_tables': {
                 'search_sessions': """
@@ -307,9 +325,9 @@ class SchemaManager:
                         expert_id VARCHAR(255) NOT NULL,
                         rank_position INTEGER,
                         similarity_score FLOAT,
+                        clicked BOOLEAN DEFAULT FALSE,
                         timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (search_id) REFERENCES search_sessions(id)
-
                     )
                 """,
                 'user_recommendations': """
@@ -728,10 +746,6 @@ class ExpertManager:
         
         Returns:
             int: Number of successfully processed experts
-        
-        Raises:
-            FileNotFoundError: If the CSV file does not exist
-            ValueError: If there are critical issues with the CSV
         """
         # Validate file existence
         if not os.path.exists(csv_path):
@@ -761,124 +775,122 @@ class ExpertManager:
         processed_experts = 0
         failed_experts = 0
         
-        with get_db_cursor() as (cur, conn):
-            try:
-                # Process experts in a single transaction
-                for idx, row in df.iterrows():
-                    try:
-                        # Process individual expert row
-                        expert_id = self._process_expert_row(cur, row)
-                        if expert_id:
-                            processed_experts += 1
-                    except Exception as e:
-                        failed_experts += 1
-                        logger.warning(f"Failed to process expert at row {idx}: {e}")
-                        # Continue processing other experts even if one fails
-                
-                # Commit transaction if any experts were processed
-                if processed_experts > 0:
+        # Process each expert individually with separate transactions
+        for idx, row in df.iterrows():
+            # Create a new connection and cursor for each expert
+            with get_db_cursor() as (cur, conn):
+                try:
+                    first_name = row.get('First_name', '').strip()
+                    last_name = row.get('Last_name', '').strip()
+                    
+                    if not first_name or not last_name:
+                        logger.warning(f"Skipping expert at row {idx} due to missing first or last name")
+                        continue
+                    
+                    # Extract other fields
+                    designation = row.get('Designation', '').strip()
+                    theme = row.get('Theme', '').strip()
+                    unit = row.get('Unit', '').strip()
+                    contact_details = row.get('Contact Details', '').strip()
+                    
+                    expertise_str = row.get('Knowledge and Expertise', '')
+                    expertise_list = [exp.strip() for exp in expertise_str.split(',') if exp.strip()]
+                    
+                    # Process email if available
+                    email = contact_details if contact_details and '@' in contact_details else None
+                    
+                    # Check if expert with this email already exists
+                    if email:
+                        cur.execute(
+                            "SELECT id FROM experts_expert WHERE email = %s OR contact_details = %s",
+                            (email, contact_details)
+                        )
+                        existing_expert = cur.fetchone()
+                        
+                        if existing_expert:
+                            # Update existing expert
+                            cur.execute("""
+                                UPDATE experts_expert SET
+                                    first_name = %s,
+                                    last_name = %s,
+                                    designation = %s,
+                                    theme = %s,
+                                    unit = %s,
+                                    contact_details = %s,
+                                    knowledge_expertise = %s,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE id = %s
+                                RETURNING id
+                            """, (
+                                first_name, last_name, designation, theme, unit,
+                                contact_details,
+                                json.dumps(expertise_list) if expertise_list else None,
+                                existing_expert[0]
+                            ))
+                        else:
+                            # Generate a random ID for this expert
+                            # We'll use a simple incremental strategy
+                            cur.execute("SELECT MAX(id) FROM experts_expert")
+                            result = cur.fetchone()
+                            next_id = 1 if result[0] is None else result[0] + 1
+                            
+                            # Insert new expert with explicitly provided ID
+                            cur.execute("""
+                                INSERT INTO experts_expert (
+                                    id, first_name, last_name, designation, theme, unit,
+                                    contact_details, knowledge_expertise, email,
+                                    created_at, updated_at
+                                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                                RETURNING id
+                            """, (
+                                next_id, first_name, last_name, designation, theme, unit,
+                                contact_details,
+                                json.dumps(expertise_list) if expertise_list else None,
+                                email
+                            ))
+                    else:
+                        # Generate a random ID for this expert
+                        cur.execute("SELECT MAX(id) FROM experts_expert")
+                        result = cur.fetchone()
+                        next_id = 1 if result[0] is None else result[0] + 1
+                        
+                        # Insert without email but with explicit ID
+                        cur.execute("""
+                            INSERT INTO experts_expert (
+                                id, first_name, last_name, designation, theme, unit,
+                                contact_details, knowledge_expertise,
+                                created_at, updated_at
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                            RETURNING id
+                        """, (
+                            next_id, first_name, last_name, designation, theme, unit,
+                            contact_details,
+                            json.dumps(expertise_list) if expertise_list else None
+                        ))
+                    
+                    expert_id = cur.fetchone()[0]
+                    # Commit the transaction for this expert
                     conn.commit()
-                
-                # Log comprehensive summary
-                logger.info(
-                    f"Expert CSV Processing Summary:\n"
-                    f"  Total experts in CSV:   {total_experts}\n"
-                    f"  Successfully processed: {processed_experts}\n"
-                    f"  Failed to process:      {failed_experts}"
-                )
-                
-                return processed_experts
-            
-            except Exception as e:
-                # Rollback in case of any unexpected errors
-                conn.rollback()
-                logger.error(f"Transaction failed during expert loading: {e}")
-                raise
-
-    def _process_expert_row(self, cur, row):
-        """Process a single expert row from CSV."""
-        first_name = row.get('First_name', '').strip()
-        last_name = row.get('Last_name', '').strip()
+                    processed_experts += 1
+                    logger.info(f"Processed expert: {first_name} {last_name} (ID: {expert_id})")
+                    
+                except Exception as e:
+                    # Rollback the transaction for just this expert
+                    conn.rollback()
+                    failed_experts += 1
+                    logger.error(f"Error processing expert {row.get('First_name', '')} {row.get('Last_name', '')}: {e}")
         
-        if not first_name or not last_name:
-            logger.warning(f"Skipping expert row due to missing first or last name")
-            return None
+        # Log comprehensive summary
+        logger.info(
+            f"Expert CSV Processing Summary:\n"
+            f"  Total experts in CSV:   {total_experts}\n"
+            f"  Successfully processed: {processed_experts}\n"
+            f"  Failed to process:      {failed_experts}"
+        )
         
-        designation = row.get('Designation', '').strip()
-        theme = row.get('Theme', '').strip()
-        unit = row.get('Unit', '').strip()
-        contact_details = row.get('Contact Details', '').strip()
-        
-        expertise_str = row.get('Knowledge and Expertise', '')
-        expertise_list = [exp.strip() for exp in expertise_str.split(',') if exp.strip()]
-        
-        try:
-            email = contact_details if contact_details and '@' in contact_details else None
-            
-            if email:
-                cur.execute(
-                    "SELECT id FROM experts_expert WHERE email = %s OR contact_details = %s",
-                    (email, contact_details)
-                )
-                existing_expert = cur.fetchone()
-                
-                if existing_expert:
-                    cur.execute("""
-                        UPDATE experts_expert SET
-                            first_name = %s,
-                            last_name = %s,
-                            designation = %s,
-                            theme = %s,
-                            unit = %s,
-                            contact_details = %s,
-                            knowledge_expertise = %s,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = %s
-                        RETURNING id
-                    """, (
-                        first_name, last_name, designation, theme, unit,
-                        contact_details,
-                        json.dumps(expertise_list) if expertise_list else None,
-                        existing_expert[0]
-                    ))
-                else:
-                    cur.execute("""
-                        INSERT INTO experts_expert (
-                            first_name, last_name, designation, theme, unit,
-                            contact_details, knowledge_expertise, email,
-                            created_at, updated_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 
-                                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                        RETURNING id
-                    """, (
-                        first_name, last_name, designation, theme, unit,
-                        contact_details,
-                        json.dumps(expertise_list) if expertise_list else None,
-                        email
-                    ))
-            else:
-                cur.execute("""
-                    INSERT INTO experts_expert (
-                        first_name, last_name, designation, theme, unit,
-                        contact_details, knowledge_expertise,
-                        created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s,
-                            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                    RETURNING id
-                """, (
-                    first_name, last_name, designation, theme, unit,
-                    contact_details,
-                    json.dumps(expertise_list) if expertise_list else None
-                ))
-            
-            expert_id = cur.fetchone()[0]
-            logger.info(f"Processed expert: {first_name} {last_name} (ID: {expert_id})")
-            return expert_id
-            
-        except Exception as e:
-            logger.error(f"Error processing expert {first_name} {last_name}: {e}")
-            raise
-
+        return processed_experts
 class ExpertResourceLinker:
     """Handle linking between experts and resources based on author names."""
     
