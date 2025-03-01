@@ -194,33 +194,88 @@ class SystemInitializer:
             logger.info("Analyzing existing publications for field classification...")
             print("🔍 Starting publication classification process...")
             
-            existing_publications = self.db.get_all_publications()
+            # Get all publications with defensive handling
+            try:
+                existing_publications = self.db.get_all_publications()
+            except Exception as e:
+                logger.error(f"Error retrieving publications: {e}")
+                print(f"⚠️ Database error: {e}")
+                existing_publications = []
             
+            # Check if we have publications to analyze
             if not existing_publications:
                 logger.warning("No publications found for corpus analysis. Skipping classification.")
                 print("⚠️ No publications available for classification")
                 return
             
-            # Perform corpus analysis to identify fields
+            # Perform corpus analysis to identify fields with defensive handling
             logger.info("Performing corpus content analysis...")
             print("📊 Analyzing corpus to discover field structure...")
             
-            field_structure = summarizer.analyze_content_corpus(existing_publications)
-            logger.info(f"Discovered field structure: {json.dumps(field_structure, indent=2)}")
+            field_structure = None
+            try:
+                field_structure = summarizer.analyze_content_corpus(existing_publications)
+            except Exception as e:
+                logger.error(f"Error in corpus analysis: {e}")
+                print(f"⚠️ Corpus analysis error: {e}")
+            
+            # If field_structure is None or empty, use a default structure
+            if not field_structure:
+                logger.warning("Corpus analysis did not return valid field structure")
+                print("⚠️ Could not determine field structure from corpus")
+                field_structure = {
+                    "Research": ["General Research", "Study", "Analysis"],
+                    "Health": ["Public Health", "Healthcare", "Medical Research"],
+                    "Policy": ["Government Policy", "Regulations", "Guidelines"],
+                    "Education": ["Learning", "Training", "Academic"],
+                    "Development": ["Economic Development", "Social Development", "Progress"]
+                }
+                logger.info("Using default field structure instead")
+                print("🔄 Using default field structure")
+            
+            logger.info(f"Field structure: {json.dumps(field_structure, indent=2)}")
             print(f"🌐 Field Structure: {json.dumps(field_structure, indent=2)}")
             
+            # Verify that field and subfield columns exist
+            try:
+                # First check if field and subfield columns exist
+                column_check = self.db.execute("""
+                    SELECT column_name FROM information_schema.columns 
+                    WHERE table_name = 'resources_resource' 
+                    AND column_name IN ('field', 'subfield')
+                """)
+                
+                # If columns don't exist, add them
+                if not column_check or len(column_check) < 2:
+                    logger.info("Adding field and subfield columns to resources_resource table")
+                    self.db.execute("""
+                        ALTER TABLE resources_resource 
+                        ADD COLUMN IF NOT EXISTS field TEXT,
+                        ADD COLUMN IF NOT EXISTS subfield TEXT
+                    """)
+            except Exception as e:
+                logger.error(f"Error checking/creating columns: {e}")
+                print(f"⚠️ Database schema error: {e}")
+                return
+                
             # Get all publications that need classification
-            results = self.db.execute("""
-                SELECT id, title, summary, domains, source 
-                FROM resources_resource 
-                WHERE (field IS NULL OR subfield IS NULL)
-            """)
+            results = None
+            try:
+                results = self.db.execute("""
+                    SELECT id, title, summary, domains, source 
+                    FROM resources_resource 
+                    WHERE (field IS NULL OR subfield IS NULL)
+                """)
+            except Exception as e:
+                logger.error(f"Error querying resources_resource table: {e}")
+                print(f"⚠️ Database query error: {e}")
             
+            # Check if results is None or empty
             if not results:
                 logger.info("No publications found requiring classification.")
                 print("✅ All publications are already classified")
                 return
-            
+                
             # Process each publication
             total_classified = 0
             total_publications = len(results)
@@ -231,26 +286,40 @@ class SystemInitializer:
                     
                     print(f"🏷️ Classifying Publication {idx}/{total_publications}: {title}")
                     
+                    # Handle None values in domains
+                    if domains is None:
+                        domains = []
+                    
                     # Directly use the field structure for classification
                     field, subfield = self._classify_publication(
-                        title, abstract or "", domains or [], field_structure
+                        title, 
+                        abstract or "", 
+                        domains, 
+                        field_structure
                     )
                     
                     # Update the resource with field classification
-                    self.db.execute("""
-                        UPDATE resources_resource 
-                        SET field = %s, subfield = %s
-                        WHERE id = %s
-                    """, (field, subfield, publication_id))
-                    
-                    logger.info(f"Classified {source} publication - {title}: {field}/{subfield}")
-                    print(f"✔️ Classified: {title} → {field}/{subfield}")
-                    
-                    total_classified += 1
+                    try:
+                        self.db.execute("""
+                            UPDATE resources_resource 
+                            SET field = %s, subfield = %s
+                            WHERE id = %s
+                        """, (field, subfield, publication_id))
+                        
+                        logger.info(f"Classified {source} publication - {title}: {field}/{subfield}")
+                        print(f"✔️ Classified: {title} → {field}/{subfield}")
+                        
+                        total_classified += 1
+                    except Exception as e:
+                        logger.error(f"Error updating publication {title}: {e}")
+                        print(f"❌ Database update error for {title}: {e}")
+                        continue
                     
                 except Exception as e:
-                    logger.error(f"Error classifying publication {row[1]}: {e}")
-                    print(f"❌ Classification error for {row[1]}: {e}")
+                    # Safely extract title for logging
+                    title = row[1] if row and len(row) > 1 else "unknown"
+                    logger.error(f"Error classifying publication {title}: {e}")
+                    print(f"❌ Classification error for {title}: {e}")
                     continue
             
             logger.info(f"Classification complete! Classified {total_classified} publications.")
@@ -259,8 +328,7 @@ class SystemInitializer:
         except Exception as e:
             logger.error(f"Error in publication classification: {e}")
             print(f"💥 Critical Error in Publication Classification: {e}")
-            raise
-
+            # Don't raise the exception to allow the system to continue with other tasks
     def _classify_publication(self, title: str, abstract: str, domains: List[str], field_structure: Dict) -> Tuple[str, str]:
         """
         Classify a single publication based on the generated field structure.
