@@ -4,12 +4,25 @@ set -e
 # Environment setup
 INIT_MARKER="/app/.initialization_complete/init.done"
 LOG_DIR="/app/logs"
+CACHE_DIR="/app/cache"
+TMP_CACHE_DIR="/tmp/transformers_cache"
+TMP_HF_DIR="/tmp/hf_home"
+
 mkdir -p "$LOG_DIR"
 mkdir -p "/app/.initialization_complete"
+
+# Create and set proper permissions for cache directories
+mkdir -p "$CACHE_DIR" "$TMP_CACHE_DIR" "$TMP_HF_DIR"
+chmod -R 777 "$CACHE_DIR" "$TMP_CACHE_DIR" "$TMP_HF_DIR"
+
+# Override environment variables to use temp directories with proper permissions
+export TRANSFORMERS_CACHE="$TMP_CACHE_DIR"
+export HF_HOME="$TMP_HF_DIR"
 
 # Logging setup
 exec 1> >(tee -a "${LOG_DIR}/init.log") 2>&1
 echo "[$(date)] Starting initialization..."
+echo "[$(date)] Using temporary cache directories with proper permissions"
 
 # Function to wait for service availability
 wait_for_service() {
@@ -53,7 +66,16 @@ run_setup() {
     done
     
     echo "[$(date)] Running setup with args: $setup_args"
-    if python -m setup $setup_args; then
+    
+    # Use Python to create a wrapper that explicitly sets the model cache path
+    if python -c "
+import os, sys
+os.environ['TRANSFORMERS_CACHE'] = '$TMP_CACHE_DIR'
+os.environ['HF_HOME'] = '$TMP_HF_DIR'
+sys.path.insert(0, '/app')
+from ai_services_api.services.setup import init
+sys.exit(0 if init.run() else 1)
+"; then
         return 0
     else
         echo "[$(date)] Setup failed"
