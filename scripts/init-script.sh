@@ -2,10 +2,10 @@
 set -e
 
 # Environment setup
-INIT_MARKER="/code/.initialization_complete/init.done"
-LOG_DIR="/code/logs"
+INIT_MARKER="/app/.initialization_complete/init.done"
+LOG_DIR="/app/logs"
 mkdir -p "$LOG_DIR"
-mkdir -p "/code/.initialization_complete"
+mkdir -p "/app/.initialization_complete"
 
 # Logging setup
 exec 1> >(tee -a "${LOG_DIR}/init.log") 2>&1
