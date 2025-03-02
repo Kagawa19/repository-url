@@ -3,8 +3,6 @@ hosts.ini
 
 
 # Logs
-/cache
-/.model_cache
 # Binary files and executables
 nvim-linux-x86_64/
 
