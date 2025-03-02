@@ -2,14 +2,91 @@
 set -e
 
 # Environment setup
-INIT_MARKER="/code/.initialization_complete/init.done"
-LOG_DIR="/code/logs"
+INIT_MARKER="/app/.initialization_complete/init.done"
+LOG_DIR="/app/logs"
 mkdir -p "$LOG_DIR"
-mkdir -p "/code/.initialization_complete"
+mkdir -p "/app/.initialization_complete"
+
+# Create and set SSL disable script
+mkdir -p /app/patches
+cat > "/app/patches/disable_ssl.py" << 'EOF'
+# disable_ssl.py
+import ssl
+import urllib3
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Create a custom SSL context that doesn't verify certificates
+class CustomHTTPAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        context = create_urllib3_context(ciphers=None)
+        # Don't verify SSL certificates
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        kwargs['ssl_context'] = context
+        return super().init_poolmanager(*args, **kwargs)
+
+# Patch requests to use our custom adapter
+session = requests.Session()
+session.mount('https://', CustomHTTPAdapter())
+
+# Patch the original requests.get function
+original_get = requests.get
+def patched_get(*args, **kwargs):
+    kwargs['verify'] = False
+    return original_get(*args, **kwargs)
+requests.get = patched_get
+
+# Also patch requests.post, requests.put, etc.
+original_post = requests.post
+def patched_post(*args, **kwargs):
+    kwargs['verify'] = False
+    return original_post(*args, **kwargs)
+requests.post = patched_post
+
+# Set this environment variable
+import os
+os.environ['HF_HUB_DISABLE_SSL_VERIFICATION'] = '1'
+
+print("SSL verification disabled for all HTTP requests")
+EOF
+
+# Set environment variables to disable SSL verification
+export HF_HUB_DISABLE_SSL_VERIFICATION=1
+export CURL_CA_BUNDLE=""
+export REQUESTS_CA_BUNDLE=""
+export PYTHONWARNINGS="ignore:Unverified HTTPS request"
+
+# Create cache directories with proper permissions
+mkdir -p /tmp/transformers_cache /app/cache
+chmod -R 777 /tmp/transformers_cache /app/cache
+export TRANSFORMERS_CACHE=/tmp/transformers_cache
+export HF_HOME=/tmp/transformers_cache
+
+# Pre-download SentenceTransformer model
+echo "[$(date)] Pre-downloading SentenceTransformer model..."
+mkdir -p /tmp/transformers_cache/sentence-transformers/all-MiniLM-L6-v2
+cd /tmp/transformers_cache/sentence-transformers/all-MiniLM-L6-v2
+curl -L -o model.safetensors --insecure https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors
+# Also download config.json and other necessary files
+curl -L -o config.json --insecure https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json
+curl -L -o vocab.txt --insecure https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/vocab.txt
+curl -L -o tokenizer_config.json --insecure https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer_config.json
+curl -L -o tokenizer.json --insecure https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json
+curl -L -o special_tokens_map.json --insecure https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/special_tokens_map.json
+curl -L -o modules.json --insecure https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/modules.json
+# Return to app directory
+cd /app
+echo "[$(date)] Model download complete"
 
 # Logging setup
 exec 1> >(tee -a "${LOG_DIR}/init.log") 2>&1
 echo "[$(date)] Starting initialization..."
+echo "[$(date)] SSL verification disabled"
 
 # Function to wait for service availability
 wait_for_service() {
@@ -53,7 +130,15 @@ run_setup() {
     done
     
     echo "[$(date)] Running setup with args: $setup_args"
-    if python -m setup $setup_args; then
+    
+    # Run the SSL patch first, then run the setup
+    if python -c "
+import sys
+sys.path.insert(0, '/app/patches')
+from disable_ssl import *
+from setup import run
+sys.exit(0 if run() else 1)
+" $setup_args; then
         return 0
     else
         echo "[$(date)] Setup failed"
