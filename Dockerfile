@@ -171,3 +171,4 @@ HEALTHCHECK --interval=30s \
 USER 1001:125
 ENV DISPLAY=:99
 
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
