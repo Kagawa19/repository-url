@@ -61,6 +61,21 @@ RUN pip install --index-url https://download.pytorch.org/whl/cpu torch && \
         croniter==2.0.1 \
         cryptography==42.0.0
 
+# Pre-download the SentenceTransformer model
+RUN mkdir -p /app/models/sentence-transformers/all-MiniLM-L6-v2 && \
+    # First try to download using the library with SSL verification disabled
+    (python -c "import os; os.environ['HF_HUB_DISABLE_SSL_VERIFICATION'] = '1'; os.environ['TRANSFORMERS_CACHE'] = '/app/models'; os.environ['HF_HOME'] = '/app/models'; from sentence_transformers import SentenceTransformer; model = SentenceTransformer('all-MiniLM-L6-v2')" || \
+    # If that fails, download files directly
+    (echo "Manual model download as fallback" && \
+    cd /app/models/sentence-transformers/all-MiniLM-L6-v2 && \
+    wget --no-check-certificate -O model.safetensors https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors && \
+    wget --no-check-certificate -O config.json https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json && \
+    wget --no-check-certificate -O tokenizer_config.json https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer_config.json && \
+    wget --no-check-certificate -O tokenizer.json https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json && \
+    wget --no-check-certificate -O special_tokens_map.json https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/special_tokens_map.json && \
+    wget --no-check-certificate -O modules.json https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/modules.json && \
+    wget --no-check-certificate -O vocab.txt https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/vocab.txt))
+
 # Final Stage
 FROM python:3.11-slim
 
@@ -99,6 +114,7 @@ RUN mkdir -p \
     /app/ai_services_api/services/search/models \
     /app/logs \
     /app/cache \
+    /app/models \
     /opt/airflow/logs \
     /opt/airflow/dags \
     /opt/airflow/plugins \
@@ -108,6 +124,7 @@ RUN mkdir -p \
     # Enhanced permissions for FAISS index directory
     chmod -R 777 /app/ai_services_api/services/search/models && \
     chmod -R 777 /app/ai_services_api/services/search && \
+    chmod -R 777 /app/models && \
     # General permissions for other directories
     chown -R 1001:125 /app /opt/airflow && \
     chmod -R 775 /app /opt/airflow
@@ -118,19 +135,23 @@ WORKDIR /app
 # Copy Dependencies
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
+COPY --from=builder /app/models /app/models
 
 # Application Files with updated permissions
 COPY --chown=1001:125 . .
 RUN chmod +x /app/scripts/init-script.sh && \
     # Ensure FAISS directory permissions persist after copy
-    chmod -R 777 /app/ai_services_api/services/search/models
+    chmod -R 777 /app/ai_services_api/services/search/models && \
+    chmod -R 777 /app/models
 
 # Set Chrome flags
 ENV CHROME_FLAGS="--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --disable-crashpad --disable-crash-reporter --no-first-run --test-type --disable-software-rasterizer --disable-default-apps --disable-setuid-sandbox --remote-debugging-port=9222"
 
 # Environment Variables
-ENV TRANSFORMERS_CACHE=/app/cache \
-    HF_HOME=/app/cache \
+ENV TRANSFORMERS_CACHE=/app/models \
+    HF_HOME=/app/models \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_DATASETS_OFFLINE=1 \
     AIRFLOW_HOME=/opt/airflow \
     PYTHONPATH=/app \
     TESTING=false \
@@ -150,6 +171,3 @@ HEALTHCHECK --interval=30s \
 USER 1001:125
 ENV DISPLAY=:99
 
-
-# Default Command
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
