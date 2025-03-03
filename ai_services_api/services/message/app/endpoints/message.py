@@ -89,7 +89,7 @@ async def process_message_draft(
         # Configure Gemini
         settings = get_settings()
         genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('gemini-1.5-pro-latest')
         logger.debug("Gemini model configured successfully")
         
         prompt = f"""
