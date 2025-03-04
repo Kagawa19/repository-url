@@ -41,7 +41,8 @@ RUN apt-get update && apt-get install -y \
 # Poetry Installation
 RUN pip install --upgrade pip && \
     pip install poetry && \
-    poetry config virtualenvs.create false
+    poetry config virtualenvs.create false && \
+    pip install boto3
 
 # Project Dependencies
 COPY pyproject.toml poetry.lock ./
