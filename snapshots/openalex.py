@@ -8,7 +8,6 @@ import pandas as pd
 from io import BytesIO, StringIO
 import time
 import concurrent.futures
-import boto3
 
 # Database connection settings (customize as needed)
 DB_PARAMS = {
