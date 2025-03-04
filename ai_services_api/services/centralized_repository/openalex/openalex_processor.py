@@ -293,75 +293,89 @@ class OpenAlexProcessor:
         return []
 
     async def process_publications(self, pub_processor: PublicationProcessor, source: str = 'openalex'):
-        """Process publications for experts with ORCID."""
-        try:
-            experts = self.db.execute("""
-                SELECT id, first_name, last_name, orcid
-                FROM experts_expert
-                WHERE orcid IS NOT NULL AND orcid != '' 
-                AND first_name <> 'Unknown' AND last_name <> 'Unknown'
-            """)
+    """Process publications for experts with ORCID."""
+    try:
+        experts = self.db.execute("""
+            SELECT id, first_name, last_name, orcid
+            FROM experts_expert
+            WHERE orcid IS NOT NULL AND orcid != ''
+             AND first_name <> 'Unknown' AND last_name <> 'Unknown'
+        """)
+        
+        if not experts:
+            logger.info("No experts found with ORCID")
+            return
             
-            if not experts:
-                logger.info("No experts found with ORCID")
-                return
+        publication_count = 0
+        TARGET_PUBLICATIONS = 1200
             
-            publication_count = 0
-            TARGET_PUBLICATIONS = 10
-            
-            async with aiohttp.ClientSession() as session:
-                for expert_id, first_name, last_name, orcid in experts:
-                    if publication_count >= TARGET_PUBLICATIONS:
-                        break
-
-                    try:
-                        fetched_works = await self._fetch_expert_publications(
-                            session, orcid,
-                            per_page=min(5, TARGET_PUBLICATIONS - publication_count)
-                        )
-
-                        for work in fetched_works:
-                            if publication_count >= TARGET_PUBLICATIONS:
-                                break
-
-                            try:
-                                # Extract DOI or URL for the work
-                                doi = work.get('doi')
-                                urls = work.get('alternate_host_venues', [])
-                                primary_url = None
-                                if urls:
-                                    # Try to get URL from the first alternate host venue
-                                    primary_url = urls[0].get('url')
-                                if not primary_url:
-                                    # Fallback to OpenAlex URL
-                                    primary_url = work.get('id', '').replace('https://openalex.org/', 'https://explore.openalex.org/')
-
-                                # Store either DOI or URL in the doi field
-                                work['doi'] = doi if doi else primary_url
-
-                                self.db.execute("BEGIN")
-                                processed = pub_processor.process_single_work(work, source=source)
-                                
-                                if processed:
-                                    publication_count += 1
-                                    self.db.execute("COMMIT")
-                                    logger.info(f"Processed publication {publication_count}/{TARGET_PUBLICATIONS}")
-                                else:
-                                    self.db.execute("ROLLBACK")
-                                
-                            except Exception as e:
-                                self.db.execute("ROLLBACK")
-                                logger.error(f"Error processing publication: {e}")
-                                continue
-
-                    except Exception as e:
-                        logger.error(f"Error processing expert {first_name} {last_name}: {e}")
-                        continue
-
-            logger.info("Publications processing completed")
+        async with aiohttp.ClientSession() as session:
+            for expert_id, first_name, last_name, orcid in experts:
+                if publication_count >= TARGET_PUBLICATIONS:
+                    break
                 
-        except Exception as e:
-            logger.error(f"Error processing publications: {e}")
+                try:
+                    fetched_works = await self._fetch_expert_publications(
+                        session, orcid,
+                        per_page=min(5, TARGET_PUBLICATIONS - publication_count)
+                    )
+                    
+                    for work in fetched_works:
+                        if publication_count >= TARGET_PUBLICATIONS:
+                            break
+                            
+                        try:
+                            # Extract DOI or URL for the work
+                            doi = work.get('doi')
+                            urls = work.get('alternate_host_venues', [])
+                            primary_url = None
+                            if urls:
+                                primary_url = urls[0].get('url')
+                            if not primary_url:
+                                primary_url = work.get('id', '').replace('https://openalex.org/', 'https://explore.openalex.org/')
+                                
+                            # Store either DOI or URL in the doi field
+                            work['doi'] = doi if doi else primary_url
+                                
+                            self.db.execute("BEGIN")
+                            # Process the work and get the resource_id
+                            resource_id = self.db.add_publication(
+                                title=work.get('title', ''),
+                                doi=work['doi'],
+                                summary=work.get('abstract', '')[:500],
+                                source=source,
+                                type='publications',
+                                authors=work.get('authors', []),
+                                domains=work.get('domains', []),
+                                publication_year=work.get('publication_year')
+                            )
+                            
+                            if resource_id:
+                                # Link the expert with the resource using expert_resource_links
+                                self.db.execute("""
+                                    INSERT INTO expert_resource_links 
+                                    (expert_id, resource_id, author_position, confidence_score)
+                                    VALUES (%s, %s, %s, %s)
+                                    ON CONFLICT (expert_id, resource_id) DO NOTHING
+                                """, (expert_id, resource_id, 1, 1.0))
+                                
+                                publication_count += 1
+                                self.db.execute("COMMIT")
+                                logger.info(f"Processed publication {publication_count}/{TARGET_PUBLICATIONS}")
+                            else:
+                                self.db.execute("ROLLBACK")
+                        except Exception as e:
+                            self.db.execute("ROLLBACK")
+                            logger.error(f"Error processing publication: {e}")
+                            continue
+                except Exception as e:
+                    logger.error(f"Error processing expert {first_name} {last_name}: {e}")
+                    continue
+        
+        logger.info("Publications processing completed")
+                
+    except Exception as e:
+        logger.error(f"Error processing publications: {e}")
     async def _fetch_expert_publications(self, session: aiohttp.ClientSession, orcid: str,
                                    per_page: int = 5) -> List[Dict[str, Any]]:
         """Fetch publications for an expert."""

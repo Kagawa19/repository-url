@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from utils.theme import toggle_theme
 import streamlit as st
+
 def create_sidebar_filters():
     """
     Create an enhanced sidebar with interactive navigation buttons and dynamic filters.
@@ -32,9 +33,7 @@ def create_sidebar_filters():
         ("🔍 Search", "Search"),
         ("👥 Expert", "Expert"),
         ("📚 Content", "Content"),
-        ("📈 Usage", "Usage"),
-        ("📈 Adaptive", "Adaptive"),
-        ("🔧 Resources", "Resources")  # Added Resources option
+        ("🔧 Resources", "Resources")
     ]
     
     # Create navigation buttons in rows of 2
@@ -138,19 +137,6 @@ def create_sidebar_filters():
             min_value=0,
             value=10
         )
-        
-    elif st.session_state.selected_analytics == "Usage":
-        filters['user_type'] = st.sidebar.multiselect(
-            "User Types",
-            ["Researchers", "Students", "Staff", "External"],
-            default=["Researchers"]
-        )
-        filters['activity_type'] = st.sidebar.multiselect(
-            "Activity Types",
-            ["Searches", "Downloads", "Expert Consultations", "Chat Interactions"],
-            default=["Searches", "Downloads"]
-        )
-        filters['show_conversion'] = st.sidebar.checkbox("Show Conversion Metrics")
     
     # Add Resources-specific filters
     elif st.session_state.selected_analytics == "Resources":
