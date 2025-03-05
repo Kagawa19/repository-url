@@ -4,11 +4,14 @@ from airflow.utils.dates import days_ago
 from datetime import timedelta
 import os
 import logging
+import psycopg2
 from contextlib import contextmanager
 from urllib.parse import urlparse
-import psycopg2
 
-# Database connection utilities - based on your schema
+# Configure logging
+logger = logging.getLogger(__name__)
+
+# Database connection utilities
 def get_db_connection_params():
     """Get database connection parameters from environment variables."""
     database_url = os.getenv('DATABASE_URL')
@@ -22,14 +25,15 @@ def get_db_connection_params():
             'password': parsed_url.password
         }
     
-    in_docker = os.getenv('DOCKER_ENV', 'false').lower() == 'true'
+    # In Docker Compose, always use service name
     return {
-        'host': '167.86.85.127' if in_docker else 'localhost',
-        'port': '5432',
+        'host': os.getenv('POSTGRES_HOST', 'postgres'),  # Always use service name in Docker
+        'port': os.getenv('POSTGRES_PORT', '5432'),
         'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
         'user': os.getenv('POSTGRES_USER', 'postgres'),
         'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres')
     }
+
 
 @contextmanager
 def get_db_connection(dbname=None):
@@ -41,15 +45,15 @@ def get_db_connection(dbname=None):
     conn = None
     try:
         conn = psycopg2.connect(**params)
-        logging.info(f"Connected to database: {params['dbname']} at {params['host']}")
+        logger.info(f"Connected to database: {params['dbname']} at {params['host']}")
         yield conn
     except psycopg2.OperationalError as e:
-        logging.error(f"Database connection error: {e}")
+        logger.error(f"Database connection error: {e}")
         raise
     finally:
         if conn is not None:
             conn.close()
-            logging.info("Database connection closed")
+            logger.info("Database connection closed")
 
 @contextmanager
 def get_db_cursor(autocommit=False):
@@ -62,32 +66,28 @@ def get_db_cursor(autocommit=False):
         except Exception as e:
             if not autocommit:
                 conn.rollback()
-                logging.error(f"Transaction rolled back due to error: {e}")
+                logger.error(f"Transaction rolled back due to error: {e}")
             raise
         finally:
             cur.close()
 
-# Import graph initializer
-from ai_services_api.services.recommendation.graph_initializer import GraphDatabaseInitializer
+# Lazy import for graph initializer to reduce initial load time
 
-# Configure logging
-def setup_logging():
-    """Configure logging settings."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    return logging.getLogger(__name__)
 
 # Load environment variables
 def load_environment_variables():
     """Load environment variables needed for processing."""
-    # You can add specific environment variable loading logic here if needed
-    logging.info("Environment variables loaded successfully")
+    logger.info("Environment variables loaded successfully")
 
-# Configure logging
-logger = setup_logging()
+# Lazy import for graph initializer to reduce initial load time
+def lazy_import(module_path, class_name):
+    """Import a class only when needed."""
+    try:
+        module = __import__(module_path, fromlist=[class_name])
+        return getattr(module, class_name)
+    except (ImportError, AttributeError) as e:
+        logger.error(f"Failed to import {class_name} from {module_path}: {e}")
+        raise
 
 def initialize_graph_task():
     """
@@ -95,9 +95,13 @@ def initialize_graph_task():
     """
     load_environment_variables()
     
+    # Import the GraphDatabaseInitializer class
     try:
-        # Initialize graph database with custom connection method
-        graph_initializer = GraphDatabaseInitializer(db_connection_method=get_db_connection)
+        # Get the class (not an instance yet)
+        GraphDatabaseInitializerClass = lazy_import(
+            'ai_services_api.services.recommendation.graph_initializer', 
+            'GraphDatabaseInitializer'
+        )
         
         # Verify database connectivity before proceeding
         with get_db_cursor() as (cur, conn):
@@ -131,26 +135,36 @@ def initialize_graph_task():
         
         # Proceed with graph initialization
         logger.info("Starting graph database initialization...")
+        
+        # Create an instance of GraphDatabaseInitializer
+        graph_initializer = GraphDatabaseInitializerClass()
+        
+        # Call initialize_graph on the instance
         graph_success = graph_initializer.initialize_graph()
         
         if not graph_success:
             logger.error("Graph initialization failed")
             raise Exception("Graph initialization failed")
         
-        # Verify graph initialization
-        if not graph_initializer.verify_graph():
-            logger.warning("Graph verification failed. Graph may be incomplete.")
-        
+        # Skip verification since the method doesn't exist
+        # Instead, just log that initialization completed
         logger.info("Graph initialization complete!")
         
+    except ImportError as e:
+        logger.error(f"Failed to import required module: {e}")
+        raise
     except Exception as e:
         logger.error(f"Graph initialization failed: {e}")
         raise
     finally:
-        # Ensure resources are properly cleaned up
-        if 'graph_initializer' in locals():
-            graph_initializer.close()
+        # Only try to close the initializer if it was successfully created
+        if 'graph_initializer' in locals() and graph_initializer is not None:
+            try:
+                graph_initializer.close()
+            except Exception as e:
+                logger.error(f"Error closing graph initializer: {e}")
 
+# DAG configuration
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
@@ -169,7 +183,8 @@ dag = DAG(
     catchup=False
 )
 
-initialize_graph_task = PythonOperator(
+# Define task
+initialize_graph_task_operator = PythonOperator(
     task_id='initialize_graph_database',
     python_callable=initialize_graph_task,
     dag=dag
