@@ -2,7 +2,17 @@ from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
 from airflow.utils.dates import days_ago
 from datetime import timedelta
-from airflow_utils import setup_logging, load_environment_variables
+import os
+import logging
+import json
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # Import necessary processors
 from ai_services_api.services.centralized_repository.openalex.openalex_processor import OpenAlexProcessor
@@ -13,54 +23,90 @@ from ai_services_api.services.centralized_repository.knowhub.knowhub_scraper imp
 from ai_services_api.services.centralized_repository.website.website_scraper import WebsiteScraper
 from ai_services_api.services.centralized_repository.nexus.researchnexus_scraper import ResearchNexusScraper
 
-# Configure logging
-logger = setup_logging()
+def setup_logging():
+    """Configure logging settings."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    return logging.getLogger(__name__)
+
+def load_environment_variables():
+    """Load environment variables needed for processing."""
+    logger.info("Environment variables loaded successfully")
 
 def process_publications_task():
-    """
-    Process publications from all sources without classification
-    """
+    """Process publications from all sources."""
     load_environment_variables()
     
     try:
         # Initialize processors
         openalex_processor = OpenAlexProcessor()
-        publication_processor = PublicationProcessor(openalex_processor.db, TextSummarizer())
+        text_summarizer = TextSummarizer()
+        publication_processor = PublicationProcessor(openalex_processor.db, text_summarizer)
         
         # Process experts' fields
+        logger.info("Updating experts with OpenAlex data...")
         openalex_processor.update_experts_with_openalex()
         logger.info("Expert data enrichment complete!")
         
-        # Process OpenAlex publications
-        openalex_processor.process_publications(publication_processor, source='openalex')
+        # Process publications from different sources
+        sources = [
+            {
+                'name': 'openalex', 
+                'processor': openalex_processor,
+                'method': openalex_processor.process_publications
+            },
+            {
+                'name': 'orcid', 
+                'processor': OrcidProcessor(),
+                'method': OrcidProcessor().process_publications
+            },
+            {
+                'name': 'knowhub', 
+                'processor': KnowhubScraper(summarizer=text_summarizer),
+                'method': lambda: KnowhubScraper(text_summarizer).fetch_all_content(limit=2)
+            },
+            {
+                'name': 'researchnexus', 
+                'processor': ResearchNexusScraper(summarizer=text_summarizer),
+                'method': lambda: ResearchNexusScraper(text_summarizer).fetch_content(limit=2)
+            },
+            {
+                'name': 'website', 
+                'processor': WebsiteScraper(summarizer=text_summarizer),
+                'method': lambda: WebsiteScraper(text_summarizer).fetch_content(limit=2)
+            }
+        ]
         
-        # Process ORCID publications
-        orcid_processor = OrcidProcessor()
-        orcid_processor.process_publications(publication_processor, source='orcid')
-        orcid_processor.close()
-        
-        # Process KnowHub content
-        knowhub_scraper = KnowhubScraper(summarizer=TextSummarizer())
-        all_content = knowhub_scraper.fetch_all_content(limit=2)
-        
-        for content_type, items in all_content.items():
-            if items:
-                for item in items:
-                    publication_processor.process_single_work(item, source='knowhub')
-        
-        # Process ResearchNexus publications
-        research_nexus_scraper = ResearchNexusScraper(summarizer=TextSummarizer())
-        research_nexus_publications = research_nexus_scraper.fetch_content(limit=2)
-        
-        for pub in research_nexus_publications:
-            publication_processor.process_single_work(pub, source='researchnexus')
-        
-        # Process Website publications
-        website_scraper = WebsiteScraper(summarizer=TextSummarizer())
-        website_publications = website_scraper.fetch_content(limit=2)
-        
-        for pub in website_publications:
-            publication_processor.process_single_work(pub, source='website')
+        # Process each source
+        for source_config in sources:
+            try:
+                logger.info(f"Processing publications from {source_config['name']} source")
+                
+                # Different sources have slightly different processing methods
+                if source_config['name'] in ['knowhub', 'researchnexus', 'website']:
+                    content = source_config['method']()
+                    
+                    # For sources that return multiple content types or items
+                    if isinstance(content, dict):
+                        for content_type, items in content.items():
+                            for item in items:
+                                publication_processor.process_single_work(item, source=source_config['name'])
+                    elif isinstance(content, list):
+                        for item in content:
+                            publication_processor.process_single_work(item, source=source_config['name'])
+                else:
+                    # For processors like OpenAlex and ORCID
+                    source_config['method'](publication_processor, source=source_config['name'])
+                
+                logger.info(f"Completed processing publications from {source_config['name']} source")
+            
+            except Exception as source_error:
+                logger.error(f"Error processing publications from {source_config['name']} source: {source_error}")
+                # Continue with other sources even if one fails
+                continue
         
         logger.info("Publication processing complete!")
         
@@ -68,18 +114,13 @@ def process_publications_task():
         logger.error(f"Publication processing failed: {e}")
         raise
     finally:
-        # Close processors
+        # Ensure all processors are closed
         if 'openalex_processor' in locals():
             openalex_processor.close()
-        if 'orcid_processor' in locals():
-            orcid_processor.close()
-        if 'knowhub_scraper' in locals():
-            knowhub_scraper.close()
-        if 'research_nexus_scraper' in locals():
-            research_nexus_scraper.close()
-        if 'website_scraper' in locals():
-            website_scraper.close()
+        if 'publication_processor' in locals():
+            publication_processor.close()
 
+# DAG definition
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
@@ -98,7 +139,7 @@ dag = DAG(
     catchup=False
 )
 
-process_publications_task = PythonOperator(
+process_publications_operator = PythonOperator(
     task_id='process_publications',
     python_callable=process_publications_task,
     dag=dag

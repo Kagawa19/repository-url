@@ -1,11 +1,9 @@
 from analytics.chat_analytics import get_chat_metrics, display_chat_analytics
-from analytics.adaptive_analytics import get_adaptive_metrics, display_adaptive_analytics
 from analytics.search_analytics import get_search_metrics, display_search_analytics
 from analytics.expert_analytics import get_expert_metrics, display_expert_analytics
 from analytics.overview_analytics import get_overview_metrics, display_overview_analytics
 from analytics.resource_analytics import get_resource_metrics, display_resource_analytics
 from analytics.content_analytics import get_content_metrics, display_content_analytics
-from analytics.usage_analytics import get_usage_metrics, display_usage_analytics
 from components.sidebar import create_sidebar_filters
 from utils.db_utils import DatabaseConnector
 from utils.logger import setup_logger
@@ -13,6 +11,7 @@ from utils.theme import toggle_theme, apply_theme, update_plot_theme
 from datetime import datetime, date
 import logging
 import streamlit as st
+
 class UnifiedAnalyticsDashboard:
     """
     Main dashboard class that integrates all analytics components and manages the application state.
@@ -84,9 +83,7 @@ class UnifiedAnalyticsDashboard:
             "Search": (get_search_metrics, display_search_analytics),
             "Expert": (get_expert_metrics, display_expert_analytics),
             "Content": (get_content_metrics, display_content_analytics),
-            "Usage": (get_usage_metrics, display_usage_analytics),
-            "Adaptive": (get_adaptive_metrics, display_adaptive_analytics),
-            "Resources": (get_resource_metrics, display_resource_analytics),  # Changed to singular
+            "Resources": (get_resource_metrics, display_resource_analytics),
         }
         
         if analytics_type in analytics_map:
@@ -130,6 +127,7 @@ class UnifiedAnalyticsDashboard:
             """,
             unsafe_allow_html=True
         )
+
     def display_overall_metrics(self, start_date, end_date):
         """Display overall platform metrics."""
         col1, col2, col3, col4 = st.columns(4)
