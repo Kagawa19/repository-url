@@ -20,6 +20,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Database connection utilities - based on your schema
+
 def get_db_connection_params():
     """Get database connection parameters from environment variables."""
     database_url = os.getenv('DATABASE_URL')
@@ -33,19 +34,23 @@ def get_db_connection_params():
             'password': parsed_url.password
         }
     
-    in_docker = os.getenv('DOCKER_ENV', 'false').lower() == 'true'
+    # In Docker Compose, always use service name
     return {
-        'host': '167.86.85.127' if in_docker else 'localhost',
-        'port': '5432',
+        'host': os.getenv('POSTGRES_HOST', 'postgres'),  # Always use service name in Docker
+        'port': os.getenv('POSTGRES_PORT', '5432'),
         'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
         'user': os.getenv('POSTGRES_USER', 'postgres'),
         'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres')
     }
 
+
 @contextmanager
-def get_db_connection():
+def get_db_connection(dbname=None):
     """Get database connection with proper error handling and connection cleanup."""
     params = get_db_connection_params()
+    if dbname:
+        params['dbname'] = dbname
+    
     conn = None
     try:
         conn = psycopg2.connect(**params)
@@ -85,123 +90,44 @@ def get_table_columns(conn, table_name: str) -> List[str]:
     finally:
         cursor.close()
 
-def ensure_required_tables(conn):
-    """Ensure required tables exist, creating them if necessary."""
-    cursor = conn.cursor()
-    try:
-        # Check and create interactions table if needed
-        if not check_table_exists(conn, 'interactions'):
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS interactions (
-                    id SERIAL PRIMARY KEY,
-                    session_id VARCHAR(255) NOT NULL,
-                    user_id VARCHAR(255) NOT NULL,
-                    query TEXT NOT NULL,
-                    response TEXT NOT NULL,
-                    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    metrics JSONB,
-                    response_time FLOAT,
-                    sentiment_score FLOAT,
-                    error_occurred BOOLEAN DEFAULT FALSE
-                )
-            """)
-            conn.commit()
-            logger.info("Created interactions table")
-        
-        # Check and create response_quality_metrics table if needed
-        if not check_table_exists(conn, 'response_quality_metrics'):
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS response_quality_metrics (
-                    id SERIAL PRIMARY KEY,
-                    interaction_id INTEGER NOT NULL,
-                    helpfulness_score FLOAT,
-                    hallucination_risk FLOAT,
-                    factual_grounding_score FLOAT,
-                    evaluation_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    metadata JSONB
-                )
-            """)
-            conn.commit()
-            logger.info("Created response_quality_metrics table")
-        
-        # Check and create expert_matching_logs table if needed
-        if not check_table_exists(conn, 'expert_matching_logs'):
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS expert_matching_logs (
-                    id SERIAL PRIMARY KEY,
-                    expert_id VARCHAR(255) NOT NULL,
-                    matched_expert_id VARCHAR(255) NOT NULL,
-                    similarity_score FLOAT,
-                    shared_domains TEXT[],
-                    shared_fields INTEGER,
-                    shared_skills INTEGER,
-                    successful BOOLEAN DEFAULT TRUE,
-                    user_id VARCHAR(255),
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            conn.commit()
-            logger.info("Created expert_matching_logs table")
-        
-        # Check and create expert_messages table if needed
-        if not check_table_exists(conn, 'expert_messages'):
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS expert_messages (
-                    id SERIAL PRIMARY KEY,
-                    sender_id INTEGER NOT NULL,
-                    receiver_id INTEGER NOT NULL,
-                    content TEXT NOT NULL,
-                    draft BOOLEAN DEFAULT TRUE,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP WITH TIME ZONE
-                )
-            """)
-            conn.commit()
-            logger.info("Created expert_messages table")
-        
-    except Exception as e:
-        logger.error(f"Error ensuring required tables: {e}")
-        conn.rollback()
-    finally:
-        cursor.close()
-
 def get_overview_metrics(conn, start_date, end_date):
     """Get overview metrics with dynamic table detection and query building"""
     cursor = conn.cursor()
     try:
         # Check which tables exist
-        interactions_exists = check_table_exists(conn, 'interactions')
+        chat_sessions_exists = check_table_exists(conn, 'chat_sessions')
         chatbot_logs_exists = check_table_exists(conn, 'chatbot_logs')
         response_quality_exists = check_table_exists(conn, 'response_quality_metrics')
-        expert_matching_exists = check_table_exists(conn, 'expert_matching_logs')
+        expert_search_matches_exists = check_table_exists(conn, 'expert_search_matches')
         expert_messages_exists = check_table_exists(conn, 'expert_messages')
+        search_sessions_exists = check_table_exists(conn, 'search_sessions')
+        search_analytics_exists = check_table_exists(conn, 'search_analytics')
         
-        # Get columns for interactions table if it exists
-        interactions_columns = []
-        if interactions_exists:
-            interactions_columns = get_table_columns(conn, 'interactions')
+        # Get columns for tables if they exist
+        chatbot_logs_columns = []
+        if chatbot_logs_exists:
+            chatbot_logs_columns = get_table_columns(conn, 'chatbot_logs')
         
         # Build query components based on available tables
         cte_parts = []
         aliases = []
         join_tables = []
         select_columns = ["COALESCE({}) as date".format(
-            ", ".join([f"{alias}.date" for alias in ['InteractionMetrics', 'QualityMetrics', 'ExpertMetrics', 'MessageMetrics'] 
-                      if alias in ['InteractionMetrics'] or 
+            ", ".join([f"{alias}.date" for alias in ['ChatMetrics', 'QualityMetrics', 'ExpertMetrics', 'MessageMetrics', 'SearchMetrics'] 
+                      if (alias == 'ChatMetrics' and chatbot_logs_exists) or
                       (alias == 'QualityMetrics' and chatbot_logs_exists and response_quality_exists) or
-                      (alias == 'ExpertMetrics' and expert_matching_exists) or
-                      (alias == 'MessageMetrics' and expert_messages_exists)])
+                      (alias == 'ExpertMetrics' and expert_search_matches_exists) or
+                      (alias == 'MessageMetrics' and expert_messages_exists) or
+                      (alias == 'SearchMetrics' and search_analytics_exists)])
         )]
         
-        # InteractionMetrics CTE
-        if interactions_exists:
-            metrics_json_fields = 'metrics' in interactions_columns
-            response_time_field = 'response_time' in interactions_columns
-            error_field = 'error_occurred' in interactions_columns
+        # ChatMetrics CTE (using chatbot_logs instead of interactions)
+        if chatbot_logs_exists:
+            response_time_field = 'response_time' in chatbot_logs_columns
             
             # Build the CTE based on available columns
-            interaction_cte = """
-                InteractionMetrics AS (
+            chat_cte = """
+                ChatMetrics AS (
                     SELECT 
                         DATE(timestamp) as date,
                         COUNT(*) as total_interactions,
@@ -210,48 +136,33 @@ def get_overview_metrics(conn, start_date, end_date):
             
             # Add response_time calculation based on available columns
             if response_time_field:
-                interaction_cte += "AVG(response_time) as avg_response_time,"
-            elif metrics_json_fields:
-                interaction_cte += "AVG(CAST(metrics->>'response_time' AS FLOAT)) as avg_response_time,"
+                chat_cte += "AVG(response_time) as avg_response_time,"
             else:
-                interaction_cte += "0.0 as avg_response_time,"
+                chat_cte += "0.0 as avg_response_time,"
             
-            # Add error_rate calculation based on available columns
-            if error_field:
-                interaction_cte += """
-                        COUNT(CASE WHEN error_occurred THEN 1 END)::FLOAT / 
-                            NULLIF(COUNT(*), 0) * 100 as error_rate,
-                """
-            elif metrics_json_fields:
-                interaction_cte += """
-                        COUNT(CASE WHEN CAST(metrics->>'error_occurred' AS BOOLEAN) THEN 1 END)::FLOAT / 
-                            NULLIF(COUNT(*), 0) * 100 as error_rate,
-                """
-            else:
-                interaction_cte += "0.0 as error_rate,"
-            
-            # Add placeholder for join
-            interaction_cte += """
-                        0.0 as placeholder_score
-                    FROM interactions
-                    WHERE timestamp BETWEEN %s AND %s
-                    GROUP BY DATE(timestamp)
-                )
+            # Add error_rate placeholder - we don't have error_occurred in chatbot_logs
+            # but we can add it as a placeholder
+            chat_cte += """
+                    0.0 as error_rate
+                FROM chatbot_logs
+                WHERE timestamp BETWEEN %s AND %s
+                GROUP BY DATE(timestamp)
+            )
             """
             
-            cte_parts.append(interaction_cte)
-            aliases.append('InteractionMetrics')
-            join_tables.append('InteractionMetrics')
+            cte_parts.append(chat_cte)
+            aliases.append('ChatMetrics')
+            join_tables.append('ChatMetrics')
             
-            # Add interaction columns to select
+            # Add chat metrics columns to select
             select_columns.extend([
-                "InteractionMetrics.total_interactions",
-                "InteractionMetrics.unique_users",
-                "InteractionMetrics.avg_response_time",
-                "InteractionMetrics.error_rate"
+                "ChatMetrics.total_interactions",
+                "ChatMetrics.unique_users",
+                "ChatMetrics.avg_response_time",
+                "ChatMetrics.error_rate"
             ])
         else:
-            # If interactions table doesn't exist, add default values
+            # If chatbot_logs table doesn't exist, add default values
             select_columns.extend([
                 "0 as total_interactions",
                 "0 as unique_users",
@@ -318,19 +229,19 @@ def get_overview_metrics(conn, start_date, end_date):
                 "0.0 as avg_factual_grounding"
             ])
         
-        # ExpertMetrics CTE
-        if expert_matching_exists:
+        # ExpertMetrics CTE (using expert_search_matches instead of expert_matching_logs)
+        if expert_search_matches_exists:
             expert_cte = """
                 ExpertMetrics AS (
                     SELECT 
-                        DATE(created_at) as date,
+                        DATE(timestamp) as date,
                         COUNT(*) as expert_matches,
                         AVG(similarity_score) as avg_similarity,
-                        COUNT(CASE WHEN successful THEN 1 END)::FLOAT / 
+                        COUNT(CASE WHEN clicked THEN 1 END)::FLOAT / 
                             NULLIF(COUNT(*), 0) * 100 as success_rate
-                    FROM expert_matching_logs
-                    WHERE created_at BETWEEN %s AND %s
-                    GROUP BY DATE(created_at)
+                    FROM expert_search_matches
+                    WHERE timestamp BETWEEN %s AND %s
+                    GROUP BY DATE(timestamp)
                 )
             """
             
@@ -345,7 +256,7 @@ def get_overview_metrics(conn, start_date, end_date):
                 "COALESCE(ExpertMetrics.success_rate, 0.0) as success_rate"
             ])
         else:
-            # If expert matching table doesn't exist, add default values
+            # If expert matches table doesn't exist, add default values
             select_columns.extend([
                 "0 as expert_matches",
                 "0.0 as avg_similarity",
@@ -381,6 +292,43 @@ def get_overview_metrics(conn, start_date, end_date):
                 "0 as total_messages",
                 "0 as draft_messages"
             ])
+
+        # SearchMetrics CTE
+        if search_analytics_exists:
+            search_cte = """
+                SearchMetrics AS (
+                    SELECT 
+                        DATE(timestamp) as date,
+                        COUNT(*) as total_searches,
+                        COUNT(DISTINCT user_id) as unique_searchers,
+                        AVG(response_time) as avg_search_time,
+                        SUM(CASE WHEN result_count > 0 THEN 1 ELSE 0 END)::FLOAT / 
+                            NULLIF(COUNT(*), 0) * 100 as search_success_rate
+                    FROM search_analytics
+                    WHERE timestamp BETWEEN %s AND %s
+                    GROUP BY DATE(timestamp)
+                )
+            """
+            
+            cte_parts.append(search_cte)
+            aliases.append('SearchMetrics')
+            join_tables.append('SearchMetrics')
+            
+            # Add search metrics to select
+            select_columns.extend([
+                "COALESCE(SearchMetrics.total_searches, 0) as total_searches",
+                "COALESCE(SearchMetrics.unique_searchers, 0) as unique_searchers",
+                "COALESCE(SearchMetrics.avg_search_time, 0.0) as avg_search_time",
+                "COALESCE(SearchMetrics.search_success_rate, 0.0) as search_success_rate"
+            ])
+        else:
+            # If search analytics table doesn't exist, add default values
+            select_columns.extend([
+                "0 as total_searches",
+                "0 as unique_searchers",
+                "0.0 as avg_search_time",
+                "0.0 as search_success_rate"
+            ])
         
         # Build the full query
         if not cte_parts:
@@ -390,7 +338,8 @@ def get_overview_metrics(conn, start_date, end_date):
                       'error_rate', 'avg_quality_score', 'avg_helpfulness', 
                       'avg_hallucination_risk', 'avg_factual_grounding',
                       'expert_matches', 'avg_similarity', 'success_rate',
-                      'total_messages', 'draft_messages']
+                      'total_messages', 'draft_messages',
+                      'total_searches', 'unique_searchers', 'avg_search_time', 'search_success_rate']
             return pd.DataFrame(columns=columns)
         
         # Build the WITH clause
@@ -454,7 +403,8 @@ def get_overview_metrics(conn, start_date, end_date):
                   'error_rate', 'avg_quality_score', 'avg_helpfulness', 
                   'avg_hallucination_risk', 'avg_factual_grounding',
                   'expert_matches', 'avg_similarity', 'success_rate',
-                  'total_messages', 'draft_messages']
+                  'total_messages', 'draft_messages',
+                  'total_searches', 'unique_searchers', 'avg_search_time', 'search_success_rate']
         return pd.DataFrame(columns=columns)
     finally:
         cursor.close()
@@ -469,214 +419,532 @@ def display_overview_analytics(metrics_df, filters):
     # Fill NaN values with zeros for calculations
     metrics_df_filled = metrics_df.fillna(0)
     
-    # Calculate key metrics
+    # Calculate key metrics (now including search metrics)
     total_interactions = metrics_df_filled['total_interactions'].sum()
     total_messages = metrics_df_filled['total_messages'].sum()
+    total_searches = metrics_df_filled.get('total_searches', pd.Series([0])).sum()
     success_rate = metrics_df_filled['success_rate'].mean()
     avg_quality = metrics_df_filled['avg_quality_score'].mean()
+    search_success_rate = metrics_df_filled.get('search_success_rate', pd.Series([0])).mean()
 
-    # Display key metrics
-    col1, col2, col3, col4 = st.columns(4)
+    # Display key metrics in a more attractive layout
+    st.markdown("### Key Performance Indicators")
+    
+    # Use a clean card layout for KPIs
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Total Interactions", f"{total_interactions:,}")
+        st.markdown(
+            f"""
+            <div style="background-color:#f0f2f6;padding:20px;border-radius:10px;text-align:center;margin:5px;">
+                <h4 style="margin:0;padding:0;color:#31333F;">Interactions</h4>
+                <h2 style="margin:0;padding:10px 0;color:#1f77b4;font-size:28px;">{total_interactions:,}</h2>
+                <p style="margin:0;color:#666;font-size:14px;">Total User Interactions</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    
     with col2:
-        st.metric("Total Messages", f"{total_messages:,}")
+        st.markdown(
+            f"""
+            <div style="background-color:#f0f2f6;padding:20px;border-radius:10px;text-align:center;margin:5px;">
+                <h4 style="margin:0;padding:0;color:#31333F;">Expert Matches</h4>
+                <h2 style="margin:0;padding:10px 0;color:#2ca02c;font-size:28px;">{success_rate:.1f}%</h2>
+                <p style="margin:0;color:#666;font-size:14px;">Match Success Rate</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    
     with col3:
-        st.metric("Success Rate", f"{success_rate:.1f}%")
+        st.markdown(
+            f"""
+            <div style="background-color:#f0f2f6;padding:20px;border-radius:10px;text-align:center;margin:5px;">
+                <h4 style="margin:0;padding:0;color:#31333F;">Response Quality</h4>
+                <h2 style="margin:0;padding:10px 0;color:#ff7f0e;font-size:28px;">{avg_quality:.2f}</h2>
+                <p style="margin:0;color:#666;font-size:14px;">Average Quality Score</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    
+    col4, col5, col6 = st.columns(3)
     with col4:
-        st.metric("Avg Quality", f"{avg_quality:.2f}")
-
-    # Create subplot layout
-    fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=(
-            "Daily Activity",
-            "User Engagement",
-            "Performance Metrics",
-            "Response Quality"
-        ),
-        vertical_spacing=0.15,
-        horizontal_spacing=0.1
-    )
-
-    # Determine which metrics to show based on data availability
-    has_interactions = not (metrics_df_filled['total_interactions'] == 0).all()
-    has_messages = not (metrics_df_filled['total_messages'] == 0).all()
-    has_users = not (metrics_df_filled['unique_users'] == 0).all()
-    has_performance = not (metrics_df_filled['avg_response_time'] == 0).all() or \
-                      not (metrics_df_filled['error_rate'] == 0).all()
-    has_quality = not (metrics_df_filled['avg_helpfulness'] == 0).all()
-    has_expert_matching = not (metrics_df_filled['expert_matches'] == 0).all()
-
-    # Daily Activity chart
-    if has_interactions or has_messages:
+        st.markdown(
+            f"""
+            <div style="background-color:#f0f2f6;padding:20px;border-radius:10px;text-align:center;margin:5px;">
+                <h4 style="margin:0;padding:0;color:#31333F;">Messages</h4>
+                <h2 style="margin:0;padding:10px 0;color:#9467bd;font-size:28px;">{total_messages:,}</h2>
+                <p style="margin:0;color:#666;font-size:14px;">Total Expert Messages</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    
+    with col5:
+        st.markdown(
+            f"""
+            <div style="background-color:#f0f2f6;padding:20px;border-radius:10px;text-align:center;margin:5px;">
+                <h4 style="margin:0;padding:0;color:#31333F;">Searches</h4>
+                <h2 style="margin:0;padding:10px 0;color:#d62728;font-size:28px;">{total_searches:,}</h2>
+                <p style="margin:0;color:#666;font-size:14px;">Total Search Queries</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    
+    with col6:
+        st.markdown(
+            f"""
+            <div style="background-color:#f0f2f6;padding:20px;border-radius:10px;text-align:center;margin:5px;">
+                <h4 style="margin:0;padding:0;color:#31333F;">Search Success</h4>
+                <h2 style="margin:0;padding:10px 0;color:#8c564b;font-size:28px;">{search_success_rate:.1f}%</h2>
+                <p style="margin:0;color:#666;font-size:14px;">Search Success Rate</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    
+    st.markdown("---")
+    
+    # Create improved visualization layout
+    st.markdown("### Trend Analysis")
+    
+    # Activity Trends Tab
+    tab1, tab2, tab3 = st.tabs(["User Activity", "Quality Metrics", "Expert & Search Performance"])
+    
+    with tab1:
+        # User Activity Trends (Interactions, Messages, Users)
+        user_activity_df = metrics_df.copy()
+        
+        # Determine which metrics to show based on data availability
+        has_interactions = not (metrics_df_filled['total_interactions'] == 0).all()
+        has_messages = not (metrics_df_filled['total_messages'] == 0).all()
+        has_users = not (metrics_df_filled['unique_users'] == 0).all()
+        has_searchers = 'unique_searchers' in metrics_df_filled.columns and not (metrics_df_filled['unique_searchers'] == 0).all()
+        
+        # Only keep columns with data
+        activity_cols = []
         if has_interactions:
-            fig.add_trace(
-                go.Scatter(
-                    x=metrics_df['date'],
-                    y=metrics_df['total_interactions'],
-                    name='Interactions',
-                    mode='lines+markers'
-                ),
-                row=1, col=1
-            )
-        
+            activity_cols.append('total_interactions')
         if has_messages:
-            fig.add_trace(
-                go.Scatter(
-                    x=metrics_df['date'],
-                    y=metrics_df['total_messages'],
-                    name='Messages',
-                    mode='lines+markers'
-                ),
-                row=1, col=1
-            )
-    else:
-        # Add annotation if no data
-        fig.add_annotation(
-            x=0.25, y=0.75,
-            xref="paper", yref="paper",
-            text="No activity data available",
-            showarrow=False,
-            font=dict(size=14),
-            row=1, col=1
-        )
-
-    # User Engagement chart
-    if has_users:
-        fig.add_trace(
-            go.Scatter(
-                x=metrics_df['date'],
-                y=metrics_df['unique_users'],
-                name='Unique Users',
-                mode='lines+markers'
-            ),
-            row=1, col=2
-        )
-    else:
-        # Add annotation if no data
-        fig.add_annotation(
-            x=0.75, y=0.75,
-            xref="paper", yref="paper",
-            text="No user engagement data available",
-            showarrow=False,
-            font=dict(size=14),
-            row=1, col=2
-        )
-
-    # Performance Metrics chart
-    if has_performance:
-        if not (metrics_df_filled['avg_response_time'] == 0).all():
-            fig.add_trace(
-                go.Scatter(
-                    x=metrics_df['date'],
-                    y=metrics_df['avg_response_time'],
-                    name='Response Time',
-                    mode='lines'
-                ),
-                row=2, col=1
-            )
+            activity_cols.append('total_messages')
+        if has_users:
+            activity_cols.append('unique_users')
+        if has_searchers:
+            activity_cols.append('unique_searchers')
         
-        if not (metrics_df_filled['error_rate'] == 0).all():
-            fig.add_trace(
-                go.Scatter(
-                    x=metrics_df['date'],
-                    y=metrics_df['error_rate'],
-                    name='Error Rate',
-                    mode='lines'
+        if not activity_cols:
+            st.info("No activity data available for the selected period")
+        else:
+            # Create a clean line chart for activity trends
+            fig = go.Figure()
+            
+            colors = {
+                'total_interactions': '#1f77b4',
+                'total_messages': '#9467bd',
+                'unique_users': '#2ca02c',
+                'unique_searchers': '#d62728'
+            }
+            
+            names = {
+                'total_interactions': 'Total Interactions',
+                'total_messages': 'Total Messages',
+                'unique_users': 'Unique Users',
+                'unique_searchers': 'Unique Searchers'
+            }
+            
+            for col in activity_cols:
+                fig.add_trace(go.Scatter(
+                    x=user_activity_df['date'],
+                    y=user_activity_df[col],
+                    mode='lines+markers',
+                    name=names.get(col, col),
+                    line=dict(color=colors.get(col, None), width=3),
+                    marker=dict(size=8)
+                ))
+            
+            # Format the layout for better readability
+            fig.update_layout(
+                height=500,
+                hovermode="x unified",
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="center",
+                    x=0.5
                 ),
-                row=2, col=1
+                margin=dict(l=20, r=20, t=30, b=20),
+                xaxis=dict(
+                    title="Date",
+                    tickangle=-45,
+                    tickformat="%b %d",
+                    tickmode="auto",
+                    nticks=10
+                ),
+                yaxis=dict(
+                    title="Count",
+                    gridcolor='rgba(0,0,0,0.1)'
+                ),
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)'
             )
-    else:
-        # Add annotation if no data
-        fig.add_annotation(
-            x=0.25, y=0.25,
-            xref="paper", yref="paper",
-            text="No performance data available",
-            showarrow=False,
-            font=dict(size=14),
-            row=2, col=1
-        )
-
-    # Response Quality or Expert Matching chart
-    if has_quality:
-        # Show response quality metrics
-        fig.add_trace(
-            go.Scatter(
-                x=metrics_df['date'],
-                y=metrics_df['avg_helpfulness'],
-                name='Helpfulness',
-                mode='lines'
-            ),
-            row=2, col=2
-        )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Add a bar chart comparing weekly or monthly totals
+            if len(user_activity_df) > 1:
+                st.subheader("Activity Distribution")
+                
+                # Create a weekly or monthly aggregation based on data length
+                activity_dist_df = user_activity_df.copy()
+                activity_dist_df = activity_dist_df[['date'] + activity_cols]
+                
+                if filters.get('granularity') == 'Daily' and len(activity_dist_df) > 7:
+                    # Create weekly distribution
+                    activity_dist_df['week'] = activity_dist_df['date'].dt.isocalendar().week
+                    activity_dist_df['year'] = activity_dist_df['date'].dt.isocalendar().year
+                    activity_dist_df['week_label'] = activity_dist_df['date'].dt.strftime('Week %U')
+                    
+                    # Group by week
+                    weekly_data = activity_dist_df.groupby('week_label')[activity_cols].sum().reset_index()
+                    
+                    # Create a grouped bar chart
+                    fig = px.bar(
+                        weekly_data.melt(id_vars='week_label', value_vars=activity_cols, var_name='Metric', value_name='Count'),
+                        x='week_label',
+                        y='Count',
+                        color='Metric',
+                        color_discrete_map={
+                            'total_interactions': '#1f77b4',
+                            'total_messages': '#9467bd',
+                            'unique_users': '#2ca02c',
+                            'unique_searchers': '#d62728'
+                        },
+                        barmode='group',
+                        labels={'week_label': 'Week', 'Count': 'Total Count'},
+                        category_orders={"week_label": sorted(weekly_data['week_label'].unique())}
+                    )
+                    
+                    fig.update_layout(
+                        height=400,
+                        legend=dict(
+                            orientation="h",
+                            yanchor="bottom",
+                            y=1.02,
+                            xanchor="center",
+                            x=0.5
+                        ),
+                        margin=dict(l=20, r=20, t=30, b=20),
+                        paper_bgcolor='rgba(0,0,0,0)'
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+    
+    with tab2:
+        # Quality Metrics Tab (Response Quality, Helpfulness, etc.)
+        has_quality = not (metrics_df_filled['avg_helpfulness'] == 0).all()
+        has_hallucination = 'avg_hallucination_risk' in metrics_df_filled.columns and not (metrics_df_filled['avg_hallucination_risk'] == 0).all()
+        has_factual = 'avg_factual_grounding' in metrics_df_filled.columns and not (metrics_df_filled['avg_factual_grounding'] == 0).all()
         
-        if not (metrics_df_filled['avg_hallucination_risk'] == 0).all():
-            fig.add_trace(
-                go.Scatter(
+        if not has_quality and not has_hallucination and not has_factual:
+            st.info("No quality metrics available for the selected period")
+        else:
+            # Create a clean line chart for quality metrics
+            fig = go.Figure()
+            
+            if has_quality:
+                fig.add_trace(go.Scatter(
+                    x=metrics_df['date'],
+                    y=metrics_df['avg_helpfulness'],
+                    mode='lines',
+                    name='Helpfulness Score',
+                    line=dict(color='#2ca02c', width=3)
+                ))
+            
+            if has_hallucination:
+                fig.add_trace(go.Scatter(
                     x=metrics_df['date'],
                     y=metrics_df['avg_hallucination_risk'],
+                    mode='lines',
                     name='Hallucination Risk',
-                    mode='lines'
-                ),
-                row=2, col=2
-            )
-    elif has_expert_matching:
-        # Fallback to expert matching if quality metrics aren't available
-        fig.add_trace(
-            go.Bar(
-                x=metrics_df['date'],
-                y=metrics_df['expert_matches'],
-                name='Expert Matches'
-            ),
-            row=2, col=2
-        )
-        
-        if not (metrics_df_filled['success_rate'] == 0).all():
-            fig.add_trace(
-                go.Scatter(
+                    line=dict(color='#d62728', width=3)
+                ))
+            
+            if has_factual:
+                fig.add_trace(go.Scatter(
                     x=metrics_df['date'],
-                    y=metrics_df['success_rate'],
-                    name='Success Rate',
-                    mode='lines'
+                    y=metrics_df['avg_factual_grounding'],
+                    mode='lines',
+                    name='Factual Grounding',
+                    line=dict(color='#1f77b4', width=3)
+                ))
+            
+            # Format the layout for better readability
+            fig.update_layout(
+                height=500,
+                hovermode="x unified",
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="center",
+                    x=0.5
                 ),
-                row=2, col=2
+                margin=dict(l=20, r=20, t=30, b=20),
+                xaxis=dict(
+                    title="Date",
+                    tickangle=-45,
+                    tickformat="%b %d",
+                    tickmode="auto",
+                    nticks=10
+                ),
+                yaxis=dict(
+                    title="Score",
+                    gridcolor='rgba(0,0,0,0.1)',
+                    tickformat='.2f'
+                ),
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)'
             )
-    else:
-        # Add annotation if no data
-        fig.add_annotation(
-            x=0.75, y=0.25,
-            xref="paper", yref="paper",
-            text="No quality or expert matching data available",
-            showarrow=False,
-            font=dict(size=14),
-            row=2, col=2
-        )
-
-    # Update layout
-    fig.update_layout(
-        height=800,
-        showlegend=True,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        )
-    )
-
-    # Update axes titles
-    fig.update_xaxes(title_text="Date")
-    fig.update_yaxes(title_text="Count", row=1, col=1)
-    fig.update_yaxes(title_text="Users", row=1, col=2)
-    fig.update_yaxes(title_text="Time (s) / Rate (%)", row=2, col=1)
-    fig.update_yaxes(title_text="Score", row=2, col=2)
-
-    # Display the chart
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Show detailed metrics in expandable section
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Add a quality score distribution chart
+            if has_quality:
+                st.subheader("Quality Score Distribution")
+                
+                # Create bins for quality scores
+                metrics_df['quality_bin'] = pd.cut(
+                    metrics_df['avg_helpfulness'],
+                    bins=[0, 0.2, 0.4, 0.6, 0.8, 1.0],
+                    labels=['0-0.2', '0.2-0.4', '0.4-0.6', '0.6-0.8', '0.8-1.0']
+                )
+                
+                quality_dist = metrics_df.groupby('quality_bin').size().reset_index(name='count')
+                
+                # Create a pie chart for quality distribution
+                fig = px.pie(
+                    quality_dist,
+                    values='count',
+                    names='quality_bin',
+                    color='quality_bin',
+                    color_discrete_sequence=px.colors.sequential.Greens,
+                    hole=0.4,
+                    labels={'quality_bin': 'Quality Score Range'}
+                )
+                
+                fig.update_layout(
+                    height=400,
+                    legend=dict(orientation="h", yanchor="bottom", y=-0.1, xanchor="center", x=0.5),
+                    margin=dict(l=20, r=20, t=20, b=20),
+                    paper_bgcolor='rgba(0,0,0,0)'
+                )
+                
+                fig.update_traces(textinfo='percent+label')
+                
+                st.plotly_chart(fig, use_container_width=True)
+    
+    with tab3:
+        # Expert & Search Performance Tab
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Expert matching visualization
+            has_expert_matching = not (metrics_df_filled['expert_matches'] == 0).all()
+            has_success_rate = not (metrics_df_filled['success_rate'] == 0).all()
+            
+            if not has_expert_matching:
+                st.info("No expert matching data available")
+            else:
+                # Create a combined chart for expert matches with success rate as a line
+                fig = go.Figure()
+                
+                # Add expert matches as bars
+                fig.add_trace(go.Bar(
+                    x=metrics_df['date'],
+                    y=metrics_df['expert_matches'],
+                    name='Expert Matches',
+                    marker_color='#3366cc'
+                ))
+                
+                # Add success rate as a line on secondary y-axis if available
+                if has_success_rate:
+                    fig.add_trace(go.Scatter(
+                        x=metrics_df['date'],
+                        y=metrics_df['success_rate'],
+                        name='Success Rate (%)',
+                        mode='lines+markers',
+                        marker=dict(color='#109618', size=8),
+                        line=dict(color='#109618', width=3),
+                        yaxis='y2'
+                    ))
+                
+                # Update layout for dual y-axis
+                fig.update_layout(
+                    title_text='Expert Matching Performance',
+                    height=400,
+                    hovermode="x unified",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="center",
+                        x=0.5
+                    ),
+                    margin=dict(l=20, r=20, t=50, b=20),
+                    yaxis=dict(
+                        title="Expert Matches",
+                        gridcolor='rgba(0,0,0,0.1)',
+                        side='left'
+                    ),
+                    yaxis2=dict(
+                        title="Success Rate (%)",
+                        overlaying='y',
+                        side='right',
+                        range=[0, 100],
+                        tickformat='.1f'
+                    ),
+                    xaxis=dict(
+                        title="Date",
+                        tickangle=-45,
+                        tickformat="%b %d"
+                    ),
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)'
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Search performance visualization
+            has_searches = 'total_searches' in metrics_df_filled.columns and not (metrics_df_filled['total_searches'] == 0).all()
+            has_search_success = 'search_success_rate' in metrics_df_filled.columns and not (metrics_df_filled['search_success_rate'] == 0).all()
+            
+            if not has_searches:
+                st.info("No search performance data available")
+            else:
+                # Create a combined chart for searches with success rate as a line
+                fig = go.Figure()
+                
+                # Add search count as bars
+                fig.add_trace(go.Bar(
+                    x=metrics_df['date'],
+                    y=metrics_df['total_searches'],
+                    name='Total Searches',
+                    marker_color='#dc3912'
+                ))
+                
+                # Add search success rate as a line on secondary y-axis if available
+                if has_search_success:
+                    fig.add_trace(go.Scatter(
+                        x=metrics_df['date'],
+                        y=metrics_df['search_success_rate'],
+                        name='Success Rate (%)',
+                        mode='lines+markers',
+                        marker=dict(color='#ff9900', size=8),
+                        line=dict(color='#ff9900', width=3),
+                        yaxis='y2'
+                    ))
+                
+                # Update layout for dual y-axis
+                fig.update_layout(
+                    title_text='Search Performance',
+                    height=400,
+                    hovermode="x unified",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="center",
+                        x=0.5
+                    ),
+                    margin=dict(l=20, r=20, t=50, b=20),
+                    yaxis=dict(
+                        title="Search Count",
+                        gridcolor='rgba(0,0,0,0.1)',
+                        side='left'
+                    ),
+                    yaxis2=dict(
+                        title="Success Rate (%)",
+                        overlaying='y',
+                        side='right',
+                        range=[0, 100],
+                        tickformat='.1f'
+                    ),
+                    xaxis=dict(
+                        title="Date",
+                        tickangle=-45,
+                        tickformat="%b %d"
+                    ),
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)'
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+        
+        # Performance metrics row
+        has_response_time = not (metrics_df_filled['avg_response_time'] == 0).all()
+        has_search_time = 'avg_search_time' in metrics_df_filled.columns and not (metrics_df_filled['avg_search_time'] == 0).all()
+        
+        if has_response_time or has_search_time:
+            st.subheader("Response Time Performance")
+            
+            # Create a performance line chart
+            fig = go.Figure()
+            
+            if has_response_time:
+                fig.add_trace(go.Scatter(
+                    x=metrics_df['date'],
+                    y=metrics_df['avg_response_time'],
+                    mode='lines+markers',
+                    name='Chat Response Time',
+                    line=dict(color='#ff7f0e', width=3),
+                    marker=dict(size=8)
+                ))
+            
+            if has_search_time:
+                fig.add_trace(go.Scatter(
+                    x=metrics_df['date'],
+                    y=metrics_df['avg_search_time'],
+                    mode='lines+markers',
+                    name='Search Response Time',
+                    line=dict(color='#d62728', width=3),
+                    marker=dict(size=8)
+                ))
+            
+            # Format the layout for better readability
+            fig.update_layout(
+                height=400,
+                hovermode="x unified",
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="center",
+                    x=0.5
+                ),
+                margin=dict(l=20, r=20, t=30, b=20),
+                xaxis=dict(
+                    title="Date",
+                    tickangle=-45,
+                    tickformat="%b %d",
+                    tickmode="auto",
+                    nticks=10
+                ),
+                yaxis=dict(
+                    title="Response Time (seconds)",
+                    gridcolor='rgba(0,0,0,0.1)',
+                    tickformat='.2f'
+                ),
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)'
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+    
+    # Show detailed metrics in an expandable section
     with st.expander("Detailed Metrics"):
         if not metrics_df.empty:
             # Create a copy to avoid SettingWithCopyWarning
@@ -690,30 +958,115 @@ def display_overview_analytics(metrics_df, filters):
             numeric_cols = display_df.select_dtypes(include=['float']).columns
             display_df[numeric_cols] = display_df[numeric_cols].round(2)
             
-            # Display with styling
-            try:
-                style_columns = [col for col in ['total_interactions', 'success_rate', 
-                                              'avg_response_time', 'avg_quality_score'] 
-                              if col in display_df.columns]
+            # Add tabs for different metric groups
+            tab1, tab2, tab3 = st.tabs(["Interaction Metrics", "Expert & Quality Metrics", "Search Metrics"])
+            
+            with tab1:
+                interaction_cols = ['date', 'total_interactions', 'unique_users', 
+                                  'avg_response_time', 'total_messages', 'draft_messages']
+                interaction_df = display_df[[col for col in interaction_cols if col in display_df.columns]]
                 
-                if style_columns:
-                    st.dataframe(display_df.style.background_gradient(
-                        subset=style_columns,
-                        cmap='RdYlGn'
-                    ), use_container_width=True)
+                if not interaction_df.empty:
+                    style_columns = [col for col in ['total_interactions', 'avg_response_time'] 
+                                    if col in interaction_df.columns]
+                    
+                    if style_columns:
+                        st.dataframe(interaction_df.style.background_gradient(
+                            subset=style_columns,
+                            cmap='RdYlGn'
+                        ), use_container_width=True)
+                    else:
+                        st.dataframe(interaction_df, use_container_width=True)
+                    
+                    # Add download button for CSV
+                    csv = interaction_df.to_csv(index=False)
+                    st.download_button(
+                        label="Download Interaction Data as CSV",
+                        data=csv,
+                        file_name="interaction_metrics.csv",
+                        mime="text/csv"
+                    )
                 else:
-                    st.dataframe(display_df, use_container_width=True)
-            except Exception as e:
-                logger.error(f"Error styling dataframe: {e}")
-                st.dataframe(display_df, use_container_width=True)
+                    st.info("No interaction metrics available")
+            
+            with tab2:
+                expert_cols = ['date', 'expert_matches', 'avg_similarity', 'success_rate',
+                             'avg_quality_score', 'avg_helpfulness', 'avg_hallucination_risk', 
+                             'avg_factual_grounding']
+                expert_df = display_df[[col for col in expert_cols if col in display_df.columns]]
+                
+                if not expert_df.empty:
+                    style_columns = [col for col in ['success_rate', 'avg_quality_score', 'avg_helpfulness'] 
+                                    if col in expert_df.columns]
+                    
+                    if style_columns:
+                        st.dataframe(expert_df.style.background_gradient(
+                            subset=style_columns,
+                            cmap='RdYlGn'
+                        ), use_container_width=True)
+                    else:
+                        st.dataframe(expert_df, use_container_width=True)
+                    
+                    # Add download button for CSV
+                    csv = expert_df.to_csv(index=False)
+                    st.download_button(
+                        label="Download Expert & Quality Data as CSV",
+                        data=csv,
+                        file_name="expert_quality_metrics.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.info("No expert or quality metrics available")
+            
+            with tab3:
+                search_cols = ['date', 'total_searches', 'unique_searchers', 
+                              'avg_search_time', 'search_success_rate']
+                search_df = display_df[[col for col in search_cols if col in display_df.columns]]
+                
+                if not search_df.empty and not (search_df['total_searches'] == 0).all():
+                    style_columns = [col for col in ['total_searches', 'search_success_rate'] 
+                                    if col in search_df.columns]
+                    
+                    if style_columns:
+                        st.dataframe(search_df.style.background_gradient(
+                            subset=style_columns,
+                            cmap='RdYlGn'
+                        ), use_container_width=True)
+                    else:
+                        st.dataframe(search_df, use_container_width=True)
+                    
+                    # Add download button for CSV
+                    csv = search_df.to_csv(index=False)
+                    st.download_button(
+                        label="Download Search Data as CSV",
+                        data=csv,
+                        file_name="search_metrics.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.info("No search metrics available")
         else:
             st.info("No detailed metrics available")
 
-    # Add date/time of last update
-    st.markdown(f"*Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
+    # Add date/time of last update with better styling
+    st.markdown(
+        f"""
+        <div style="text-align:right;color:#888;font-size:0.8em;padding-top:20px;">
+            Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        </div>
+        """, 
+        unsafe_allow_html=True
+    )
 
 def main():
     st.set_page_config(page_title="Overview Analytics Dashboard", page_icon="📊", layout="wide")
+    
+    # Dashboard title and description
+    st.title("Overview Analytics Dashboard")
+    st.markdown("""
+    This dashboard provides an overview of system performance, user engagement, and content quality metrics.
+    Use the date filter to explore metrics for specific time periods.
+    """)
     
     # Dashboard filters in sidebar
     st.sidebar.title("Dashboard Filters")
@@ -727,7 +1080,24 @@ def main():
         max_value=end_date.date()
     )
     
-    if len(date_range) == 2:
+    # Add additional filter for data granularity
+    granularity = st.sidebar.selectbox(
+        "Data Granularity",
+        ["Daily", "Weekly", "Monthly"],
+        index=0
+    )
+    
+    # Information about data sources
+    with st.sidebar.expander("Data Sources"):
+        st.info("""
+        This dashboard uses data from multiple sources:
+        - Chat interactions & sessions
+        - Expert matching activity
+        - Response quality metrics
+        - Search analytics
+        """)
+    
+    if len(date_range) == l:
         start_date, end_date = date_range
         
         # Format for database query
@@ -736,16 +1106,53 @@ def main():
         
         # Get metrics with selected filters
         with get_db_connection() as conn:
-            # Ensure all required tables exist
-            ensure_required_tables(conn)
-            
             # Get metrics
             metrics_df = get_overview_metrics(conn, start_date_str, end_date_str)
+            
+            # If weekly or monthly granularity is selected, resample the data
+            if granularity == "Weekly" and not metrics_df.empty and 'date' in metrics_df.columns:
+                metrics_df = metrics_df.set_index('date')
+                # Resample to weekly frequency, taking mean for rates and sum for counts
+                numeric_cols = metrics_df.select_dtypes(include=['number']).columns
+                count_cols = [col for col in numeric_cols if 'total' in col or 'count' in col or 'matches' in col or 'messages' in col or 'users' in col or 'searches' in col]
+                rate_cols = [col for col in numeric_cols if col not in count_cols]
+                
+                # Create a new DataFrame with resampled data
+                weekly_df = pd.DataFrame()
+                if count_cols:
+                    weekly_df = metrics_df[count_cols].resample('W').sum()
+                if rate_cols:
+                    weekly_rates = metrics_df[rate_cols].resample('W').mean()
+                    weekly_df = pd.concat([weekly_df, weekly_rates], axis=1)
+                
+                # Reset index to make date a column again
+                weekly_df = weekly_df.reset_index()
+                metrics_df = weekly_df
+            
+            elif granularity == "Monthly" and not metrics_df.empty and 'date' in metrics_df.columns:
+                metrics_df = metrics_df.set_index('date')
+                # Resample to monthly frequency
+                numeric_cols = metrics_df.select_dtypes(include=['number']).columns
+                count_cols = [col for col in numeric_cols if 'total' in col or 'count' in col or 'matches' in col or 'messages' in col or 'users' in col or 'searches' in col]
+                rate_cols = [col for col in numeric_cols if col not in count_cols]
+                
+                # Create a new DataFrame with resampled data
+                monthly_df = pd.DataFrame()
+                if count_cols:
+                    monthly_df = metrics_df[count_cols].resample('MS').sum()
+                if rate_cols:
+                    monthly_rates = metrics_df[rate_cols].resample('MS').mean()
+                    monthly_df = pd.concat([monthly_df, monthly_rates], axis=1)
+                
+                # Reset index to make date a column again
+                monthly_df = monthly_df.reset_index()
+                metrics_df = monthly_df
             
             # Display dashboard
             display_overview_analytics(metrics_df, {
                 'start_date': start_date,
-                'end_date': end_date
+                'end_date': end_date,
+                'granularity': granularity
             })
     else:
         st.error("Please select both start and end dates.")
