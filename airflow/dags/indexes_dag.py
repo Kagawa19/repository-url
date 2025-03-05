@@ -2,120 +2,50 @@ from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
 from airflow.utils.dates import days_ago
 from datetime import timedelta
-import os
 import logging
-from contextlib import contextmanager
-from urllib.parse import urlparse
-import psycopg2
 
-# Database connection utilities - based on your schema
-def get_db_connection_params():
-    """Get database connection parameters from environment variables."""
-    database_url = os.getenv('DATABASE_URL')
-    if database_url:
-        parsed_url = urlparse(database_url)
-        return {
-            'host': parsed_url.hostname,
-            'port': parsed_url.port,
-            'dbname': parsed_url.path[1:],
-            'user': parsed_url.username,
-            'password': parsed_url.password
-        }
-    
-    in_docker = os.getenv('DOCKER_ENV', 'false').lower() == 'true'
-    return {
-        'host': '167.86.85.127' if in_docker else 'localhost',
-        'port': '5432',
-        'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
-        'user': os.getenv('POSTGRES_USER', 'postgres'),
-        'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres')
-    }
-
-@contextmanager
-def get_db_connection(dbname=None):
-    """Get database connection with proper error handling and connection cleanup."""
-    params = get_db_connection_params()
-    if dbname:
-        params['dbname'] = dbname
-    
-    conn = None
-    try:
-        conn = psycopg2.connect(**params)
-        logging.info(f"Connected to database: {params['dbname']} at {params['host']}")
-        yield conn
-    except psycopg2.OperationalError as e:
-        logging.error(f"Database connection error: {e}")
-        raise
-    finally:
-        if conn is not None:
-            conn.close()
-            logging.info("Database connection closed")
-
-@contextmanager
-def get_db_cursor(autocommit=False):
-    """Get database cursor with transaction management."""
-    with get_db_connection() as conn:
-        conn.autocommit = autocommit
-        cur = conn.cursor()
-        try:
-            yield cur, conn
-        except Exception as e:
-            if not autocommit:
-                conn.rollback()
-                logging.error(f"Transaction rolled back due to error: {e}")
-            raise
-        finally:
-            cur.close()
-
-# Import search index processors
-from ai_services_api.services.search.indexing.index_creator import ExpertSearchIndexManager
-from ai_services_api.services.search.indexing.redis_index_manager import ExpertRedisIndexManager
+# Lazy import to reduce initial load time
+def lazy_import(module_path, class_name):
+    """
+    Lazily import a class to reduce initial import time
+    """
+    def import_class():
+        module = __import__(module_path, fromlist=[class_name])
+        return getattr(module, class_name)
+    return import_class
 
 # Configure logging
-def setup_logging():
-    """Configure logging settings."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    return logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
-# Load environment variables
+# Prepare arguments for DAG
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'start_date': days_ago(1),
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+}
+
 def load_environment_variables():
     """Load environment variables needed for processing."""
-    # You can add specific environment variable loading logic here if needed
-    logging.info("Environment variables loaded successfully")
-
-# Configure logging
-logger = setup_logging()
+    logger.info("Environment variables loaded successfully")
 
 def create_faiss_index_task():
     """
-    Create FAISS search index with proper database connection handling
+    Create FAISS search index with minimal dependencies
     """
     load_environment_variables()
     
+    # Import here to reduce initial load time
+    from ai_services_api.services.search.indexing.index_creator import ExpertSearchIndexManager
+    
     try:
-        # Create FAISS search index with custom db connection
-        index_creator = ExpertSearchIndexManager(db_connection_method=get_db_connection)
+        # Create FAISS search index 
+        index_creator = ExpertSearchIndexManager()
         
-        # Fetch experts from the database
-        with get_db_cursor() as (cur, conn):
-            cur.execute("""
-                SELECT id, first_name, last_name, knowledge_expertise, domains, fields, 
-                       normalized_domains, normalized_fields, normalized_skills, keywords
-                FROM experts_expert 
-                WHERE is_active = true
-            """)
-            experts = cur.fetchall()
-            
-            if not experts:
-                logger.warning("No active experts found in the database")
-            else:
-                logger.info(f"Found {len(experts)} active experts for indexing")
-        
-        # Create FAISS index based on experts
+        # Create FAISS index 
         if not index_creator.create_faiss_index():
             logger.error("FAISS search index creation failed")
             raise Exception("FAISS search index creation failed")
@@ -137,36 +67,21 @@ def create_faiss_index_task():
 
 def create_redis_index_task():
     """
-    Create Redis search index with proper database connection handling
+    Create Redis search index with minimal dependencies
     """
     load_environment_variables()
     
+    # Import here to reduce initial load time
+    from ai_services_api.services.search.indexing.redis_index_manager import ExpertRedisIndexManager
+    
     try:
-        # Create Redis search index with custom db connection
-        redis_creator = ExpertRedisIndexManager(db_connection_method=get_db_connection)
+        # Create Redis search index
+        redis_creator = ExpertRedisIndexManager()
         
         # Clear existing indexes
         if not redis_creator.clear_redis_indexes():
             logger.error("Failed to clear existing Redis indexes")
             raise Exception("Redis index clearing failed")
-        
-        # Fetch experts and their publications
-        with get_db_cursor() as (cur, conn):
-            cur.execute("""
-                SELECT e.id, e.first_name, e.last_name, e.knowledge_expertise, 
-                       e.domains, e.fields, e.normalized_domains, e.normalized_fields,
-                       COUNT(erl.resource_id) as publication_count
-                FROM experts_expert e
-                LEFT JOIN expert_resource_links erl ON e.id = erl.expert_id
-                WHERE e.is_active = true
-                GROUP BY e.id
-            """)
-            experts_with_pubs = cur.fetchall()
-            
-            if not experts_with_pubs:
-                logger.warning("No active experts found for Redis indexing")
-            else:
-                logger.info(f"Found {len(experts_with_pubs)} experts for Redis indexing")
         
         # Create Redis index
         if not redis_creator.create_redis_index():
@@ -188,16 +103,7 @@ def create_redis_index_task():
         if 'redis_creator' in locals():
             redis_creator.close()
 
-default_args = {
-    'owner': 'airflow',
-    'depends_on_past': False,
-    'start_date': days_ago(1),
-    'email_on_failure': False,
-    'email_on_retry': False,
-    'retries': 1,
-    'retry_delay': timedelta(minutes=5),
-}
-
+# Create DAG
 dag = DAG(
     'search_indexes_dag',
     default_args=default_args,
@@ -206,6 +112,7 @@ dag = DAG(
     catchup=False
 )
 
+# Define tasks
 create_faiss_index_task = PythonOperator(
     task_id='create_faiss_search_index',
     python_callable=create_faiss_index_task,

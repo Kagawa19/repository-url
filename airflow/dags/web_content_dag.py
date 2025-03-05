@@ -2,62 +2,23 @@ from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
 from airflow.utils.dates import days_ago
 from datetime import timedelta
-import time
-from airflow_utils import setup_logging, load_environment_variables
-
-# Import web content processor
-from ai_services_api.services.centralized_repository.web_content.services.processor import WebContentProcessor
+import logging
+import os
 
 # Configure logging
-logger = setup_logging()
+logger = logging.getLogger(__name__)
 
-def process_web_content_task(**kwargs):
+# Lazy import function to reduce initial load time
+def lazy_import(module_path, class_name):
     """
-    Process web content with optimized batch processing
+    Lazily import a class to reduce initial load time
     """
-    load_environment_variables()
-    
-    try:
-        # Get configuration from DAG run configuration or use defaults
-        max_workers = kwargs.get('max_workers', 4)
-        batch_size = kwargs.get('batch_size', 10)
-        
-        # Start timing the process
-        start_time = time.time()
-        
-        # Create web content processor
-        processor = WebContentProcessor(
-            max_workers=max_workers,
-            batch_size=batch_size
-        )
-        
-        try:
-            # Process web content
-            results = processor.process_content()
-            
-            # Calculate processing time
-            processing_time = time.time() - start_time
-            
-            # Log detailed processing results
-            logger.info(f"""Web Content Processing Results:
-                Pages Processed: {results['processed_pages']}
-                Pages Updated: {results['updated_pages']}
-                PDF Chunks Processed: {results['processed_chunks']}
-                PDF Chunks Updated: {results['updated_chunks']}
-                Processing Time: {processing_time:.2f} seconds
-                Average Time Per Page: {processing_time/max(results['processed_pages'], 1):.2f} seconds
-            """)
-            
-            return results
-        
-        finally:
-            # Ensure cleanup happens even if processing fails
-            processor.cleanup()
-    
-    except Exception as e:
-        logger.error(f"Error processing web content: {str(e)}")
-        raise
+    def import_class():
+        module = __import__(module_path, fromlist=[class_name])
+        return getattr(module, class_name)
+    return import_class
 
+# Prepare arguments for DAG
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
@@ -68,21 +29,87 @@ default_args = {
     'retry_delay': timedelta(minutes=5),
 }
 
+def load_environment_variables():
+    """
+    Load environment variables with sensible defaults
+    
+    Returns:
+        dict: Configuration parameters for web content processing
+    """
+    # Load configuration with sensible defaults
+    config = {
+        'max_pages': int(os.getenv('MAX_WEB_PAGES', '1000')),
+        'max_workers': int(os.getenv('MAX_WORKERS', '4')),
+        'batch_size': int(os.getenv('BATCH_SIZE', '50')),
+        'timeout': int(os.getenv('PROCESSING_TIMEOUT', '3600'))  # 1 hour default
+    }
+    
+    logger.info(f"Web Content Processing Configuration: {config}")
+    return config
+
+def process_web_content_task():
+    """
+    Process web content with minimal dependencies and optimized loading
+    """
+    # Load configuration
+    config = load_environment_variables()
+    
+    # Lazy import of WebContentProcessor to reduce initial load time
+    WebContentProcessor = lazy_import(
+        'ai_services_api.services.centralized_repository.web_content.services.processor', 
+        'WebContentProcessor'
+    )()
+    
+    try:
+        # Process content with configured parameters
+        results = WebContentProcessor.process_content(
+            max_workers=config['max_workers'],
+            max_pages=config['max_pages'],
+            batch_size=config['batch_size']
+        )
+        
+        # Log processing results with detailed breakdown
+        logger.info(f"""Web Content Processing Results:
+            Total Pages Processed: {results.get('processed_pages', 0)}
+            Pages Updated: {results.get('updated_pages', 0)}
+            PDF Chunks Processed: {results.get('processed_chunks', 0)}
+            PDF Chunks Updated: {results.get('updated_chunks', 0)}
+            Processing Time: {results.get('processing_time', 'N/A')}
+        """)
+        
+        # Additional success logging
+        if results.get('processed_pages', 0) > 0:
+            logger.info("Web content processing completed successfully")
+        else:
+            logger.warning("No web content was processed")
+        
+    except Exception as e:
+        # Comprehensive error logging
+        logger.error(f"Web content processing failed: {str(e)}")
+        raise
+    finally:
+        # Ensure proper cleanup
+        if 'WebContentProcessor' in locals():
+            try:
+                WebContentProcessor.cleanup()
+            except Exception as cleanup_error:
+                logger.error(f"Error during cleanup: {cleanup_error}")
+
+# Create DAG
 dag = DAG(
     'web_content_processing_dag',
     default_args=default_args,
     description='Monthly web content processing and indexing',
     schedule_interval='@monthly',
-    catchup=False
+    catchup=False,
+    max_active_runs=1  # Ensure only one run at a time
 )
 
-process_web_content_task = PythonOperator(
+# Define task
+process_web_content_operator = PythonOperator(
     task_id='process_web_content',
     python_callable=process_web_content_task,
-    provide_context=True,
-    op_kwargs={
-        'max_workers': 4,
-        'batch_size': 10
-    },
-    dag=dag
+    dag=dag,
+    # Set a generous timeout to allow for comprehensive processing
+    execution_timeout=timedelta(hours=2)
 )
