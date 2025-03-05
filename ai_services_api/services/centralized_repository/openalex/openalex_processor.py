@@ -307,7 +307,7 @@ class OpenAlexProcessor:
                 return
                 
             publication_count = 0
-            TARGET_PUBLICATIONS = 1200
+            TARGET_PUBLICATIONS = 7
                 
             async with aiohttp.ClientSession() as session:
                 for expert_id, first_name, last_name, orcid in experts:

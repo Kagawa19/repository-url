@@ -129,92 +129,6 @@ class MessageHandler:
         if metadata:
             yield metadata
 
-    async def send_message_async(self, message: str, user_id: str, session_id: str = None):
-        """
-        Process message and handle responses with enhanced logging and formatting.
-        
-        Args:
-            message (str): The message to be processed
-            user_id (str): Unique identifier for the user
-            session_id (str, optional): Unique identifier for the conversation session
-        """
-        start_time = time.time()
-        logger.info("Starting async message processing")
-        logger.debug(f"Message details - User ID: {user_id}, Session ID: {session_id}, Message length: {len(message)}")
-        
-        try:
-            self.metadata = None
-            logger.debug("Metadata reset before processing")
-            
-            # Get the response stream from LLM
-            raw_response_stream = self.llm_manager.generate_async_response(message)
-            
-            # Initialize response tracking
-            response_chunks = []
-            captured_metadata = None
-            
-            # Process and format the response stream
-            async for chunk in self.process_stream_response(raw_response_stream):
-                # Check if this is a metadata chunk
-                if isinstance(chunk, dict) and chunk.get('is_metadata'):
-                    captured_metadata = chunk['metadata']
-                    logger.debug(f"Captured metadata: {json.dumps(captured_metadata, default=str)}")
-                    continue
-                    
-                logger.debug(f"Yielding formatted response chunk (length: {len(chunk)})")
-                response_chunks.append(chunk)
-                yield chunk
-            
-            # Prepare complete response
-            complete_response = ''.join(response_chunks)
-            response_time = time.time() - start_time
-            
-            logger.info("Message processing completed successfully")
-            logger.debug(f"Total processing time: {response_time:.2f} seconds")
-            
-            # Save chat to database
-            await self.save_chat_to_db(user_id, message, complete_response, response_time)
-            
-            # Prepare response data with either captured metadata or fallback to sentiment
-            if captured_metadata and 'metrics' in captured_metadata:
-                # Use the quality metrics from the LLM's response
-                response_data = {
-                    'response': complete_response,
-                    'timestamp': captured_metadata.get('timestamp', datetime.utcnow().isoformat()),
-                    'metrics': captured_metadata['metrics']
-                }
-                logger.debug("Using quality metrics from LLM metadata")
-            else:
-                # Fallback to sentiment analysis if no metadata was captured
-                logger.warning("No metadata captured, falling back to sentiment analysis")
-                sentiment_data = await self.llm_manager.analyze_sentiment(message)
-                response_data = {
-                    'response': complete_response,
-                    'metrics': {
-                        'response_time': response_time,
-                        'sentiment': sentiment_data
-                    }
-                }
-            
-            # Record interaction with metrics
-            await self.record_interaction(session_id, user_id, message, response_data)
-            
-        except Exception as e:
-            logger.error("Critical error in message stream processing", exc_info=True)
-            logger.error(f"Error details - User ID: {user_id}, Session ID: {session_id}")
-            
-            if hasattr(e, '__traceback__'):
-                tb = e.__traceback__
-                logger.error(f"Error occurred in file: {tb.tb_frame.f_code.co_filename}, line: {tb.tb_lineno}")
-            
-            error_message = "I encountered an error processing your message. Please try again."
-            logger.warning(f"Yielding error message to user: {error_message}")
-            yield error_message
-            
-        finally:
-            logger.info("Async message processing concluded")
-            total_time = time.time() - start_time
-            logger.debug(f"Total method execution time: {total_time:.2f} seconds")
     async def start_chat_session(self, user_id: str) -> str:
         """
         Start a new chat session.
@@ -251,6 +165,298 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"Error in start_chat_session: {e}")
             raise
+
+    async def send_message_async(self, message: str, user_id: str, session_id: str = None):
+        """
+        Process message and handle responses with enhanced rate limit handling.
+        
+        Args:
+            message (str): The message to be processed
+            user_id (str): Unique identifier for the user
+            session_id (str, optional): Unique identifier for the conversation session
+        """
+        start_time = time.time()
+        logger.info("Starting async message processing")
+        logger.debug(f"Message details - User ID: {user_id}, Session ID: {session_id}, Message length: {len(message)}")
+        
+        # Rate limit tracking
+        rate_limit_encountered = False
+        
+        try:
+            self.metadata = None
+            logger.debug("Metadata reset before processing")
+            
+            # Check if LLM manager is in rate-limited state
+            if hasattr(self.llm_manager, '_rate_limited') and self.llm_manager._rate_limited:
+                logger.warning(f"LLM is in rate-limited state for user {user_id}")
+                rate_limit_encountered = True
+            
+            # Additional local throttling if needed
+            if not rate_limit_encountered and hasattr(self, '_local_rate_limit_until'):
+                if time.time() < self._local_rate_limit_until:
+                    logger.warning(f"Local rate limit active for another {self._local_rate_limit_until - time.time():.1f} seconds")
+                    rate_limit_encountered = True
+                else:
+                    # Reset expired local rate limit
+                    delattr(self, '_local_rate_limit_until')
+            
+            # If we're rate limited, consider alternative response strategies
+            if rate_limit_encountered:
+                # Check cache for similar queries
+                cached_response = await self._check_response_cache(message, user_id)
+                if cached_response:
+                    logger.info("Using cached response due to rate limiting")
+                    yield "Note: Using cached response due to high traffic. "
+                    yield cached_response
+                    return
+            
+            # Get the response stream from LLM
+            try:
+                raw_response_stream = self.llm_manager.generate_async_response(message)
+            except Exception as e:
+                # Check specifically for rate limit errors
+                if any(x in str(e).lower() for x in ["429", "quota", "rate limit", "resource exhausted"]):
+                    logger.warning(f"Rate limit detected at stream initialization: {e}")
+                    rate_limit_encountered = True
+                    
+                    # Set local rate limit cooldown
+                    self._local_rate_limit_until = time.time() + 60  # 1 minute cooldown
+                    
+                    # Provide fallback response
+                    yield "I apologize, but our service is experiencing high demand right now. Please try again in a moment."
+                    return
+                else:
+                    raise
+            
+            # Initialize response tracking
+            response_chunks = []
+            captured_metadata = None
+            
+            # Process and format the response stream
+            try:
+                async for chunk in self.process_stream_response(raw_response_stream):
+                    # Check if this is a metadata chunk
+                    if isinstance(chunk, dict) and chunk.get('is_metadata'):
+                        captured_metadata = chunk['metadata']
+                        
+                        # Check if the response was generated in rate-limited mode
+                        if captured_metadata.get('metrics', {}).get('rate_limited_mode', False):
+                            rate_limit_encountered = True
+                            logger.warning("Response was generated in rate-limited mode")
+                        
+                        logger.debug(f"Captured metadata: {json.dumps(captured_metadata, default=str)}")
+                        continue
+                        
+                    logger.debug(f"Yielding formatted response chunk (length: {len(chunk)})")
+                    response_chunks.append(chunk)
+                    yield chunk
+                    
+            except Exception as stream_error:
+                # Detect rate limit errors in streaming
+                if any(x in str(stream_error).lower() for x in ["429", "quota", "rate limit", "resource exhausted"]):
+                    logger.warning(f"Rate limit detected during streaming: {stream_error}")
+                    rate_limit_encountered = True
+                    
+                    # Set local rate limit cooldown
+                    self._local_rate_limit_until = time.time() + 60  # 1 minute cooldown
+                    
+                    # If we have partial response, yield it with a note
+                    if response_chunks:
+                        complete_response = ''.join(response_chunks)
+                        if len(complete_response) > 30:  # If we have a substantial partial response
+                            yield "\n\nNote: Response was truncated due to high demand. Please try again in a moment."
+                    else:
+                        # Otherwise provide a fallback response
+                        yield "I apologize, but our service is experiencing high demand right now. Please try again in a moment."
+                    return
+                else:
+                    raise
+            
+            # Prepare complete response
+            complete_response = ''.join(response_chunks)
+            response_time = time.time() - start_time
+            
+            logger.info("Message processing completed successfully")
+            logger.debug(f"Total processing time: {response_time:.2f} seconds")
+            
+            # Cache the response for future rate-limited situations if it's good quality
+            if complete_response and len(complete_response) > 50:
+                await self._cache_response(message, user_id, complete_response)
+            
+            # Save chat to database
+            await self.save_chat_to_db(user_id, message, complete_response, response_time)
+            
+            # Prepare response data with either captured metadata or fallback to sentiment
+            if captured_metadata and 'metrics' in captured_metadata:
+                # Use the quality metrics from the LLM's response
+                response_data = {
+                    'response': complete_response,
+                    'timestamp': captured_metadata.get('timestamp', datetime.utcnow().isoformat()),
+                    'metrics': captured_metadata['metrics']
+                }
+                logger.debug("Using quality metrics from LLM metadata")
+            else:
+                # Fallback to sentiment analysis if no metadata was captured
+                logger.warning("No metadata captured, falling back to sentiment analysis")
+                sentiment_data = await self.llm_manager.analyze_sentiment(message)
+                response_data = {
+                    'response': complete_response,
+                    'metrics': {
+                        'response_time': response_time,
+                        'sentiment': sentiment_data
+                    }
+                }
+            
+            # Record interaction with metrics
+            await self.record_interaction(session_id, user_id, message, response_data)
+            
+        except Exception as e:
+            logger.error("Critical error in message stream processing", exc_info=True)
+            logger.error(f"Error details - User ID: {user_id}, Session ID: {session_id}")
+            
+            if hasattr(e, '__traceback__'):
+                tb = e.__traceback__
+                logger.error(f"Error occurred in file: {tb.tb_frame.f_code.co_filename}, line: {tb.tb_lineno}")
+            
+            # Check if this is a rate limit error
+            if any(x in str(e).lower() for x in ["429", "quota", "rate limit", "resource exhausted"]):
+                logger.warning(f"Rate limit detected in exception handler: {e}")
+                rate_limit_encountered = True
+                
+                # Set local rate limit cooldown
+                self._local_rate_limit_until = time.time() + 120  # 2 minute cooldown
+                
+                error_message = "I apologize, but our service is experiencing high demand right now. Please try again in a few minutes."
+            else:
+                error_message = "I encountered an error processing your message. Please try again."
+            
+            logger.warning(f"Yielding error message to user: {error_message}")
+            yield error_message
+            
+        finally:
+            # Update session stats
+            if session_id:
+                await self.update_session_stats(session_id, not rate_limit_encountered)
+            
+            logger.info("Async message processing concluded")
+            total_time = time.time() - start_time
+            logger.debug(f"Total method execution time: {total_time:.2f} seconds")
+
+    async def _check_response_cache(self, message: str, user_id: str) -> str:
+        """Check for cached similar responses during rate limiting."""
+        try:
+            # Get Redis client
+            from ai_services_api.services.chatbot.utils.redis_connection import redis_pool
+            redis_client = await redis_pool.get_redis()
+            
+            # Generate a simplified message for similarity matching
+            simple_message = ' '.join(word.lower() for word in message.split() 
+                                        if len(word) > 3 and word.lower() not in 
+                                        ('what', 'when', 'where', 'which', 'who', 'why', 'how', 
+                                        'the', 'and', 'for', 'that', 'this', 'are', 'with'))
+            
+            # Look for similar cached queries
+            pattern = f"chat:{user_id}:*"
+            keys = await redis_client.keys(pattern)
+            
+            for key in keys:
+                # Get the original query from the key
+                try:
+                    parts = key.split(':', 2)
+                    if len(parts) < 3:
+                        continue
+                        
+                    cached_query = parts[2]
+                    
+                    # Create simplified cached query for comparison
+                    simple_cached = ' '.join(word.lower() for word in cached_query.split() 
+                                                if len(word) > 3 and word.lower() not in 
+                                                ('what', 'when', 'where', 'which', 'who', 'why', 'how', 
+                                                'the', 'and', 'for', 'that', 'this', 'are', 'with'))
+                    
+                    # Check for significant overlap in key terms
+                    if simple_message and simple_cached:
+                        msg_terms = set(simple_message.split())
+                        cached_terms = set(simple_cached.split())
+                        
+                        if len(msg_terms) > 0 and len(cached_terms) > 0:
+                            overlap = len(msg_terms.intersection(cached_terms))
+                            overlap_ratio = overlap / max(len(msg_terms), len(cached_terms))
+                            
+                            if overlap_ratio > 0.6:  # At least 60% term overlap
+                                # Retrieve cached response
+                                cached_data = await redis_client.get(key)
+                                if cached_data:
+                                    data = json.loads(cached_data)
+                                    return data.get('response', '')
+                except Exception as parse_error:
+                    logger.error(f"Error parsing cache key: {parse_error}")
+                    continue
+                    
+            return None
+        except Exception as e:
+            logger.error(f"Error checking response cache: {e}")
+            return None
+
+    async def _cache_response(self, message: str, user_id: str, response: str):
+        """Cache response for future use during rate limiting."""
+        try:
+            # Get Redis client
+            from ai_services_api.services.chatbot.utils.redis_connection import redis_pool
+            redis_client = await redis_pool.get_redis()
+            
+            # Generate cache key
+            redis_key = f"chat:{user_id}:{message}"
+            
+            # Prepare data with timestamp
+            chat_data = {
+                "response": response,
+                "timestamp": datetime.utcnow().isoformat(),
+                "user_id": user_id,
+                "cached_for_rate_limit": True
+            }
+            
+            # Cache for 24 hours
+            await redis_client.setex(redis_key, 86400, json.dumps(chat_data))
+            logger.debug(f"Cached response for potential rate limit situations: {redis_key}")
+        except Exception as e:
+            logger.error(f"Error caching response: {e}")
+        async def start_chat_session(self, user_id: str) -> str:
+            """
+            Start a new chat session.
+            
+            Args:
+                user_id (str): Unique identifier for the user
+            
+            Returns:
+                str: Generated session identifier
+            """
+            try:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        # Generate unique session identifier
+                        session_id = f"session_{user_id}_{int(time.time())}"
+                        
+                        try:
+                            cursor.execute("""
+                                INSERT INTO chat_sessions 
+                                    (session_id, user_id, start_timestamp)
+                                VALUES (%s, %s, CURRENT_TIMESTAMP)
+                                RETURNING session_id
+                            """, (session_id, user_id))
+                            
+                            conn.commit()
+                            logger.info(f"Created chat session: {session_id}")
+                            return session_id
+                        
+                        except Exception as insert_error:
+                            conn.rollback()
+                            logger.error(f"Error inserting chat session: {insert_error}")
+                            raise
+            
+            except Exception as e:
+                logger.error(f"Error in start_chat_session: {e}")
+                raise
 
                 
     async def save_chat_to_db(self, user_id: str, query: str, response: str, response_time: float):
@@ -315,12 +521,6 @@ class MessageHandler:
                         quality_data = metrics.get('sentiment', {})
                         logger.debug(f"Using sentiment data instead: {json.dumps(quality_data, default=str)}")
                     
-                    # Log the data we're about to insert
-                    logger.debug(f"Attempting to insert response quality metrics with: log_id={log_id}, "
-                                f"helpfulness_score={quality_data.get('helpfulness_score', 0.0)}, "
-                                f"hallucination_risk={quality_data.get('hallucination_risk', 0.0)}, "
-                                f"factual_grounding_score={quality_data.get('factual_grounding_score', 0.0)}")
-                    
                     # Extract values with explicit logging of each
                     helpfulness_score = quality_data.get('helpfulness_score', 0.0)
                     logger.debug(f"Extracted helpfulness_score: {helpfulness_score}")
@@ -331,25 +531,19 @@ class MessageHandler:
                     factual_grounding_score = quality_data.get('factual_grounding_score', 0.0)
                     logger.debug(f"Extracted factual_grounding_score: {factual_grounding_score}")
                     
-                    unclear_elements = quality_data.get('unclear_elements', [])
-                    logger.debug(f"Extracted unclear_elements: {unclear_elements}")
+                    # REMOVED: unclear_elements and potentially_fabricated_elements
                     
-                    potentially_fabricated_elements = quality_data.get('potentially_fabricated_elements', [])
-                    logger.debug(f"Extracted potentially_fabricated_elements: {potentially_fabricated_elements}")
-                    
-                    # Insert into response_quality_metrics table
+                    # Modified SQL - removed columns that don't exist in the database
                     await conn.execute("""
                         INSERT INTO response_quality_metrics
                             (interaction_id, helpfulness_score, hallucination_risk, 
-                            factual_grounding_score, unclear_elements, potentially_fabricated_elements)
-                        VALUES ($1, $2, $3, $4, $5, $6)
+                            factual_grounding_score)
+                        VALUES ($1, $2, $3, $4)
                     """,
                         log_id,  # Using chatbot_logs.id instead of interaction_id
                         helpfulness_score,
                         hallucination_risk,
-                        factual_grounding_score,
-                        unclear_elements,
-                        potentially_fabricated_elements
+                        factual_grounding_score
                     )
                     
                     logger.info(f"Recorded response quality metrics for chat log ID: {log_id}")
@@ -404,6 +598,30 @@ class MessageHandler:
             },
             'error_occurred': True
         }
+
+    async def _cache_response(self, message: str, user_id: str, response: str):
+        """Cache response for future use during rate limiting."""
+        try:
+            # Get Redis client
+            from ai_services_api.services.chatbot.utils.redis_connection import redis_pool
+            redis_client = await redis_pool.get_redis()
+            
+            # Generate cache key
+            redis_key = f"chat:{user_id}:{message}"
+            
+            # Prepare data with timestamp
+            chat_data = {
+                "response": response,
+                "timestamp": datetime.utcnow().isoformat(),
+                "user_id": user_id,
+                "cached_for_rate_limit": True
+            }
+            
+            # Cache for 24 hours
+            await redis_client.setex(redis_key, 86400, json.dumps(chat_data))
+            logger.debug(f"Cached response for potential rate limit situations: {redis_key}")
+        except Exception as e:
+            logger.error(f"Error caching response: {e}")
 
     async def update_content_click(self, interaction_id: int, content_id: str):
         """

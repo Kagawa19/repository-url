@@ -2,6 +2,7 @@ from enum import Enum
 import asyncio
 import json
 import logging
+import random
 import re
 import os
 import time
@@ -96,21 +97,23 @@ class GeminiLLMManager:
             raise
 
     def get_gemini_model(self):
-        """Initialize and return the Gemini model."""
+        """Initialize and return the Gemini model with built-in retry logic."""
         return ChatGoogleGenerativeAI(
             google_api_key=self.api_key,
             stream=True,
-            model="gemini-1.5-pro-latest",
+            model="gemini-2.0-flash-thinking-exp-01-21",
             convert_system_message_to_human=True,
             callbacks=[self.callback],
             temperature=0.7,
             top_p=0.9,
             top_k=40,
+            max_retries=5,  # Use built-in retry mechanism
+            timeout=30  # Set a reasonable timeout
         )
-
     async def analyze_quality(self, message: str, response: str = "") -> Dict:
         """
         Analyze the quality of a response in terms of helpfulness, factual accuracy, and potential hallucination.
+        Includes improved rate limit handling.
         
         Args:
             message (str): The user's original query
@@ -120,6 +123,11 @@ class GeminiLLMManager:
             Dict: Quality metrics including helpfulness, hallucination risk, and factual grounding
         """
         try:
+            # Limit analysis during high load periods or if a rate limit was recently hit
+            if hasattr(self, '_rate_limited') and self._rate_limited:
+                logger.warning("Skipping quality analysis due to recent rate limit")
+                return self._get_default_quality()
+            
             # If no response provided, we can only analyze the query
             if not response:
                 prompt = f"""Analyze this query for an APHRC chatbot and return a JSON object with quality expectations.
@@ -158,22 +166,47 @@ class GeminiLLMManager:
                 Chatbot response: {response}
                 """
             
-            response = await self.get_gemini_model().ainvoke(prompt)
-            cleaned_response = response.content.strip()
-            cleaned_response = cleaned_response.replace('```json', '').replace('```', '').strip()
-            
+            # Use model with retry logic already built in from get_gemini_model()
             try:
-                quality_data = json.loads(cleaned_response)
-                logger.info(f"Response quality analysis result: {quality_data}")
-                return quality_data
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse quality analysis response: {cleaned_response}")
-                logger.error(f"JSON parse error: {e}")
-                return self._get_default_quality()
+                model = self.get_gemini_model()
+                response = await model.invoke(prompt)
                 
+                # Reset any rate limit flag if successful
+                if hasattr(self, '_rate_limited'):
+                    self._rate_limited = False
+                
+                cleaned_response = response.content.strip()
+                cleaned_response = cleaned_response.replace('```json', '').replace('```', '').strip()
+                
+                try:
+                    quality_data = json.loads(cleaned_response)
+                    logger.info(f"Response quality analysis result: {quality_data}")
+                    return quality_data
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse quality analysis response: {cleaned_response}")
+                    logger.error(f"JSON parse error: {e}")
+                    return self._get_default_quality()
+                    
+            except Exception as api_error:
+                # Check if this was a rate limit error
+                if any(x in str(api_error).lower() for x in ["429", "quota", "rate limit", "resource exhausted"]):
+                    logger.warning("Rate limit detected in quality analysis, marking for cooldown")
+                    self._rate_limited = True
+                    # Set expiry for rate limit status
+                    asyncio.create_task(self._reset_rate_limited_after(300))  # 5 minutes cooldown
+                
+                logger.error(f"API error in quality analysis: {api_error}")
+                return self._get_default_quality()
+                    
         except Exception as e:
             logger.error(f"Error in quality analysis: {e}")
             return self._get_default_quality()
+
+    async def _reset_rate_limited_after(self, seconds: int):
+        """Reset rate limited flag after specified seconds."""
+        await asyncio.sleep(seconds)
+        self._rate_limited = False
+        logger.info(f"Rate limit cooldown expired after {seconds} seconds")
 
     def _get_default_quality(self) -> Dict:
         """Return default quality metric values."""
@@ -349,23 +382,19 @@ class GeminiLLMManager:
             logger.debug("Preprocessing message")
             processed_message = message
             
-            # Detect intent (keep this part as is)
-            logger.info("Creating intent detection task")
+            # Detect intent
+            logger.info("Creating parallel tasks for intent and quality")
             try:
-                intent_task = asyncio.create_task(self.detect_intent(processed_message))
-                # Initial quality analysis on query only
-                quality_task = asyncio.create_task(self.analyze_quality(processed_message))
-                
-                # Log task waiting
-                logger.debug("Waiting for intent and initial quality tasks to complete")
-                intent_result, initial_quality_data = await asyncio.gather(intent_task, quality_task)
+                intent_result = await self.detect_intent(processed_message)
+                # Skip quality analysis to avoid extra API calls
+                initial_quality_data = self._get_default_quality()
             except Exception as task_error:
-                logger.error(f"Error in parallel task processing: {task_error}", exc_info=True)
-                raise
+                logger.error(f"Error in task processing: {task_error}", exc_info=True)
+                intent_result = (QueryIntent.GENERAL, 0.0)
+                initial_quality_data = self._get_default_quality()
             
-            # Log intent and quality results
+            # Log intent results
             logger.info(f"Intent detected: {intent_result[0]} (Confidence: {intent_result[1]})")
-            logger.debug(f"Initial quality analysis result: {initial_quality_data}")
             
             # Unpack intent result
             intent, confidence = intent_result
@@ -390,74 +419,113 @@ class GeminiLLMManager:
             try:
                 logger.info("Initializing model streaming")
                 model = self.get_gemini_model()
-                async for response in model.astream(messages):
-                    if not response.content:
-                        logger.debug("Skipping empty response content")
-                        continue
-                        
-                    buffer += response.content
-                    logger.debug(f"Received response chunk. Current buffer length: {len(buffer)}")
-                    
-                    # Yield chunks based on complete sentences or size
-                    while '.' in buffer or len(buffer) > 100:
-                        split_idx = buffer.find('.') + 1 if '.' in buffer else len(buffer)
-                        chunk = buffer[:split_idx]
-                        buffer = buffer[split_idx:].lstrip()
-                        
-                        if chunk.strip():
-                            response_chunks.append(chunk)
-                            logger.debug(f"Yielding chunk (length: {len(chunk)})")
-                            yield {
-                                'chunk': chunk,
-                                'is_metadata': False
-                            }
                 
-                # Handle any remaining buffer
-                if buffer.strip():
-                    logger.debug(f"Yielding final buffer chunk (length: {len(buffer)})")
-                    response_chunks.append(buffer)
+                try:
+                    # Get response with proper error handling
+                    response_data = await model.agenerate([messages])
+                    
+                    if not response_data.generations or not response_data.generations[0]:
+                        logger.warning("Empty response received from model")
+                        yield {
+                            'chunk': "I'm sorry, but I couldn't generate a response at this time.",
+                            'is_metadata': False
+                        }
+                        return
+                    
+                    # Process the main response content
+                    content = response_data.generations[0][0].text
+                    
+                    if not content:
+                        logger.warning("Empty content received from model")
+                        yield {
+                            'chunk': "I'm sorry, but I couldn't generate a response at this time.",
+                            'is_metadata': False
+                        }
+                        return
+                    
+                    # Process the content in chunks for streaming-like behavior
+                    remaining_content = content
+                    while remaining_content:
+                        # Find a good breaking point
+                        end_pos = min(100, len(remaining_content))
+                        if end_pos < len(remaining_content):
+                            # Try to break at a sentence or paragraph
+                            for break_char in ['. ', '! ', '? ', '\n']:
+                                pos = remaining_content[:end_pos].rfind(break_char)
+                                if pos > 0:
+                                    end_pos = pos + len(break_char)
+                                    break
+                        
+                        # Extract current chunk
+                        current_chunk = remaining_content[:end_pos]
+                        remaining_content = remaining_content[end_pos:]
+                        
+                        # Save and yield chunk
+                        response_chunks.append(current_chunk)
+                        logger.debug(f"Yielding chunk (length: {len(current_chunk)})")
+                        yield {
+                            'chunk': current_chunk,
+                            'is_metadata': False
+                        }
+                    
+                    # Prepare complete response
+                    complete_response = ''.join(response_chunks)
+                    logger.info(f"Complete response generated. Total length: {len(complete_response)}")
+                    
+                    # Skip second quality analysis to avoid rate limits
+                    quality_data = self._get_default_quality()
+                    
+                    # Yield metadata
+                    logger.debug("Preparing and yielding metadata")
                     yield {
-                        'chunk': buffer,
+                        'is_metadata': True,
+                        'metadata': {
+                            'response': complete_response,
+                            'timestamp': datetime.now().isoformat(),
+                            'metrics': {
+                                'response_time': time.time() - start_time,
+                                'intent': {
+                                    'type': intent.value,
+                                    'confidence': confidence
+                                },
+                                'quality': quality_data  # Quality metrics
+                            },
+                            'error_occurred': False
+                        }
+                    }
+                except Exception as stream_error:
+                    logger.error(f"Error in response processing: {stream_error}", exc_info=True)
+                    error_message = "I apologize, but I encountered an error processing your request. Please try again."
+                    yield {
+                        'chunk': error_message,
                         'is_metadata': False
                     }
+            except Exception as e:
+                logger.error(f"Critical error generating response: {e}", exc_info=True)
+                error_message = "I apologize, but I encountered an error. Please try again."
                 
-                # Prepare final response
-                complete_response = ''.join(response_chunks)
-                logger.info(f"Complete response generated. Total length: {len(complete_response)}")
-                
-                # Now analyze the complete response for quality
-                logger.debug("Analyzing final response quality")
-                quality_data = await self.analyze_quality(processed_message, complete_response)
-                
-                # Yield metadata
-                logger.debug("Preparing and yielding metadata")
-                yield {
-                    'is_metadata': True,
-                    'metadata': {
-                        'response': complete_response,
-                        'timestamp': datetime.now().isoformat(),
-                        'metrics': {
-                            'response_time': time.time() - start_time,
-                            'intent': {
-                                'type': intent.value,
-                                'confidence': confidence
-                            },
-                            'quality': quality_data  # New quality metrics
-                        },
-                        'error_occurred': False
-                    }
-                }
-                
-            except Exception as stream_error:
-                logger.error(f"Error in stream processing: {stream_error}", exc_info=True)
-                error_message = "I apologize, but I encountered an error processing your request. Please try again."
+                # Yield error chunk
                 yield {
                     'chunk': error_message,
                     'is_metadata': False
                 }
                 
+                # Yield error metadata
+                yield {
+                    'is_metadata': True,
+                    'metadata': {
+                        'response': error_message,
+                        'timestamp': datetime.now().isoformat(),
+                        'metrics': {
+                            'response_time': time.time() - start_time,
+                            'intent': {'type': 'error', 'confidence': 0.0},
+                            'quality': self._get_default_quality()  # Use default quality metrics
+                        },
+                        'error_occurred': True
+                    }
+                }
         except Exception as e:
-            logger.error(f"Critical error generating response: {e}", exc_info=True)
+            logger.error(f"Critical error in generate_async_response: {e}", exc_info=True)
             error_message = "I apologize, but I encountered an error. Please try again."
             
             # Yield error chunk
@@ -475,10 +543,56 @@ class GeminiLLMManager:
                     'metrics': {
                         'response_time': time.time() - start_time,
                         'intent': {'type': 'error', 'confidence': 0.0},
-                        'quality': self._get_default_quality()  # Use default quality metrics
+                        'quality': self._get_default_quality()
                     },
                     'error_occurred': True
                 }
             }
         
-        logger.info(f"Async response generation completed. Total time: {time.time() - start_time:.2f} seconds")
+        finally:
+            logger.info(f"Async response generation completed. Total time: {time.time() - start_time:.2f} seconds")
+
+    async def _throttle_request(self):
+            await self.new_method()
+
+    async def new_method(self):
+        """Apply throttling to incoming requests to help prevent rate limits."""
+            # Get global throttling status from class variable
+        if not hasattr(self.__class__, '_last_request_time'):
+            self.__class__._last_request_time = 0
+            self.__class__._request_count = 0
+            self.__class__._throttle_lock = asyncio.Lock()
+            
+        async with self.__class__._throttle_lock:
+            current_time = time.time()
+            time_since_last = current_time - self.__class__._last_request_time
+                
+                # Reset counter if more than 1 minute has passed
+            if time_since_last > 60:
+                self.__class__._request_count = 0
+                    
+                # Increment request counter
+            self.__class__._request_count += 1
+                
+                # Calculate delay based on request count within the minute
+                # As we approach Gemini's limits, add increasingly longer delays
+            if self.__class__._request_count > 50:  # Getting close to limit
+                delay = 2.0  # 2 seconds
+            elif self.__class__._request_count > 30:
+                delay = 1.0  # 1 second
+            elif self.__class__._request_count > 20:
+                delay = 0.5  # 0.5 seconds
+            elif self.__class__._request_count > 10:
+                delay = 0.2  # 0.2 seconds
+            else:
+                delay = 0
+                    
+                # Add randomization to prevent request bunching
+            if delay > 0:
+                jitter = delay * 0.2 * (random.random() * 2 - 1)  # ±20% jitter
+                delay += jitter
+                logger.debug(f"Adding throttling delay of {delay:.2f}s (request {self.__class__._request_count})")
+                await asyncio.sleep(delay)
+                    
+                # Update last request time
+            self.__class__._last_request_time = time.time()
