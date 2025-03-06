@@ -292,6 +292,8 @@ class OpenAlexProcessor:
 
         return []
 
+    
+
     async def process_publications(self, pub_processor: PublicationProcessor, source: str = 'openalex'):
         """Process publications for experts with ORCID."""
         try:
@@ -376,31 +378,34 @@ class OpenAlexProcessor:
                     
         except Exception as e:
             logger.error(f"Error processing publications: {e}")
-        async def _fetch_expert_publications(self, session: aiohttp.ClientSession, orcid: str,
+        
+        
+        
+    async def _fetch_expert_publications(self, session: aiohttp.ClientSession, orcid: str,
                                     per_page: int = 5) -> List[Dict[str, Any]]:
-            """Fetch publications for an expert."""
-            try:
-                url = f"{self.base_url}/works"
-                params = {
-                    'filter': f"author.orcid:{orcid}",
-                    'per-page': per_page
-                }
+        """Fetch publications for an expert."""
+        try:
+            url = f"{self.base_url}/works"
+            params = {
+                'filter': f"author.orcid:{orcid}",
+                'per-page': per_page
+            }
                 
-                async with session.get(url, params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return data.get('results', [])
-                    elif response.status == 429:
-                        logger.warning("Rate limit hit, waiting before retry")
-                        await asyncio.sleep(5)
-                        return []
-                    else:
-                        logger.error(f"Failed to fetch publications: Status {response.status}")
-                        return []
+            async with session.get(url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get('results', [])
+                elif response.status == 429:
+                    logger.warning("Rate limit hit, waiting before retry")
+                    await asyncio.sleep(5)
+                    return []
+                else:
+                    logger.error(f"Failed to fetch publications: Status {response.status}")
+                    return []
                     
-            except Exception as e:
-                logger.error(f"Error fetching publications: {e}")
-                return []
+        except Exception as e:
+            logger.error(f"Error fetching publications: {e}")
+            return []
 
     def get_expert_openalex_data(self, first_name: str, last_name: str) -> Tuple[str, str]:
         """Get expert's ORCID and OpenAlex ID."""

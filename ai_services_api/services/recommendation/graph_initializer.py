@@ -45,7 +45,7 @@ class DatabaseConnectionManager:
             }
         else:
             conn_params = {
-                'host': os.getenv('POSTGRES_HOST', 'localhost'),
+                'host': os.getenv('POSTGRES_HOST', 'postgres'),
                 'port': os.getenv('POSTGRES_PORT', '5432'),
                 'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
                 'user': os.getenv('POSTGRES_USER', 'postgres'),
