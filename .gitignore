@@ -14,6 +14,13 @@ pdf/
 .pip
 dist
 ssh
+# SSH keys
+.ssh/
+*.pem
+id_rsa
+id_dsa
+id_ed25519
+*.key
 redis-data
 postgres-data
 kube_config*
