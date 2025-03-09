@@ -797,4 +797,9 @@ def main():
         print(f"Done! Stored {total_stored} resources in {elapsed_time:.2f} seconds.")
     
     except Exception as e:
-        logger.error(f"An error occurred:
+        logger.error(f"An error occurred: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    main()
