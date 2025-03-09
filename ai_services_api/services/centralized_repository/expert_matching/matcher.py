@@ -24,8 +24,11 @@ class Matcher:
             expert_lookup = {}
             for expert in experts:
                 if isinstance(expert, tuple):
-                    # Handle database tuple result
-                    expert_id, first_name, last_name = expert
+                    # Get id and name fields from tuple, accounting for different lengths
+                    expert_id = expert[0]  # ID is always first
+                    # First and last name are in positions 1 and 2
+                    first_name = expert[1] if len(expert) > 1 else ''
+                    last_name = expert[2] if len(expert) > 2 else ''
                     full_name = self._normalize_name(f"{first_name} {last_name}")
                     expert_lookup[full_name] = expert_id
                 else:
@@ -36,18 +39,45 @@ class Matcher:
             for resource in resources:
                 try:
                     if isinstance(resource, tuple):
-                        # Handle database tuple result
-                        resource_id, authors = resource
+                        # Handle database tuple result - expect (id, authors)
+                        resource_id = resource[0]
+                        authors = resource[1]
+                        
+                        # Handle different author data formats
                         if isinstance(authors, str):
-                            author_list = json.loads(authors)
+                            if not authors.strip():  # Handle empty strings
+                                author_list = []
+                            else:
+                                try:
+                                    author_list = json.loads(authors)
+                                except json.JSONDecodeError:
+                                    # If JSON parsing fails, try treating as single author
+                                    author_list = [authors]
+                        elif isinstance(authors, list):
+                            author_list = authors
+                        elif authors is None:
+                            author_list = []
                         else:
-                            author_list = authors or []
+                            # Try converting to string if other type
+                            author_list = [str(authors)]
                     else:
                         # Handle dictionary input
                         resource_id = resource['id']
-                        author_list = resource['authors']
+                        author_list = resource.get('authors', [])
+                        if isinstance(author_list, str):
+                            try:
+                                author_list = json.loads(author_list)
+                            except json.JSONDecodeError:
+                                author_list = [author_list]
                     
+                    # Skip empty author lists
+                    if not author_list:
+                        continue
+                        
+                    # Process each author
                     for author in author_list:
+                        if not author:  # Skip empty author names
+                            continue
                         normalized_name = self._normalize_name(author)
                         if normalized_name in expert_lookup:
                             expert_id = expert_lookup[normalized_name]
@@ -55,8 +85,8 @@ class Matcher:
                                 matches[expert_id] = []
                             matches[expert_id].append(resource_id)
                                 
-                except (KeyError, json.JSONDecodeError, TypeError) as e:
-                    self.logger.warning(f"Skipping malformed resource: {e}")
+                except (KeyError, TypeError) as e:
+                    self.logger.warning(f"Skipping malformed resource {resource_id if 'resource_id' in locals() else 'unknown'}: {e}")
                     continue
             
             self.logger.info(f"Found {len(matches)} expert-resource matches")
