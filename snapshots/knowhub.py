@@ -5,14 +5,14 @@ import requests
 import psycopg2
 import time
 import re
+import subprocess
+import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
-from typing import Optional, Dict, List, Any, Set
+from typing import Optional, Dict, List, Any, Set, Union
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 import urllib3
-from urllib3.util.retry import Retry
-from requests.adapters import HTTPAdapter
+from datetime import datetime
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -37,418 +37,634 @@ DB_PARAMS = {
     "port": "5432"
 }
 
-class FastKnowhubScraper:
-    """High-performance scraper for KnowHub with concurrent processing."""
+class RobustKnowhubScraper:
+    """Multi-strategy scraper for KnowHub with fallback mechanisms."""
     
-    def __init__(self, max_workers: int = 8, connection_timeout: int = 5):
-        """Initialize the scraper with parallel processing capabilities.
+    def __init__(self, use_curl: bool = True, use_oai: bool = True):
+        """Initialize the scraper with multiple fallback options.
         
         Args:
-            max_workers: Maximum number of concurrent worker threads
-            connection_timeout: Timeout for initial connection in seconds
+            use_curl: Whether to use cURL as a fallback
+            use_oai: Whether to attempt to use OAI-PMH as a fallback
         """
         self.base_url = os.getenv('KNOWHUB_BASE_URL', 'https://knowhub.aphrc.org')
-        self.max_workers = max_workers
-        self.timeout = (connection_timeout, 30)  # (connect timeout, read timeout)
+        self.use_curl = use_curl
+        self.use_oai = use_oai
+        self.timeout = 60  # Long timeout for problematic servers
         
-        # URL structure - try both standard DSpace handles and collection IDs
-        # We'll try both approaches for maximum compatibility
-        self.handle_endpoints = {
+        # URL structure - using the handle URL pattern
+        self.endpoints = {
             'publications': f"{self.base_url}/handle/123456789/1",
             'documents': f"{self.base_url}/handle/123456789/2",
             'reports': f"{self.base_url}/handle/123456789/3",
             'multimedia': f"{self.base_url}/handle/123456789/4"
         }
         
-        self.collection_endpoints = {
-            'publications': f"{self.base_url}/communities/3/collections",
-            'documents': f"{self.base_url}/collections/12", 
-            'reports': f"{self.base_url}/collections/14",
-            'multimedia': f"{self.base_url}/collections/15"
-        }
+        # OAI-PMH endpoints typically used in DSpace
+        self.oai_endpoint = f"{self.base_url}/oai/request"
         
-        self.browse_endpoints = {
-            'publications': f"{self.base_url}/browse?type=dateissued",
-            'documents': f"{self.base_url}/browse?type=doctype&sort_by=1&order=DESC", 
-            'reports': f"{self.base_url}/browse?type=doctype&value=Technical+Report",
-            'multimedia': f"{self.base_url}/browse?type=dateissued"
-        }
-        
-        # Create session with retry capabilities
+        # Create session with extended headers
         self.session = self._create_session()
         
-        # Track processed URLs to avoid duplicates
+        # Track processed items
         self.processed_urls = set()
+        self.processed_handles = set()
         
-        logger.info(f"FastKnowhubScraper initialized with {max_workers} workers")
+        logger.info(f"RobustKnowhubScraper initialized with cURL={use_curl}, OAI-PMH={use_oai}")
     
     def _create_session(self) -> requests.Session:
-        """Create a requests session with retry capability and browser-like headers."""
+        """Create a requests session with enhanced headers."""
         session = requests.Session()
         
-        # Configure retry strategy for robustness
-        retry_strategy = Retry(
-            total=3,
-            backoff_factor=0.5,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET"]
-        )
-        
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        
-        # Set headers to appear like a regular browser
+        # Set extensive browser-like headers
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
             'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0'
         })
         
         return session
     
-    def _make_request(self, url: str) -> Optional[requests.Response]:
-        """Make a request with proper error handling and logging."""
+    def _make_request(self, url: str) -> Optional[str]:
+        """Make a request with multiple fallback methods."""
+        logger.info(f"Requesting: {url}")
+        
+        # Method 1: Standard requests
         try:
-            logger.info(f"Requesting: {url}")
             response = self.session.get(url, timeout=self.timeout, verify=False)
-            response.raise_for_status()
-            return response
-        except requests.exceptions.Timeout:
-            logger.warning(f"Timeout accessing {url}")
+            if response.status_code == 200:
+                logger.info(f"Request successful with status code {response.status_code}")
+                return response.text
+            logger.warning(f"Request failed with status code {response.status_code}")
+        except Exception as e:
+            logger.warning(f"Request error: {e}")
+        
+        # Method 2: cURL if enabled
+        if self.use_curl:
+            logger.info("Trying cURL fallback...")
+            try:
+                html = self._get_with_curl(url)
+                if html:
+                    logger.info("cURL request successful")
+                    return html
+                logger.warning("cURL request failed")
+            except Exception as e:
+                logger.warning(f"cURL error: {e}")
+        
+        logger.error(f"All request methods failed for {url}")
+        return None
+    
+    def _get_with_curl(self, url: str) -> Optional[str]:
+        """Use cURL to fetch a URL, which sometimes works better for problematic sites."""
+        try:
+            result = subprocess.run(
+                ['curl', '-k', '-L', '-s', url],
+                capture_output=True, text=True, timeout=self.timeout
+            )
+            
+            if result.returncode == 0 and result.stdout:
+                return result.stdout
+            
+            logger.warning(f"cURL failed with return code {result.returncode}")
+            if result.stderr:
+                logger.warning(f"cURL stderr: {result.stderr[:200]}...")
+            
             return None
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Error accessing {url}: {e}")
+        except subprocess.SubprocessError as e:
+            logger.error(f"cURL subprocess error: {e}")
             return None
     
-    def _fetch_listing_page(self, url: str) -> List[Dict[str, Any]]:
-        """Fetch and parse a listing page to extract item links."""
-        response = self._make_request(url)
-        if not response:
-            return []
+    def _try_oai_pmh(self, resource_type: str) -> List[Dict[str, Any]]:
+        """Try to fetch metadata using OAI-PMH protocol."""
+        items = []
         
-        soup = BeautifulSoup(response.text, 'html.parser')
-        links = []
+        if not self.use_oai:
+            return items
         
-        # Try multiple selector patterns to find items
+        # Map resource type to a set string for OAI-PMH
+        set_spec = None
+        if resource_type == 'publications':
+            set_spec = "col_123456789_1"
+        elif resource_type == 'documents':
+            set_spec = "col_123456789_2"
+        elif resource_type == 'reports':
+            set_spec = "col_123456789_3"
+        elif resource_type == 'multimedia':
+            set_spec = "col_123456789_4"
+        
+        if not set_spec:
+            return items
+        
+        # Construct OAI-PMH URL
+        url = f"{self.oai_endpoint}?verb=ListRecords&metadataPrefix=oai_dc"
+        if set_spec:
+            url += f"&set={set_spec}"
+        
+        logger.info(f"Trying OAI-PMH: {url}")
+        
+        # Make request
+        content = self._make_request(url)
+        if not content:
+            return items
+        
+        # Parse XML response
+        try:
+            # Clean potential problematic characters
+            content = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', content)
+            
+            # Parse XML
+            root = ET.fromstring(content)
+            
+            # Define XML namespaces
+            namespaces = {
+                'oai': 'http://www.openarchives.org/OAI/2.0/',
+                'dc': 'http://purl.org/dc/elements/1.1/',
+                'oai_dc': 'http://www.openarchives.org/OAI/2.0/oai_dc/'
+            }
+            
+            # Extract records
+            records = root.findall('.//oai:record', namespaces)
+            logger.info(f"Found {len(records)} OAI-PMH records")
+            
+            for record in records:
+                try:
+                    # Get header
+                    header = record.find('./oai:header', namespaces)
+                    if header is None:
+                        continue
+                    
+                    # Get identifier
+                    identifier = header.find('./oai:identifier', namespaces)
+                    if identifier is None or not identifier.text:
+                        continue
+                    
+                    # Extract handle from identifier
+                    handle_match = re.search(r'oai:[^:]+:([0-9]+/[0-9]+)', identifier.text)
+                    handle = handle_match.group(1) if handle_match else None
+                    
+                    if not handle or handle in self.processed_handles:
+                        continue
+                    
+                    self.processed_handles.add(handle)
+                    
+                    # Get metadata
+                    metadata_elem = record.find('./oai:metadata/oai_dc:dc', namespaces)
+                    if metadata_elem is None:
+                        continue
+                    
+                    # Extract Dublin Core elements
+                    dc_data = {}
+                    
+                    # Title
+                    title_elem = metadata_elem.find('./dc:title', namespaces)
+                    title = title_elem.text if title_elem is not None and title_elem.text else "Unknown Title"
+                    
+                    # Creator/Author
+                    authors = []
+                    for creator in metadata_elem.findall('./dc:creator', namespaces):
+                        if creator.text:
+                            authors.append(creator.text.strip())
+                    
+                    # Description/Abstract
+                    abstract = ""
+                    for desc in metadata_elem.findall('./dc:description', namespaces):
+                        if desc.text:
+                            abstract += desc.text.strip() + " "
+                    abstract = abstract.strip()
+                    
+                    # Date
+                    pub_date = None
+                    pub_year = None
+                    date_elem = metadata_elem.find('./dc:date', namespaces)
+                    if date_elem is not None and date_elem.text:
+                        pub_date = date_elem.text.strip()
+                        # Extract year
+                        year_match = re.search(r'\b(19|20)\d{2}\b', pub_date)
+                        if year_match:
+                            pub_year = int(year_match.group(0))
+                    
+                    # Subject/Keywords
+                    keywords = []
+                    for subject in metadata_elem.findall('./dc:subject', namespaces):
+                        if subject.text:
+                            keywords.append(subject.text.strip())
+                    
+                    # Type
+                    type_elem = metadata_elem.find('./dc:type', namespaces)
+                    doc_type = type_elem.text if type_elem is not None and type_elem.text else resource_type
+                    
+                    # Identifier (URL, DOI)
+                    url = None
+                    doi = None
+                    for identifier in metadata_elem.findall('./dc:identifier', namespaces):
+                        if identifier.text:
+                            id_text = identifier.text.strip()
+                            if id_text.startswith('http'):
+                                url = id_text
+                            elif 'doi' in id_text.lower() or id_text.startswith('10.'):
+                                doi_match = re.search(r'10\.\d{4,}/\S+', id_text)
+                                if doi_match:
+                                    doi = doi_match.group(0)
+                    
+                    # If no URL found, construct one
+                    if not url:
+                        url = f"{self.base_url}/handle/{handle}"
+                    
+                    # Create item
+                    item = {
+                        'title': title,
+                        'authors': authors,
+                        'authors_json': json.dumps([{"name": author} for author in authors]) if authors else None,
+                        'abstract': abstract,
+                        'publication_date': pub_date,
+                        'publication_year': pub_year,
+                        'url': url,
+                        'doi': doi,
+                        'handle': handle,
+                        'resource_type': resource_type,
+                        'identifiers_json': json.dumps({"handle": handle, "keywords": keywords}) if keywords else None,
+                        'source': 'knowhub'
+                    }
+                    
+                    items.append(item)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing OAI-PMH record: {e}")
+            
+        except ET.ParseError as e:
+            logger.error(f"XML parsing error: {e}")
+            logger.debug(f"XML content preview: {content[:200]}...")
+        except Exception as e:
+            logger.error(f"OAI-PMH processing error: {e}")
+        
+        return items
+    
+    def _extract_items_from_html(self, content: str, resource_type: str) -> List[Dict[str, Any]]:
+        """Extract items from HTML content."""
+        items = []
+        
+        if not content:
+            return items
+        
+        soup = BeautifulSoup(content, 'html.parser')
+        
+        # Try multiple selectors to find items
         selectors = [
-            'div.artifact-description a[href*="handle"]',
-            'div.ds-artifact-item a[href*="handle"]', 
-            'h4 a[href*="handle"]',
-            'table.ds-table a[href*="handle"]',
-            'div.recent-submissions a[href*="handle"]',
-            'ul.ds-artifact-list a[href*="handle"]',
-            'div.item a[href*="handle"]'
+            'div.artifact-description',
+            'div.ds-artifact-item',
+            'table.ds-table tr',
+            'div.item',
+            'li.ds-artifact-item',
+            'div.recent-submissions > ul > li'
         ]
         
         for selector in selectors:
             elements = soup.select(selector)
             if elements:
                 logger.info(f"Found {len(elements)} items using selector: {selector}")
-                for elem in elements:
-                    href = elem.get('href')
-                    if href and '/handle/' in href:
-                        full_url = urljoin(self.base_url, href)
-                        if full_url not in self.processed_urls:
-                            title = elem.get_text().strip()
-                            if len(title) > 5:  # Skip very short titles that might be navigation
-                                links.append({
-                                    'url': full_url,
-                                    'title': title
-                                })
-        
-        # If we found no links, try a more general approach
-        if not links:
-            all_links = soup.find_all('a', href=True)
-            for a in all_links:
-                href = a.get('href', '')
-                if '/handle/' in href:
-                    full_url = urljoin(self.base_url, href)
-                    if full_url not in self.processed_urls:
-                        title = a.get_text().strip()
-                        if len(title) > 5 and not title.lower() in ['next', 'previous', 'home']:
-                            links.append({
-                                'url': full_url,
-                                'title': title
-                            })
-        
-        return links
-    
-    def _process_item_page(self, item_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process an individual item page to extract all metadata."""
-        url = item_data['url']
-        title = item_data['title']
-        
-        # Skip if already processed
-        if url in self.processed_urls:
-            return {}
-        
-        self.processed_urls.add(url)
-        
-        # Get item detail page
-        response = self._make_request(url)
-        if not response:
-            return {}
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Determine resource type from URL
-        resource_type = 'other'
-        for type_key, handle_url in self.handle_endpoints.items():
-            if handle_url in url:
-                resource_type = type_key
-                break
-        
-        # Extract handle ID
-        handle = None
-        handle_match = re.search(r'/handle/([0-9]+/[0-9]+)', url)
-        if handle_match:
-            handle = handle_match.group(1)
-        
-        # Extract metadata with multiple strategies
-        metadata = self._extract_metadata(soup)
-        
-        # Add URL, title and handle if they don't exist in metadata
-        if not metadata.get('title'):
-            metadata['title'] = title
-        
-        metadata['url'] = url
-        metadata['handle'] = handle
-        metadata['resource_type'] = resource_type
-        
-        return metadata
-    
-    def _extract_metadata(self, soup: BeautifulSoup) -> Dict[str, Any]:
-        """Extract all metadata from an item page with multiple strategies."""
-        metadata = {
-            'title': '',
-            'abstract': '',
-            'authors': [],
-            'publication_date': None,
-            'publication_year': None,
-            'keywords': [],
-            'doi': None,
-            'source': 'knowhub'
-        }
-        
-        # Strategy 1: Look for metadata in a table
-        metadata_table = soup.find('table', class_='ds-table')
-        if metadata_table:
-            rows = metadata_table.find_all('tr')
-            for row in rows:
-                cells = row.find_all(['th', 'td'])
-                if len(cells) >= 2:
-                    field = cells[0].get_text().strip().lower()
-                    value = cells[1].get_text().strip()
-                    
-                    if 'title' in field:
-                        metadata['title'] = value
-                    elif 'author' in field or 'creator' in field:
-                        metadata['authors'] = [name.strip() for name in value.split(';')]
-                    elif 'date' in field or 'issued' in field:
-                        metadata['publication_date'] = value
-                        # Extract year
-                        year_match = re.search(r'\b(19|20)\d{2}\b', value)
-                        if year_match:
-                            metadata['publication_year'] = int(year_match.group(0))
-                    elif 'abstract' in field or 'description' in field:
-                        metadata['abstract'] = value
-                    elif 'subject' in field or 'keyword' in field:
-                        metadata['keywords'] = [k.strip() for k in value.split(';')]
-                    elif 'doi' in field:
-                        doi_match = re.search(r'10\.\d{4,}/\S+', value)
-                        if doi_match:
-                            metadata['doi'] = doi_match.group(0)
-        
-        # Strategy 2: Look for dublin core metadata
-        dc_elements = soup.find_all('meta', attrs={'name': re.compile(r'^DC\.|^DCTERMS\.')})
-        for elem in dc_elements:
-            field = elem.get('name', '').lower()
-            value = elem.get('content', '').strip()
-            
-            if value:
-                if 'dc.title' in field:
-                    metadata['title'] = value
-                elif 'dc.creator' in field or 'dc.contributor.author' in field:
-                    if value not in metadata['authors']:
-                        metadata['authors'].append(value)
-                elif 'dc.date.issued' in field or 'dcterms.issued' in field:
-                    metadata['publication_date'] = value
-                    # Extract year
-                    year_match = re.search(r'\b(19|20)\d{2}\b', value)
-                    if year_match:
-                        metadata['publication_year'] = int(year_match.group(0))
-                elif 'dc.description' in field or 'dc.description.abstract' in field:
-                    metadata['abstract'] = value
-                elif 'dc.subject' in field:
-                    if value not in metadata['keywords']:
-                        metadata['keywords'].append(value)
-                elif 'dc.identifier.doi' in field:
-                    metadata['doi'] = value
-        
-        # Strategy 3: Look for metadata in divs
-        # Title (if not found yet)
-        if not metadata['title']:
-            title_elem = soup.find(['h1', 'h2'], class_=['page-title', 'ds-div-head'])
-            if title_elem:
-                metadata['title'] = title_elem.get_text().strip()
-        
-        # Abstract
-        if not metadata['abstract']:
-            abstract_elem = soup.find('div', class_=['abstract', 'ds-static-div'])
-            if abstract_elem:
-                metadata['abstract'] = abstract_elem.get_text().strip()
-        
-        # Format authors as JSON
-        if metadata['authors']:
-            metadata['authors_json'] = json.dumps([{"name": author} for author in metadata['authors']])
-        else:
-            metadata['authors_json'] = None
-        
-        # Format keywords as JSON
-        if metadata['keywords']:
-            metadata['identifiers_json'] = json.dumps({"keywords": metadata['keywords']})
-        else:
-            metadata['identifiers_json'] = None
-        
-        return metadata
-    
-    def fetch_all_resources(self, max_items_per_type: int = 100) -> int:
-        """Fetch resources from all endpoints and store them in database.
-        
-        Args:
-            max_items_per_type: Maximum number of items to fetch for each resource type
-            
-        Returns:
-            Number of items successfully stored in the database
-        """
-        logger.info("Starting to fetch all KnowHub resources")
-        
-        # Check database table first
-        if not check_resources_table():
-            logger.error("Database table check failed")
-            return 0
-        
-        total_stored = 0
-        
-        # Try all endpoint types for each resource type
-        for resource_type, handle_url in self.handle_endpoints.items():
-            logger.info(f"Processing {resource_type}...")
-            
-            # We'll try all three URL types (handle, collection, browse)
-            urls_to_try = [
-                self.handle_endpoints.get(resource_type),
-                self.collection_endpoints.get(resource_type),
-                self.browse_endpoints.get(resource_type)
-            ]
-            
-            # Track items found for this type
-            item_links = []
-            
-            # Try each URL until we get results
-            for url in urls_to_try:
-                if not url:
-                    continue
-                    
-                links = self._fetch_listing_page(url)
                 
-                if links:
-                    logger.info(f"Found {len(links)} items at {url}")
-                    item_links.extend(links)
-                    
-                    # If we have enough links, stop trying other URLs
-                    if len(item_links) >= max_items_per_type:
-                        item_links = item_links[:max_items_per_type]
-                        break
-            
-            if not item_links:
-                logger.warning(f"No {resource_type} items found in any endpoint")
-                continue
-            
-            # Process item pages concurrently
-            logger.info(f"Processing {len(item_links)} {resource_type} detail pages concurrently")
-            items_processed = self._process_items_concurrently(item_links, resource_type)
-            total_stored += items_processed
-        
-        logger.info(f"Completed fetching all resources. Total stored: {total_stored}")
-        return total_stored
-    
-    def _process_items_concurrently(self, item_links: List[Dict[str, Any]], resource_type: str) -> int:
-        """Process multiple item pages concurrently using a thread pool.
-        
-        Args:
-            item_links: List of dictionaries with item URLs and titles
-            resource_type: Type of resource being processed
-            
-        Returns:
-            Number of items successfully stored in the database
-        """
-        processed_count = 0
-        
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit all tasks
-            future_to_url = {
-                executor.submit(self._process_item_page, item): item['url']
-                for item in item_links
-            }
-            
-            # Process results as they complete
-            for i, future in enumerate(as_completed(future_to_url), 1):
-                url = future_to_url[future]
-                try:
-                    metadata = future.result()
-                    if metadata:
-                        # Ensure resource type is set
-                        metadata['resource_type'] = resource_type
+                for element in elements:
+                    try:
+                        # Extract link and title
+                        link_elem = element.select_one('a[href*="handle"]')
+                        if not link_elem or not link_elem.get('href'):
+                            continue
                         
-                        # Store in database
-                        result_id = insert_single_resource(metadata)
-                        if result_id:
-                            processed_count += 1
-                            logger.info(f"[{i}/{len(item_links)}] Stored {resource_type} item: {metadata.get('title', '')[:50]}...")
-                        else:
-                            logger.warning(f"[{i}/{len(item_links)}] Failed to store item: {url}")
-                    else:
-                        logger.warning(f"[{i}/{len(item_links)}] No metadata extracted: {url}")
+                        href = link_elem.get('href')
+                        url = urljoin(self.base_url, href)
+                        
+                        if url in self.processed_urls:
+                            continue
+                        
+                        self.processed_urls.add(url)
+                        
+                        # Extract handle from URL
+                        handle_match = re.search(r'/handle/([0-9]+/[0-9]+)', href)
+                        if not handle_match:
+                            continue
+                        
+                        handle = handle_match.group(1)
+                        
+                        if handle in self.processed_handles:
+                            continue
+                        
+                        self.processed_handles.add(handle)
+                        
+                        # Extract title
+                        title = link_elem.get_text().strip()
+                        if not title or len(title) < 5:
+                            continue
+                        
+                        # Get item details
+                        item_details = self._get_item_details(url, handle, title, resource_type)
+                        if item_details:
+                            items.append(item_details)
+                    
+                    except Exception as e:
+                        logger.warning(f"Error processing item element: {e}")
                 
-                except Exception as e:
-                    logger.error(f"Error processing {url}: {e}")
+                # If we found items, no need to try other selectors
+                if items:
+                    break
         
-        logger.info(f"Processed {len(item_links)} {resource_type} items, stored {processed_count}")
-        return processed_count
+        return items
     
-    def run(self, max_items_per_type: int = 100) -> int:
-        """Main method to run the scraper and store results.
+    def _get_item_details(self, url: str, handle: str, title: str, resource_type: str) -> Optional[Dict[str, Any]]:
+        """Get detailed metadata for an item."""
+        logger.info(f"Getting details for: {url}")
         
-        Args:
-            max_items_per_type: Maximum number of items to fetch for each resource type
-            
-        Returns:
-            Total number of items stored in the database
-        """
-        start_time = time.time()
+        # Make request for item page
+        content = self._make_request(url)
+        if not content:
+            # If we can't get the item page, create a minimal record
+            return {
+                'title': title,
+                'url': url,
+                'handle': handle,
+                'abstract': '',
+                'authors': [],
+                'authors_json': None,
+                'publication_date': None,
+                'publication_year': None,
+                'resource_type': resource_type,
+                'identifiers_json': json.dumps({"handle": handle}),
+                'source': 'knowhub'
+            }
         
         try:
-            total_stored = self.fetch_all_resources(max_items_per_type)
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Extract metadata
+            metadata = {}
+            
+            # Try to get a better title
+            title_elem = soup.select_one('h1.page-title, h2.page-title, h1.ds-div-head, h2.ds-div-head')
+            if title_elem:
+                metadata['title'] = title_elem.get_text().strip()
+            else:
+                metadata['title'] = title
+            
+            # Abstract
+            abstract_elem = soup.select_one('div.simple-item-view-description div.item-page-field-wrapper-value, div.item-summary-view-metadata p.item-view-abstract')
+            if abstract_elem:
+                metadata['abstract'] = abstract_elem.get_text().strip()
+            else:
+                metadata['abstract'] = ''
+            
+            # Authors
+            authors = []
+            author_elems = soup.select('div.simple-item-view-authors div.item-page-field-wrapper-value a, div.item-summary-view-metadata p.item-view-authors a')
+            for author_elem in author_elems:
+                author_name = author_elem.get_text().strip()
+                if author_name and author_name not in authors:
+                    authors.append(author_name)
+            
+            metadata['authors'] = authors
+            metadata['authors_json'] = json.dumps([{"name": author} for author in authors]) if authors else None
+            
+            # Date
+            date_elem = soup.select_one('div.simple-item-view-date div.item-page-field-wrapper-value, div.item-summary-view-metadata p.item-view-date')
+            if date_elem:
+                date_str = date_elem.get_text().strip()
+                metadata['publication_date'] = date_str
+                
+                # Extract year
+                year_match = re.search(r'\b(19|20)\d{2}\b', date_str)
+                if year_match:
+                    metadata['publication_year'] = int(year_match.group(0))
+            else:
+                metadata['publication_date'] = None
+                metadata['publication_year'] = None
+            
+            # Keywords/Subjects
+            keywords = []
+            keyword_elems = soup.select('div.simple-item-view-subject div.item-page-field-wrapper-value a, div.item-summary-view-metadata p.item-view-subject a')
+            for keyword_elem in keyword_elems:
+                keyword = keyword_elem.get_text().strip()
+                if keyword and keyword not in keywords:
+                    keywords.append(keyword)
+            
+            # Additional metadata for identifiers
+            identifiers = {
+                "handle": handle,
+                "keywords": keywords
+            }
+            
+            metadata['identifiers_json'] = json.dumps(identifiers) if keywords else json.dumps({"handle": handle})
+            
+            # DOI
+            doi_elem = soup.select_one('div.simple-item-view-doi div.item-page-field-wrapper-value, div.item-summary-view-metadata p.item-view-doi')
+            if doi_elem:
+                doi_text = doi_elem.get_text().strip()
+                doi_match = re.search(r'10\.\d{4,}/\S+', doi_text)
+                if doi_match:
+                    metadata['doi'] = doi_match.group(0)
+            else:
+                metadata['doi'] = None
+            
+            # Combine with base metadata
+            item = {
+                'title': metadata.get('title', title),
+                'url': url,
+                'handle': handle,
+                'abstract': metadata.get('abstract', ''),
+                'authors': metadata.get('authors', []),
+                'authors_json': metadata.get('authors_json'),
+                'publication_date': metadata.get('publication_date'),
+                'publication_year': metadata.get('publication_year'),
+                'doi': metadata.get('doi'),
+                'resource_type': resource_type,
+                'identifiers_json': metadata.get('identifiers_json'),
+                'source': 'knowhub'
+            }
+            
+            return item
+            
+        except Exception as e:
+            logger.error(f"Error extracting item details: {e}")
+            
+            # Return minimal metadata
+            return {
+                'title': title,
+                'url': url,
+                'handle': handle,
+                'abstract': '',
+                'authors': [],
+                'authors_json': None,
+                'publication_date': None,
+                'publication_year': None,
+                'resource_type': resource_type,
+                'identifiers_json': json.dumps({"handle": handle}),
+                'source': 'knowhub'
+            }
+    
+    def _process_browse_pages(self, resource_type: str, max_items: int = 50) -> List[Dict[str, Any]]:
+        """Process browse pages that list many items."""
+        items = []
+        
+        # Try browse URLs
+        browse_url = None
+        if resource_type == 'publications':
+            browse_url = f"{self.base_url}/browse?type=dateissued"
+        elif resource_type == 'documents':
+            browse_url = f"{self.base_url}/browse?type=doctype&sort_by=1&order=DESC"
+        elif resource_type == 'reports':
+            browse_url = f"{self.base_url}/browse?type=doctype&value=Technical+Report"
+        elif resource_type == 'multimedia':
+            browse_url = f"{self.base_url}/browse?type=dateissued"
+        
+        if not browse_url:
+            return items
+        
+        content = self._make_request(browse_url)
+        if not content:
+            return items
+        
+        # Extract items from browse page
+        browse_items = self._extract_items_from_html(content, resource_type)
+        items.extend(browse_items)
+        
+        # Try to follow pagination links if needed
+        if len(items) < max_items:
+            soup = BeautifulSoup(content, 'html.parser')
+            next_links = soup.select('a[href*="next"]')
+            
+            for link in next_links:
+                if len(items) >= max_items:
+                    break
+                
+                href = link.get('href')
+                if href:
+                    next_url = urljoin(self.base_url, href)
+                    next_content = self._make_request(next_url)
+                    
+                    if next_content:
+                        next_items = self._extract_items_from_html(next_content, resource_type)
+                        items.extend(next_items)
+        
+        # Limit to max_items
+        return items[:max_items]
+    
+    def fetch_resources(self, resource_type: str, max_items: int = 50) -> List[Dict[str, Any]]:
+        """Fetch resources using multiple strategies.
+        
+        Args:
+            resource_type: Type of resource to fetch
+            max_items: Maximum number of items to fetch
+            
+        Returns:
+            List of resource items
+        """
+        logger.info(f"Fetching {resource_type} with max_items={max_items}")
+        all_items = []
+        
+        # Strategy 1: Try OAI-PMH
+        if self.use_oai:
+            logger.info(f"Trying OAI-PMH for {resource_type}")
+            oai_items = self._try_oai_pmh(resource_type)
+            if oai_items:
+                logger.info(f"Found {len(oai_items)} items via OAI-PMH")
+                all_items.extend(oai_items)
+                
+                # If we have enough items, return
+                if len(all_items) >= max_items:
+                    return all_items[:max_items]
+        
+        # Strategy 2: Try browse pages
+        if len(all_items) < max_items:
+            logger.info(f"Trying browse pages for {resource_type}")
+            browse_items = self._process_browse_pages(resource_type, max_items - len(all_items))
+            if browse_items:
+                logger.info(f"Found {len(browse_items)} items via browse pages")
+                all_items.extend(browse_items)
+        
+        # Strategy 3: Try direct endpoint as a last resort
+        if len(all_items) < max_items and resource_type in self.endpoints:
+            logger.info(f"Trying direct endpoint for {resource_type}")
+            endpoint_url = self.endpoints[resource_type]
+            content = self._make_request(endpoint_url)
+            
+            if content:
+                endpoint_items = self._extract_items_from_html(content, resource_type)
+                if endpoint_items:
+                    logger.info(f"Found {len(endpoint_items)} items via direct endpoint")
+                    all_items.extend(endpoint_items)
+        
+        # Make sure we have no duplicates (by URL)
+        unique_items = {}
+        for item in all_items:
+            url = item.get('url')
+            if url and url not in unique_items:
+                unique_items[url] = item
+        
+        return list(unique_items.values())[:max_items]
+    
+    def run(self, max_items_per_type: int = 50) -> int:
+        """Run scraper for all resource types.
+        
+        Args:
+            max_items_per_type: Maximum items to fetch per resource type
+            
+        Returns:
+            Total number of items stored in database
+        """
+        start_time = time.time()
+        total_stored = 0
+        
+        try:
+            # Check database table
+            if not check_resources_table():
+                logger.error("Database table check failed")
+                return 0
+            
+            # Process each resource type
+            for resource_type in self.endpoints:
+                logger.info(f"\nProcessing {resource_type}...")
+                
+                # Fetch items
+                items = self.fetch_resources(resource_type, max_items_per_type)
+                
+                if not items:
+                    logger.warning(f"No {resource_type} items found")
+                    continue
+                
+                logger.info(f"Found {len(items)} {resource_type} items, inserting into database...")
+                
+                # Insert items
+                inserted = 0
+                for item in items:
+                    result_id = insert_single_resource(item)
+                    if result_id:
+                        inserted += 1
+                    
+                    # Small delay to avoid database issues
+                    time.sleep(0.1)
+                
+                total_stored += inserted
+                logger.info(f"Inserted {inserted} out of {len(items)} {resource_type} items")
+            
             elapsed_time = time.time() - start_time
-            
-            logger.info(f"Scraping completed in {elapsed_time:.2f} seconds")
-            logger.info(f"Total items stored: {total_stored}")
-            
+            logger.info(f"Done! Stored {total_stored} resources in {elapsed_time:.2f} seconds")
             return total_stored
             
         except Exception as e:
-            logger.error(f"Error in scraper execution: {e}", exc_info=True)
-            return 0
+            logger.error(f"Error running scraper: {e}", exc_info=True)
+            return total_stored
+        
         finally:
             self.close()
     
     def close(self):
         """Close resources."""
-        if self.session:
+        if hasattr(self, 'session') and self.session:
             self.session.close()
-            logger.info("Session closed")
 
 def check_resources_table() -> bool:
     """Check if resources_resource table exists and has necessary columns."""
@@ -501,7 +717,7 @@ def check_resources_table() -> bool:
             conn.close()
 
 def insert_single_resource(item: Dict[str, Any]) -> Optional[int]:
-    """Insert a single KnowHub resource into the resources_resource table."""
+    """Insert a single resource into the database."""
     if not item:
         return None
     
@@ -512,12 +728,12 @@ def insert_single_resource(item: Dict[str, Any]) -> Optional[int]:
         conn = psycopg2.connect(**DB_PARAMS)
         cur = conn.cursor()
         
-        # Check if item with this URL already exists
-        if item.get("url"):
-            cur.execute("SELECT id FROM resources_resource WHERE url = %s", (item.get("url"),))
+        # Check if resource already exists by URL
+        if item.get('url'):
+            cur.execute("SELECT id FROM resources_resource WHERE url = %s", (item.get('url'),))
             result = cur.fetchone()
             if result:
-                logger.info(f"Resource with URL {item.get('url')} already exists with ID {result[0]}")
+                logger.info(f"Resource with URL '{item.get('url')}' already exists with ID {result[0]}")
                 return result[0]
         
         # Get next available ID
@@ -525,40 +741,41 @@ def insert_single_resource(item: Dict[str, Any]) -> Optional[int]:
         max_id = cur.fetchone()[0]
         next_id = (max_id or 0) + 1
         
-        # Insert the resource
+        # Insert resource
         cur.execute("""
             INSERT INTO resources_resource 
             (id, title, abstract, url, type, authors, 
-             publication_year, source, identifiers)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+             publication_year, source, identifiers, doi)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO NOTHING
             RETURNING id
         """, (
             next_id,
-            item.get("title"),
-            item.get("abstract"),
-            item.get("url"),
-            item.get("resource_type"),
-            item.get("authors_json"),
-            item.get("publication_year"),
-            item.get("source", "knowhub"),
-            item.get("identifiers_json")
+            item.get('title'),
+            item.get('abstract'),
+            item.get('url'),
+            item.get('resource_type'),
+            item.get('authors_json'),
+            item.get('publication_year'),
+            item.get('source', 'knowhub'),
+            item.get('identifiers_json'),
+            item.get('doi')
         ))
         
         result = cur.fetchone()
         conn.commit()
         
         if result:
-            logger.info(f"Inserted resource with ID {result[0]}: {item.get('title')}")
+            logger.info(f"Inserted resource with ID {result[0]}: {item.get('title')[:50]}...")
             return result[0]
         else:
-            logger.warning(f"Failed to insert resource: {item.get('title')}")
+            logger.warning(f"Failed to insert resource: {item.get('title')[:50]}...")
             return None
         
     except Exception as e:
         if conn:
             conn.rollback()
-        logger.error(f"Error inserting resource '{item.get('title')}': {e}")
+        logger.error(f"Error inserting resource '{item.get('title', 'Unknown')}': {e}")
         return None
     
     finally:
@@ -572,17 +789,12 @@ def main():
     start_time = time.time()
     
     try:
-        # Initialize and run the scraper
-        scraper = FastKnowhubScraper(max_workers=8, connection_timeout=5)
-        total_stored = scraper.run(max_items_per_type=100)
+        # Initialize and run scraper
+        scraper = RobustKnowhubScraper(use_curl=True, use_oai=True)
+        total_stored = scraper.run(max_items_per_type=50)
         
         elapsed_time = time.time() - start_time
-        logger.info(f"Done! Stored {total_stored} resources in {elapsed_time:.2f} seconds.")
+        print(f"Done! Stored {total_stored} resources in {elapsed_time:.2f} seconds.")
     
     except Exception as e:
-        logger.error(f"An error occurred: {e}")
-        import traceback
-        traceback.print_exc()
-
-if __name__ == "__main__":
-    main()
+        logger.error(f"An error occurred:
