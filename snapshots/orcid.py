@@ -150,27 +150,35 @@ def extract_works_info(works_data, orcid_id, researcher_name):
         groups = works_data.get("group", [])
         
         for group in groups:
-            work_summaries = group.get("work-summary", [])
+            # Safely get work-summary with additional check
+            work_summaries = group.get("work-summary", []) if group else []
             
             if work_summaries:
                 # Take the first work summary (preferred)
                 work = work_summaries[0]
                 
-                # Extract work details
-                title = work.get("title", {}).get("title", {}).get("value", "")
+                # Safely extract work details with additional checks
+                title_container = work.get("title", {}) or {}
+                title_value = title_container.get("title", {}) or {}
+                title = title_value.get("value", "")
+                
                 if not title:
                     continue  # Skip works without titles
                 
                 type_value = work.get("type", "")
                 
-                # Extract publication date
+                # Extract publication date safely
                 publication_date = None
                 publication_year = None
                 pub_date = work.get("publication-date")
                 if pub_date:
-                    year = pub_date.get("year", {}).get("value", "")
-                    month = pub_date.get("month", {}).get("value", "01")
-                    day = pub_date.get("day", {}).get("value", "01")
+                    year_container = pub_date.get("year", {}) or {}
+                    month_container = pub_date.get("month", {}) or {}
+                    day_container = pub_date.get("day", {}) or {}
+                    
+                    year = year_container.get("value", "")
+                    month = month_container.get("value", "01")
+                    day = day_container.get("value", "01")
                     
                     if year:
                         publication_year = year
@@ -180,13 +188,17 @@ def extract_works_info(works_data, orcid_id, researcher_name):
                         except:
                             publication_date = None
                 
-                # Extract journal title
-                journal_title = work.get("journal-title", {}).get("value", "")
+                # Extract journal title safely
+                journal_title_container = work.get("journal-title", {}) or {}
+                journal_title = journal_title_container.get("value", "")
                 
-                # Extract external IDs
+                # Extract external IDs safely
                 external_ids = {}
                 doi = None
-                for ext_id in work.get("external-ids", {}).get("external-id", []):
+                external_ids_container = work.get("external-ids", {}) or {}
+                for ext_id in external_ids_container.get("external-id", []):
+                    if not ext_id:
+                        continue
                     id_type = ext_id.get("external-id-type", "")
                     id_value = ext_id.get("external-id-value", "")
                     if id_type and id_value:
@@ -194,9 +206,11 @@ def extract_works_info(works_data, orcid_id, researcher_name):
                         if id_type == "doi":
                             doi = id_value
                 
-                # Extract URL
+                # Extract URL safely
                 url = None
-                for ext_id in work.get("external-ids", {}).get("external-id", []):
+                for ext_id in external_ids_container.get("external-id", []):
+                    if not ext_id:
+                        continue
                     if ext_id.get("external-id-type") == "url":
                         url = ext_id.get("external-id-value", "")
                         break
@@ -217,7 +231,10 @@ def extract_works_info(works_data, orcid_id, researcher_name):
                 
                 works_list.append(work_resource)
     except Exception as e:
-        print(f"Error extracting works info: {e}")
+        print(f"Error extracting works info for {orcid_id}: {e}")
+        # Add more detailed error information to help diagnose issues
+        import traceback
+        traceback.print_exc()
     
     return works_list
 
