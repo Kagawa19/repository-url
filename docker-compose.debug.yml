@@ -1,4 +1,4 @@
-
+version: '3.8'
 services:
   api:
     build:
@@ -7,11 +7,10 @@ services:
     ports:
       - "8000:8000"
       - "5678:5678"  # Add debugpy port
-    # Command remains the same
     command: >
-      bash -c "pip install debugpy &&
-            python /app/setup.py &&
-            python /app/ai_services_api/main.py"
+      sh -c "pip install debugpy &&
+             python -m debugpy --wait-for-client --listen 0.0.0.0:5678 /app/setup.py &&
+             python /app/ai_services_api/main.py"
     volumes:
       - ./:/app:rw
       - ./logs/api:/app/logs:rw
@@ -61,7 +60,7 @@ services:
       - DISPLAY=:99
       - CHROME_PROFILE_DIR=/tmp/chrome-profile
       - PYTHONUNBUFFERED=1
-    # Change this to run as root temporarily
+      - PYTHONPATH=/app
     user: "0:0"
     security_opt:
       - seccomp=unconfined

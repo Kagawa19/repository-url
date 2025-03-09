@@ -4,6 +4,7 @@ System initialization and database setup module.
 import json
 import os
 from typing import List, Dict, Tuple
+import logging
 
 import sys
 import logging
@@ -572,89 +573,126 @@ class SystemInitializer:
             raise
 
 
+  
+
+
     async def initialize_system(self) -> None:
         """Main initialization flow"""
         try:
-            self.verify_environment()
+            logger.info('Starting system initialization...')
             
+            # Verify environment
+            logger.debug('Verifying environment...')
+            self.verify_environment()
+            logger.debug('Environment verified successfully.')
+            
+            # Initialize database and load initial experts
             if not self.config.skip_database:
+                logger.info('Initializing database...')
                 await self.initialize_database()
-                await self.load_initial_experts()
+                logger.info('Database initialized successfully.')
                 
-                logger.info("Starting expert fields processing...")
+                logger.info('Loading initial experts...')
+                await self.load_initial_experts()
+                logger.info('Initial experts loaded successfully.')
+                
+                # Process expert fields
+                logger.info('Starting expert fields processing...')
                 openalex_processor = OpenAlexProcessor()
                 expert_processor = ExpertProcessor(openalex_processor.db, os.getenv('OPENALEX_API_URL'))
                 try:
                     # Process expert fields
+                    logger.debug('Processing expert fields...')
                     expert_processor.process_expert_fields()
-                    logger.info("Expert fields processing complete!")
+                    logger.info('Expert fields processing complete!')
                 except Exception as e:
-                    logger.error(f"Error processing expert fields: {e}")
+                    logger.error(f'Error processing expert fields: {e}')
                 finally:
                     expert_processor.close()
                     openalex_processor.close()
             
-            # Initialize the text summarizer once for reuse
+            # Initialize text summarizer
+            logger.info('Initializing text summarizer...')
             summarizer = TextSummarizer()
+            logger.info('Text summarizer initialized successfully.')
             
+            # Process publications
             if not self.config.skip_publications:
-                # First process all publications from all sources without classification
+                logger.info('Processing publications...')
                 await self.process_publications(summarizer)
+                logger.info('Publications processed successfully.')
                 
-                # Then perform corpus analysis and classify all publications
+                # Classify all publications in the corpus
+                logger.info('Classifying publications...')
                 await self.classify_all_publications(summarizer)
+                logger.info('Publications classified successfully.')
             
+            # Initialize graph
             if not self.config.skip_graph:
+                logger.info('Initializing graph...')
                 graph_success = await self.initialize_graph()
                 if not graph_success:
+                    logger.error('Graph initialization failed')
                     raise Exception("Graph initialization failed")
-                
-            if not await self.create_search_index():
-                raise Exception("Search index creation failed")
+                logger.info('Graph initialized successfully.')
             
+            # Create search index
+            logger.info('Creating search index...')
+            if not await self.create_search_index():
+                logger.error('Search index creation failed')
+                raise Exception("Search index creation failed")
+            logger.info('Search index created successfully.')
+            
+            # Create Redis index
+            logger.info('Creating Redis index...')
             if not await self.create_redis_index():
+                logger.error('Redis index creation failed')
                 raise Exception("Redis index creation failed")
-
+            logger.info('Redis index created successfully.')
+            
             # Process web content
             if not self.config.skip_scraping:
+                logger.info('Processing web content...')
                 web_processor = WebContentProcessor(
                     max_workers=self.config.max_workers,
                 )
                 await web_processor.process_content()
+                logger.info('Web content processed successfully.')
             
-            logger.info("System initialization completed successfully!")
-                
+            logger.info('System initialization completed successfully!')
         except Exception as e:
-            logger.error(f"System initialization failed: {e}")
+            logger.error(f'System initialization failed: {e}')
             raise
 
 def parse_arguments() -> argparse.Namespace:
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Initialize and populate the research database.')
     
     # Existing arguments
     parser.add_argument('--skip-database', action='store_true',
-                    help='Skip database initialization')
+                        help='Skip database initialization')
     parser.add_argument('--skip-openalex', action='store_true',
-                    help='Skip OpenAlex data enrichment')
+                        help='Skip OpenAlex data enrichment')
     parser.add_argument('--skip-publications', action='store_true',
-                    help='Skip publication processing')
+                        help='Skip publication processing')
     parser.add_argument('--skip-graph', action='store_true',
-                    help='Skip graph database initialization')
+                        help='Skip graph database initialization')
     parser.add_argument('--skip-search', action='store_true',
-                    help='Skip search index creation')
+                        help='Skip search index creation')
     parser.add_argument('--skip-redis', action='store_true',
-                    help='Skip Redis index creation')
+                        help='Skip Redis index creation')
     parser.add_argument('--skip-scraping', action='store_true',
-                    help='Skip web content scraping')
+                        help='Skip web content scraping')
     parser.add_argument('--skip-classification', action='store_true',  # New argument
-                    help='Skip the 5-category corpus classification')
+                        help='Skip the 5-category corpus classification')
     parser.add_argument('--expertise-csv', type=str, default='',
-                    help='Path to the CSV file containing initial expert data')
+                        help='Path to the CSV file containing initial expert data')
     parser.add_argument('--max-pages', type=int, default=1000,
-                    help='Maximum number of pages to scrape')
+                        help='Maximum number of pages to scrape')
     parser.add_argument('--max-workers', type=int, default=4,
-                    help='Maximum number of worker threads')
-    return parser.parse_args()
+                        help='Maximum number of worker threads')
+    args = parser.parse_args()
+    return args
 
 async def main() -> None:
     """Main execution function"""

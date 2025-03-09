@@ -18,7 +18,16 @@ logger = logging.getLogger(__name__)
 
 class KnowhubScraper:
     def __init__(self, summarizer: Optional[TextSummarizer] = None):
-        """In
+        """Initialize KnowhubScraper with authentication capabilities."""
+        self.base_url = os.getenv('KNOWHUB_BASE_URL', 'https://knowhub.aphrc.org')
+        self.publications_url = f"{self.base_url}/handle/123456789/1"
+        
+        # Update endpoints to match exact type names
+        self.endpoints = {
+            'documents': f"{self.base_url}/handle/123456789/2",
+            'reports': f"{self.base_url}/handle/123456789/3",
+            'multimedia': f"{self.base_url}/handle/123456789/4"
+        }
         
         # Request headers
         self.headers = {

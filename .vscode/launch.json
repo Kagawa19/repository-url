@@ -1,0 +1,18 @@
+{
+    "configurations": [
+      {
+        "type": "debugpy",
+        "request": "launch",
+        "name": "Launch setup.py",
+        "program": "${workspaceFolder}/setup.py",
+        "console": "integratedTerminal"
+      },
+      {
+        "type": "debugpy",
+        "request": "launch",
+        "name": "Launch debug_wrapper.py",
+        "program": "${workspaceFolder}/debug_wrapper.py",
+        "console": "integratedTerminal"
+      }
+    ]
+  }

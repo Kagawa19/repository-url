@@ -1,0 +1,3 @@
+2025-03-09 21:07:30,927 - __main__ - ERROR - Process failed: 'SystemInitializer' object has no attribute 'initialize_system'
+2025-03-09 21:13:06,846 - __main__ - ERROR - Process failed: unknown action "stoccre_true"
+2025-03-09 21:17:55,598 - __main__ - ERROR - Process failed: 'SystemInitializer' object has no attribute 'initialize_system'
