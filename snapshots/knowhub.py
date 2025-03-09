@@ -5,8 +5,8 @@ import os
 import logging
 import time
 import re
-from datetime import datetime
 from typing import List, Dict, Any, Optional
+import xml.etree.ElementTree as ET
 
 # Configure logging
 logging.basicConfig(
@@ -29,255 +29,255 @@ DB_PARAMS = {
     "port": "5432"
 }
 
-class DSpaceAPI:
-    """Client for interacting with DSpace REST API"""
+class DSpaceClient:
+    """Client for interacting with a DSpace repository"""
     
     def __init__(self, base_url="https://knowhub.aphrc.org"):
         self.base_url = base_url
-        # Most DSpace installations have the REST API at /rest
-        self.api_url = f"{base_url}/rest"
-        # Default REST API version 7 endpoint for newer DSpace installations
-        self.api_v7_url = f"{base_url}/server/api"
+        self.oai_url = f"{base_url}/oai/request"
         
-        # Set proper headers
+        # Common handle prefix for DSpace
+        self.handle_prefix = "123456789"
+        
+        # Set headers for requests
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'application/json',
-            'Content-Type': 'application/json'
+            'Accept': 'application/xml, text/xml, */*'
         }
         
+        # Initialize session
         self.session = requests.Session()
         self.session.headers.update(self.headers)
+        
+        # Define OAI-PMH namespaces
+        self.namespaces = {
+            'oai': 'http://www.openarchives.org/OAI/2.0/',
+            'dc': 'http://purl.org/dc/elements/1.1/',
+            'oai_dc': 'http://www.openarchives.org/OAI/2.0/oai_dc/'
+        }
     
-    def test_api_endpoint(self) -> str:
-        """Test which API endpoint version is available"""
+    def get_collections(self) -> Dict[str, str]:
+        """Get available collections from OAI-PMH ListSets verb"""
+        collections = {}
+        
         try:
-            # Try REST API v7
-            response = self.session.get(f"{self.api_v7_url}/core/items", timeout=30)
-            if response.status_code == 200:
-                logger.info("Using DSpace REST API v7")
-                return "v7"
-        except:
-            pass
+            url = f"{self.oai_url}?verb=ListSets"
+            logger.info(f"Requesting collections from {url}")
             
-        try:
-            # Try REST API v6
-            response = self.session.get(f"{self.api_url}/items", timeout=30)
-            if response.status_code == 200:
-                logger.info("Using DSpace REST API v6")
-                return "v6"
-        except:
-            pass
+            response = self.session.get(url, timeout=30, verify=False)
+            if response.status_code != 200:
+                logger.error(f"Failed to get collections: {response.status_code}")
+                return collections
             
-        # If no API endpoints work, try OAI-PMH
-        try:
-            response = self.session.get(f"{self.base_url}/oai/request?verb=Identify", timeout=30)
-            if response.status_code == 200 and '<Identify>' in response.text:
-                logger.info("Using OAI-PMH endpoint")
-                return "oai"
-        except:
-            pass
+            # Parse XML response
+            root = ET.fromstring(response.text)
             
-        logger.warning("No API endpoints found, fallback to direct database access might be needed")
-        return "none"
-    
-    def get_communities(self) -> List[Dict]:
-        """Get all communities from DSpace"""
-        try:
-            response = self.session.get(f"{self.api_url}/communities", timeout=30)
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logger.warning(f"Failed to get communities: {response.status_code}")
-                return []
-        except Exception as e:
-            logger.error(f"Error getting communities: {e}")
-            return []
-    
-    def get_collections(self, community_id=None) -> List[Dict]:
-        """Get collections, optionally filtered by community"""
-        try:
-            if community_id:
-                url = f"{self.api_url}/communities/{community_id}/collections"
-            else:
-                url = f"{self.api_url}/collections"
+            # Extract sets (collections)
+            sets = root.findall('.//oai:set', self.namespaces)
+            for set_elem in sets:
+                spec = set_elem.find('./oai:setSpec', self.namespaces)
+                name = set_elem.find('./oai:setName', self.namespaces)
                 
-            response = self.session.get(url, timeout=30)
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logger.warning(f"Failed to get collections: {response.status_code}")
-                return []
+                if spec is not None and spec.text and name is not None and name.text:
+                    # Only include collection sets that match expected pattern
+                    if spec.text.startswith('col_'):
+                        collections[spec.text] = name.text
+                        logger.info(f"Found collection: {name.text} (Set: {spec.text})")
+            
+            return collections
+            
+        except ET.ParseError as e:
+            logger.error(f"XML parsing error: {e}")
+            return collections
         except Exception as e:
             logger.error(f"Error getting collections: {e}")
-            return []
+            return collections
     
-    def get_items_in_collection(self, collection_id: str, limit: int = 100) -> List[Dict]:
-        """Get items in a specific collection"""
+    def get_items_by_collection(self, set_spec: str, limit: int = None) -> List[Dict]:
+        """Get items from a specific collection using OAI-PMH"""
+        items = []
+        
         try:
-            items = []
-            offset = 0
-            
-            while True:
-                url = f"{self.api_url}/collections/{collection_id}/items?limit={limit}&offset={offset}"
-                logger.info(f"Fetching items from {url}")
-                
-                response = self.session.get(url, timeout=30)
-                if response.status_code != 200:
-                    logger.warning(f"Failed to get items: {response.status_code}")
-                    break
-                
-                batch = response.json()
-                if not batch:
-                    break
-                    
-                items.extend(batch)
-                logger.info(f"Retrieved {len(batch)} items, total: {len(items)}")
-                
-                if len(batch) < limit:
-                    break
-                    
-                offset += limit
-                time.sleep(1)  # Be nice to the server
-            
-            return items
-            
-        except Exception as e:
-            logger.error(f"Error getting items: {e}")
-            return []
-    
-    def get_item_metadata(self, item_id: str) -> Dict:
-        """Get detailed metadata for a specific item"""
-        try:
-            url = f"{self.api_url}/items/{item_id}/metadata"
-            response = self.session.get(url, timeout=30)
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logger.warning(f"Failed to get item metadata: {response.status_code}")
-                return {}
-        except Exception as e:
-            logger.error(f"Error getting item metadata: {e}")
-            return {}
-    
-    def get_items_via_oai(self, set_spec: str = None, limit: int = 100) -> List[Dict]:
-        """Get items using OAI-PMH protocol"""
-        try:
-            items = []
+            # Initial request URL
+            url = f"{self.oai_url}?verb=ListRecords&metadataPrefix=oai_dc&set={set_spec}"
             resumption_token = None
             
             while True:
                 if resumption_token:
-                    url = f"{self.base_url}/oai/request?verb=ListRecords&resumptionToken={resumption_token}"
-                else:
-                    url = f"{self.base_url}/oai/request?verb=ListRecords&metadataPrefix=oai_dc"
-                    if set_spec:
-                        url += f"&set={set_spec}"
+                    url = f"{self.oai_url}?verb=ListRecords&resumptionToken={resumption_token}"
                 
-                logger.info(f"Fetching OAI items from {url}")
-                response = self.session.get(url, timeout=60)
+                logger.info(f"Requesting items from {url}")
+                response = self.session.get(url, timeout=60, verify=False)
                 
                 if response.status_code != 200:
-                    logger.warning(f"OAI request failed: {response.status_code}")
+                    logger.error(f"Failed to get items: {response.status_code}")
                     break
                 
                 # Parse XML response
                 try:
-                    import xml.etree.ElementTree as ET
-                    from xml.etree.ElementTree import ParseError
-                    
                     root = ET.fromstring(response.text)
                     
-                    # Define namespaces
-                    namespaces = {
-                        'oai': 'http://www.openarchives.org/OAI/2.0/',
-                        'dc': 'http://purl.org/dc/elements/1.1/',
-                        'oai_dc': 'http://www.openarchives.org/OAI/2.0/oai_dc/'
-                    }
-                    
                     # Extract records
-                    records = root.findall('.//oai:record', namespaces)
+                    records = root.findall('.//oai:record', self.namespaces)
+                    logger.info(f"Found {len(records)} records in this batch")
                     
                     for record in records:
-                        item = {}
-                        
-                        # Get identifier
-                        identifier = record.find('./oai:header/oai:identifier', namespaces)
-                        if identifier is not None and identifier.text:
-                            item['identifier'] = identifier.text
-                        
-                        # Get metadata
-                        metadata = record.find('./oai:metadata/oai_dc:dc', namespaces)
-                        if metadata is not None:
-                            # Title
-                            title_elem = metadata.find('./dc:title', namespaces)
-                            if title_elem is not None and title_elem.text:
-                                item['title'] = title_elem.text
+                        try:
+                            # Extract header information
+                            header = record.find('./oai:header', self.namespaces)
+                            if header is None:
+                                continue
+                                
+                            # Check if record is deleted
+                            status = header.get('status')
+                            if status == 'deleted':
+                                continue
                             
-                            # Creator/Author
+                            # Get identifier
+                            identifier_elem = header.find('./oai:identifier', self.namespaces)
+                            if identifier_elem is None or not identifier_elem.text:
+                                continue
+                                
+                            identifier = identifier_elem.text
+                            
+                            # Extract handle from identifier
+                            handle_match = re.search(r'oai:[^:]+:(\d+/\d+)', identifier)
+                            handle = handle_match.group(1) if handle_match else None
+                            
+                            if not handle:
+                                continue
+                            
+                            # Get metadata
+                            metadata = record.find('./oai:metadata/oai_dc:dc', self.namespaces)
+                            if metadata is None:
+                                continue
+                            
+                            # Create item dictionary
+                            item = {
+                                'identifier': identifier,
+                                'handle': handle,
+                                'url': f"{self.base_url}/handle/{handle}"
+                            }
+                            
+                            # Extract Dublin Core fields
+                            # Title
+                            title_elem = metadata.find('./dc:title', self.namespaces)
+                            if title_elem is not None and title_elem.text:
+                                item['title'] = title_elem.text.strip()
+                            else:
+                                continue  # Skip items without title
+                            
+                            # Authors
                             authors = []
-                            for creator in metadata.findall('./dc:creator', namespaces):
+                            for creator in metadata.findall('./dc:creator', self.namespaces):
                                 if creator.text:
-                                    authors.append(creator.text)
+                                    authors.append(creator.text.strip())
+                            for contributor in metadata.findall('./dc:contributor', self.namespaces):
+                                if contributor.text:
+                                    authors.append(contributor.text.strip())
                             item['authors'] = authors
                             
-                            # Description
-                            desc_elem = metadata.find('./dc:description', namespaces)
-                            if desc_elem is not None and desc_elem.text:
-                                item['description'] = desc_elem.text
+                            # Description/Abstract
+                            descriptions = []
+                            for desc in metadata.findall('./dc:description', self.namespaces):
+                                if desc.text:
+                                    descriptions.append(desc.text.strip())
+                            item['description'] = ' '.join(descriptions) if descriptions else None
                             
                             # Date
-                            date_elem = metadata.find('./dc:date', namespaces)
-                            if date_elem is not None and date_elem.text:
-                                item['date'] = date_elem.text
-                                
-                                # Extract year
-                                year_match = re.search(r'\b(19|20)\d{2}\b', date_elem.text)
-                                if year_match:
-                                    item['year'] = int(year_match.group(0))
+                            for date in metadata.findall('./dc:date', self.namespaces):
+                                if date.text:
+                                    date_str = date.text.strip()
+                                    item['date'] = date_str
+                                    
+                                    # Extract year
+                                    year_match = re.search(r'\b(19|20)\d{2}\b', date_str)
+                                    if year_match:
+                                        item['publication_year'] = int(year_match.group(0))
+                                        break
                             
                             # Type
-                            type_elem = metadata.find('./dc:type', namespaces)
-                            if type_elem is not None and type_elem.text:
-                                item['type'] = type_elem.text
+                            for type_elem in metadata.findall('./dc:type', self.namespaces):
+                                if type_elem.text:
+                                    item['type'] = type_elem.text.strip().lower().replace(' ', '_')
+                                    break
                             
-                            # Identifier (URL, DOI)
-                            for id_elem in metadata.findall('./dc:identifier', namespaces):
+                            # Subject/Keywords
+                            keywords = []
+                            for subject in metadata.findall('./dc:subject', self.namespaces):
+                                if subject.text:
+                                    keywords.append(subject.text.strip())
+                            item['keywords'] = keywords
+                            
+                            # Publisher
+                            publisher = metadata.find('./dc:publisher', self.namespaces)
+                            if publisher is not None and publisher.text:
+                                item['publisher'] = publisher.text.strip()
+                            
+                            # Format
+                            format_elem = metadata.find('./dc:format', self.namespaces)
+                            if format_elem is not None and format_elem.text:
+                                item['format'] = format_elem.text.strip()
+                            
+                            # Language
+                            language = metadata.find('./dc:language', self.namespaces)
+                            if language is not None and language.text:
+                                item['language'] = language.text.strip()
+                            
+                            # Rights
+                            rights = metadata.find('./dc:rights', self.namespaces)
+                            if rights is not None and rights.text:
+                                item['rights'] = rights.text.strip()
+                            
+                            # Source
+                            source = metadata.find('./dc:source', self.namespaces)
+                            if source is not None and source.text:
+                                item['source_publication'] = source.text.strip()
+                            
+                            # Multiple identifiers (DOI, etc.)
+                            for id_elem in metadata.findall('./dc:identifier', self.namespaces):
                                 if id_elem.text:
-                                    if id_elem.text.startswith('http'):
-                                        item['url'] = id_elem.text
-                                    elif 'doi' in id_elem.text.lower():
-                                        item['doi'] = id_elem.text
-                        
-                        if 'title' in item:  # Only add items with at least a title
+                                    id_text = id_elem.text.strip()
+                                    
+                                    # URL
+                                    if id_text.startswith('http'):
+                                        item['url'] = id_text
+                                    
+                                    # DOI
+                                    elif 'doi' in id_text.lower() or id_text.startswith('10.'):
+                                        doi_match = re.search(r'(10\.\d{4,}/\S+)', id_text)
+                                        if doi_match:
+                                            item['doi'] = doi_match.group(1)
+                            
                             items.append(item)
+                            
+                            # Check if we've reached the limit
+                            if limit and len(items) >= limit:
+                                return items
+                                
+                        except Exception as e:
+                            logger.error(f"Error processing record: {e}")
+                            continue
                     
                     # Check for resumption token
-                    resumption_token_elem = root.find('.//oai:resumptionToken', namespaces)
-                    if resumption_token_elem is not None and resumption_token_elem.text:
-                        resumption_token = resumption_token_elem.text
+                    token_elem = root.find('.//oai:resumptionToken', self.namespaces)
+                    if token_elem is not None and token_elem.text:
+                        resumption_token = token_elem.text
+                        logger.info(f"Found resumption token: {resumption_token}")
+                        time.sleep(1)  # Be nice to the server
                     else:
                         break
-                        
-                    # Stop if we've reached our limit
-                    if limit and len(items) >= limit:
-                        break
-                
-                except ParseError as e:
-                    logger.error(f"Error parsing OAI XML: {e}")
-                    break
-                except Exception as e:
-                    logger.error(f"Error processing OAI response: {e}")
+                    
+                except ET.ParseError as e:
+                    logger.error(f"XML parsing error: {e}")
                     break
                 
-                time.sleep(2)  # Be nice to the server
-            
-            return items[:limit] if limit else items
+            logger.info(f"Retrieved {len(items)} total items from collection")
+            return items
             
         except Exception as e:
-            logger.error(f"Error getting items via OAI: {e}")
-            return []
+            logger.error(f"Error getting items: {e}")
+            return items
 
 def check_resources_table() -> bool:
     """Check if resources_resource table exists"""
@@ -324,12 +324,20 @@ def insert_resource(item: Dict) -> Optional[int]:
         conn = psycopg2.connect(**DB_PARAMS)
         cur = conn.cursor()
         
-        # Check if resource already exists by URL or identifier
+        # Check if resource already exists by URL or handle
         if item.get('url'):
             cur.execute("SELECT id FROM resources_resource WHERE url = %s", (item.get('url'),))
             result = cur.fetchone()
             if result:
                 logger.info(f"Resource with URL {item.get('url')} already exists with ID {result[0]}")
+                return result[0]
+        
+        if item.get('handle'):
+            cur.execute("SELECT id FROM resources_resource WHERE identifiers::text LIKE %s", 
+                       (f"%{item.get('handle')}%",))
+            result = cur.fetchone()
+            if result:
+                logger.info(f"Resource with handle {item.get('handle')} already exists with ID {result[0]}")
                 return result[0]
         
         # Get next available ID
@@ -343,26 +351,27 @@ def insert_resource(item: Dict) -> Optional[int]:
             # Convert authors to JSON format expected by the database
             authors_json = json.dumps([{"name": author} for author in item.get('authors')])
         
-        # Determine resource type
-        resource_type = item.get('type', 'other')
+        # Determine resource type - use collection type if item type is missing
+        resource_type = item.get('type', item.get('collection_type', 'other'))
         
-        # Prepare identifiers JSON if needed
-        identifiers_json = None
-        identifiers = {}
+        # Prepare identifiers JSON
+        identifiers = {
+            "handle": item.get('handle')
+        }
         
-        if item.get('identifier'):
-            identifiers['oai_identifier'] = item.get('identifier')
-        
-        if item.get('doi'):
-            identifiers['doi'] = item.get('doi')
+        if item.get('keywords'):
+            identifiers["keywords"] = item.get('keywords')
             
-        if identifiers:
-            identifiers_json = json.dumps(identifiers)
+        if item.get('identifier'):
+            identifiers["oai_identifier"] = item.get('identifier')
+        
+        identifiers_json = json.dumps(identifiers)
         
         # Insert the resource
         cur.execute("""
             INSERT INTO resources_resource 
-            (id, title, abstract, url, type, authors, publication_year, source, identifiers, doi)
+            (id, title, abstract, url, type, authors, 
+             publication_year, source, identifiers, doi)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO NOTHING
             RETURNING id
@@ -373,7 +382,7 @@ def insert_resource(item: Dict) -> Optional[int]:
             item.get('url'),
             resource_type,
             authors_json,
-            item.get('year'),
+            item.get('publication_year'),
             "knowhub",
             identifiers_json,
             item.get('doi')
@@ -402,105 +411,52 @@ def insert_resource(item: Dict) -> Optional[int]:
             conn.close()
 
 def main():
-    """Main function to run the DSpace API client"""
+    """Main function to harvest DSpace repository"""
     start_time = time.time()
     
     # Check resources table
     if not check_resources_table():
         return
     
-    # Initialize DSpace API client
-    dspace = DSpaceAPI()
+    # Initialize client
+    dspace = DSpaceClient()
     
-    # Test which API endpoint works
-    api_version = dspace.test_api_endpoint()
+    # Get collections
+    collections = dspace.get_collections()
+    
+    if not collections:
+        logger.warning("No collections found. Using default collection set mappings.")
+        collections = {
+            'col_123456789_1': 'Publications',
+            'col_123456789_2': 'Documents',
+            'col_123456789_3': 'Reports',
+            'col_123456789_4': 'Multimedia'
+        }
     
     total_items = 0
     
-    if api_version == "v6" or api_version == "v7":
-        # REST API approach
-        collections = dspace.get_collections()
+    # Process each collection
+    for set_spec, collection_name in collections.items():
+        logger.info(f"Processing collection: {collection_name} (Set: {set_spec})")
         
-        for collection in collections:
-            collection_id = collection.get('id')
-            collection_name = collection.get('name')
-            
-            if collection_id:
-                logger.info(f"Processing collection: {collection_name} (ID: {collection_id})")
-                
-                items = dspace.get_items_in_collection(collection_id)
-                
-                for item in items:
-                    item_id = item.get('id')
-                    
-                    if item_id:
-                        # Get detailed metadata
-                        metadata = dspace.get_item_metadata(item_id)
-                        
-                        # Process metadata into a standardized format
-                        processed_item = {
-                            'title': item.get('name'),
-                            'url': f"{dspace.base_url}/handle/{item.get('handle')}",
-                            'authors': [],
-                            'type': collection_name.lower().replace(' ', '_'),
-                            'source': 'knowhub'
-                        }
-                        
-                        # Process metadata fields
-                        for meta in metadata:
-                            key = meta.get('key', '')
-                            value = meta.get('value', '')
-                            
-                            if 'dc.title' in key and value:
-                                processed_item['title'] = value
-                            elif 'dc.creator' in key and value:
-                                processed_item['authors'].append(value)
-                            elif 'dc.contributor.author' in key and value:
-                                processed_item['authors'].append(value)
-                            elif 'dc.description' in key and value:
-                                processed_item['description'] = value
-                            elif 'dc.date.issued' in key and value:
-                                processed_item['date'] = value
-                                # Extract year
-                                year_match = re.search(r'\b(19|20)\d{2}\b', value)
-                                if year_match:
-                                    processed_item['year'] = int(year_match.group(0))
-                            elif 'dc.type' in key and value:
-                                processed_item['type'] = value
-                            elif 'dc.identifier.uri' in key and value:
-                                processed_item['url'] = value
-                            elif 'dc.identifier.doi' in key and value:
-                                processed_item['doi'] = value
-                        
-                        # Insert into database
-                        if insert_resource(processed_item):
-                            total_items += 1
-    
-    elif api_version == "oai":
-        # OAI-PMH approach
-        # Map collection types to OAI set specs
-        set_mappings = {
-            'publications': 'col_123456789_1',
-            'documents': 'col_123456789_2',
-            'reports': 'col_123456789_3',
-            'multimedia': 'col_123456789_4'
-        }
+        # Get items from collection
+        items = dspace.get_items_by_collection(set_spec)
         
-        for resource_type, set_spec in set_mappings.items():
-            logger.info(f"Processing {resource_type} via OAI-PMH (set: {set_spec})")
-            
-            items = dspace.get_items_via_oai(set_spec)
-            
-            for item in items:
-                # Ensure resource type is set
-                item['type'] = resource_type
-                
-                # Insert into database
-                if insert_resource(item):
-                    total_items += 1
-    
-    else:
-        logger.error("No working API endpoints found. Cannot retrieve data.")
+        # Add collection type to items
+        collection_type = collection_name.lower().replace(' ', '_')
+        for item in items:
+            if 'type' not in item:
+                item['type'] = collection_type
+            item['collection_type'] = collection_type
+        
+        # Insert items into database
+        inserted = 0
+        for item in items:
+            if insert_resource(item):
+                inserted += 1
+                total_items += 1
+        
+        logger.info(f"Inserted {inserted} out of {len(items)} items from {collection_name}")
     
     elapsed_time = time.time() - start_time
     logger.info(f"Script completed in {elapsed_time:.2f} seconds")
