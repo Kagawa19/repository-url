@@ -15,7 +15,7 @@ DB_PARAMS = {
     "dbname": os.getenv("POSTGRES_DB", "aphrc"),
     "user": os.getenv("POSTGRES_USER", "postgres"),
     "password": os.getenv("POSTGRES_PASSWORD", "p0stgres"),
-    "host": os.getenv("POSTGRES_HOST", "postgres"),
+    "host": os.getenv("POSTGRES_HOST", "localhost"),
     "port": "5432"
 }
 

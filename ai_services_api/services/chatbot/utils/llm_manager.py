@@ -494,14 +494,14 @@ class GeminiLLMManager:
                     }
                 except Exception as stream_error:
                     logger.error(f"Error in response processing: {stream_error}", exc_info=True)
-                    error_message = "I apologize, but I encountered an error processing your request. Please try again."
+                    error_message = "I apologize for the inconvenience. Could you please rephrase your question?"
                     yield {
                         'chunk': error_message,
                         'is_metadata': False
                     }
             except Exception as e:
                 logger.error(f"Critical error generating response: {e}", exc_info=True)
-                error_message = "I apologize, but I encountered an error. Please try again."
+                error_message = "I apologize for the inconvenience. Could you please rephrase your question?"
                 
                 # Yield error chunk
                 yield {
@@ -525,7 +525,7 @@ class GeminiLLMManager:
                 }
         except Exception as e:
             logger.error(f"Critical error in generate_async_response: {e}", exc_info=True)
-            error_message = "I apologize, but I encountered an error. Please try again."
+            error_message = "I apologize for the inconvenience. Could you please rephrase your question."
             
             # Yield error chunk
             yield {
