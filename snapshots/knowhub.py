@@ -3,16 +3,27 @@ import os
 import json
 import requests
 import psycopg2
-from psycopg2 import sql
-from typing import Optional, Dict, List, Any
+import time
 from bs4 import BeautifulSoup
+from typing import Optional, Dict, List, Any
+import logging
+import urllib3
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 
-# Database connection settings - Update for your environment
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filename='knowhub_scraper.log'
+)
+
+# Database connection settings
 DB_PARAMS = {
     "dbname": os.getenv("POSTGRES_DB", "aphrc"),
     "user": os.getenv("POSTGRES_USER", "postgres"),
     "password": os.getenv("POSTGRES_PASSWORD", "p0stgres"),
-    "host": os.getenv("POSTGRES_HOST", "localhost"),
+    "host": "localhost",
     "port": "5432"
 }
 
@@ -28,20 +39,38 @@ class TextSummarizer:
 
 class KnowhubScraper:
     def __init__(self, summarizer: Optional[TextSummarizer] = None):
-        """Initialize KnowhubScraper with authentication capabilities."""
+        """Initialize KnowhubScraper with advanced connection capabilities."""
         self.base_url = os.getenv('KNOWHUB_BASE_URL', 'https://knowhub.aphrc.org')
-        self.publications_url = f"{self.base_url}/handle/123456789/1"
         
-        # Update endpoints to match exact type names
+        # OPTION 1: Use alternative URL structure if the handles aren't working
+        self.publications_url = f"{self.base_url}/communities/3/collections"
+        
+        # Map endpoints using collection IDs instead of handles
         self.endpoints = {
-            'documents': f"{self.base_url}/handle/123456789/2",
-            'reports': f"{self.base_url}/handle/123456789/3",
-            'multimedia': f"{self.base_url}/handle/123456789/4"
+            'documents': f"{self.base_url}/collections/12",
+            'reports': f"{self.base_url}/collections/14", 
+            'multimedia': f"{self.base_url}/collections/15"
         }
+        
         self.summarizer = summarizer or TextSummarizer()
         
-        # Configure session with proper headers and timeout
+        # Create a session with retry capabilities
         self.session = requests.Session()
+        
+        # Configure retry strategy
+        retry_strategy = Retry(
+            total=3,                 # Maximum number of retries
+            backoff_factor=1,        # Exponential backoff
+            status_forcelist=[429, 500, 502, 503, 504],  # Retry on these status codes
+            allowed_methods=["GET"]  # Only retry GET requests
+        )
+        
+        # Mount adapter with retry strategy for both http and https
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+        
+        # Add browser-like headers
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -49,146 +78,282 @@ class KnowhubScraper:
             'Connection': 'keep-alive',
         })
     
+    def try_alternative_url(self, resource_type: str) -> str:
+        """Try alternative URL formats for KnowHub."""
+        # OPTION 2: Try direct browse URL
+        if resource_type == 'publications':
+            return f"{self.base_url}/browse?type=dateissued"
+        elif resource_type == 'documents':
+            return f"{self.base_url}/browse?type=doctype&sort_by=1&order=DESC"
+        elif resource_type == 'reports':
+            return f"{self.base_url}/browse?type=doctype&value=Technical+Report"
+        else:
+            return f"{self.base_url}/browse"
+    
     def fetch_items_by_type(self, resource_type: str) -> List[Dict[str, Any]]:
-        """Fetch items from KnowHub based on resource type.
-        
-        Args:
-            resource_type: The type of resource to fetch (documents, reports, multimedia, publications)
-        
-        Returns:
-            A list of dictionaries containing item information
-        """
+        """Fetch items from KnowHub based on resource type with fallback mechanisms."""
         if resource_type == 'publications':
             url = self.publications_url
         else:
             url = self.endpoints.get(resource_type)
             if not url:
-                print(f"Unknown resource type: {resource_type}")
+                logging.warning(f"Unknown resource type: {resource_type}")
                 return []
         
+        items = []
         try:
-            print(f"Fetching {resource_type} from {url}")
+            logging.info(f"Fetching {resource_type} from {url}")
+            response = self.session.get(url, timeout=(5, 25))  # (connect timeout, read timeout)
             
-            # Use a timeout to avoid hanging indefinitely
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
+            if response.status_code == 200:
+                items = self._extract_items_from_response(response, resource_type)
+            else:
+                logging.warning(f"Received status code {response.status_code} from {url}")
+        
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            logging.warning(f"Connection issue with primary URL for {resource_type}: {e}")
             
-            # Parse HTML response
+            # Try alternative URL if primary fails
+            alt_url = self.try_alternative_url(resource_type)
+            logging.info(f"Trying alternative URL for {resource_type}: {alt_url}")
+            
+            try:
+                alt_response = self.session.get(alt_url, timeout=(5, 25))
+                if alt_response.status_code == 200:
+                    items = self._extract_items_from_response(alt_response, resource_type)
+                else:
+                    logging.warning(f"Alternative URL returned status code {alt_response.status_code}")
+            except requests.exceptions.RequestException as e2:
+                logging.error(f"Alternative URL also failed for {resource_type}: {e2}")
+                
+        except Exception as e:
+            logging.error(f"Unexpected error when processing {resource_type}: {e}")
+            
+        return items
+    
+    def _extract_items_from_response(self, response, resource_type: str) -> List[Dict[str, Any]]:
+        """Extract items from HTML response with multiple parsing strategies."""
+        items = []
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Log page details for debugging
+        logging.info(f"Page title: {soup.title.string if soup.title else 'No title'}")
+        
+        # Different parsing strategies
+        strategies = [
+            self._parse_standard_layout,
+            self._parse_artifact_layout,
+            self._parse_generic_links,
+            self._parse_last_resort
+        ]
+        
+        # Try each strategy until one succeeds
+        for strategy in strategies:
+            logging.info(f"Trying parsing strategy: {strategy.__name__}")
+            extracted_items = strategy(soup, resource_type)
+            if extracted_items:
+                logging.info(f"Successfully extracted {len(extracted_items)} items with {strategy.__name__}")
+                items = extracted_items
+                break
+        
+        return items
+    
+    def _parse_standard_layout(self, soup, resource_type: str) -> List[Dict[str, Any]]:
+        """Parse standard layout based on the screenshot."""
+        items = []
+        
+        # Look for items in a standard layout
+        recent_submissions = soup.select('div.recent-submissions li, div.artifact-description')
+        
+        for item in recent_submissions:
+            title_element = item.select_one('h4 a, h3 a, a.artifact-title, a[href*="handle"]')
+            if not title_element:
+                continue
+                
+            title = title_element.text.strip()
+            item_url = title_element.get('href')
+            
+            if item_url and not item_url.startswith('http'):
+                item_url = f"{self.base_url}{item_url}"
+            
+            authors_element = item.select_one('.item-authors, .authors')
+            authors = authors_element.text.strip() if authors_element else ""
+            
+            description_element = item.select_one('.item-description, .description')
+            description = description_element.text.strip() if description_element else ""
+            
+            date_element = item.select_one('.item-date, .date, .dateissued')
+            publication_date = date_element.text.strip() if date_element else None
+            
+            items.append({
+                "title": title,
+                "url": item_url,
+                "author": authors,
+                "description": self.summarizer.summarize(description),
+                "publication_date": publication_date,
+                "resource_type": resource_type,
+                "source": "knowhub"
+            })
+            
+        return items
+    
+    def _parse_artifact_layout(self, soup, resource_type: str) -> List[Dict[str, Any]]:
+        """Parse artifact layout."""
+        items = []
+        
+        # This attempts to find items that match the structure in typical DSpace installations
+        artifact_items = soup.select('.ds-artifact-item, .artifact-item')
+        
+        for item in artifact_items:
+            title_element = item.select_one('.ds-artifact-title a, .artifact-title a')
+            if not title_element:
+                continue
+                
+            title = title_element.text.strip()
+            item_url = title_element.get('href')
+            
+            if item_url and not item_url.startswith('http'):
+                item_url = f"{self.base_url}{item_url}"
+            
+            authors_element = item.select_one('.ds-artifact-authors, .artifact-authors')
+            authors = authors_element.text.strip() if authors_element else ""
+            
+            description_element = item.select_one('.ds-artifact-abstract, .artifact-abstract')
+            description = description_element.text.strip() if description_element else ""
+            
+            date_element = item.select_one('.ds-artifact-date, .artifact-date')
+            publication_date = date_element.text.strip() if date_element else None
+            
+            items.append({
+                "title": title,
+                "url": item_url,
+                "author": authors,
+                "description": self.summarizer.summarize(description),
+                "publication_date": publication_date,
+                "resource_type": resource_type,
+                "source": "knowhub"
+            })
+            
+        return items
+    
+    def _parse_generic_links(self, soup, resource_type: str) -> List[Dict[str, Any]]:
+        """Parse generic links that could be publications."""
+        items = []
+        
+        # Look for links that might be publications
+        links = soup.select('a[href*="handle"], a[href*="item"]')
+        
+        for link in links:
+            title = link.text.strip()
+            
+            # Ignore navigation, pagination links, or very short titles
+            if len(title) < 10 or title.lower() in ['next', 'previous', 'home', 'browse'] or 'page' in title.lower():
+                continue
+                
+            item_url = link.get('href')
+            if item_url and not item_url.startswith('http'):
+                item_url = f"{self.base_url}{item_url}"
+            
+            # Create minimal item data
+            items.append({
+                "title": title,
+                "url": item_url,
+                "author": "",
+                "description": "",
+                "publication_date": None,
+                "resource_type": resource_type,
+                "source": "knowhub"
+            })
+        
+        return items
+    
+    def _parse_last_resort(self, soup, resource_type: str) -> List[Dict[str, Any]]:
+        """Last resort parsing strategy that tries to find anything useful."""
+        items = []
+        
+        # Try to find any table rows that might contain items
+        tr_elements = soup.select('table tr')
+        
+        for tr in tr_elements:
+            if len(tr.select('td, th')) < 2:  # Skip rows with too few cells
+                continue
+                
+            link = tr.select_one('a[href*="handle"], a[href*="item"]')
+            if not link:
+                continue
+                
+            title = link.text.strip()
+            if len(title) < 5:  # Skip very short titles
+                continue
+                
+            item_url = link.get('href')
+            if item_url and not item_url.startswith('http'):
+                item_url = f"{self.base_url}{item_url}"
+            
+            # Try to extract other information from table cells
+            cells = tr.select('td')
+            
+            # Create item with available data
+            items.append({
+                "title": title,
+                "url": item_url,
+                "author": cells[1].text.strip() if len(cells) > 1 else "",
+                "description": "",
+                "publication_date": cells[2].text.strip() if len(cells) > 2 else None,
+                "resource_type": resource_type,
+                "source": "knowhub"
+            })
+        
+        return items
+    
+    def fetch_item_details(self, item_url: str) -> Dict[str, Any]:
+        """Fetch detailed information about an item from its page."""
+        try:
+            logging.info(f"Fetching details from {item_url}")
+            response = self.session.get(item_url, timeout=(5, 25))
+            
+            if response.status_code != 200:
+                logging.warning(f"Failed to fetch item details, status code: {response.status_code}")
+                return {}
+            
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Extract items based on the HTML structure visible in the screenshot
-            items = []
+            # Extract detailed information
+            abstract = ""
+            abstract_element = soup.select_one('.item-abstract, .abstract, meta[name="DCTERMS.abstract"]')
+            if abstract_element:
+                if abstract_element.name == 'meta':
+                    abstract = abstract_element.get('content', '')
+                else:
+                    abstract = abstract_element.text.strip()
             
-            # First try to find items in the standard layout shown in the screenshot
-            item_elements = soup.select('div.artifact-description')
+            # Extract more accurate author information
+            authors = []
+            author_elements = soup.select('.item-author, .author, meta[name="DC.creator"]')
+            for author_el in author_elements:
+                if author_el.name == 'meta':
+                    authors.append(author_el.get('content', ''))
+                else:
+                    authors.append(author_el.text.strip())
             
-            if not item_elements:
-                # Try alternative selectors if the first one doesn't work
-                item_elements = soup.select('.ds-artifact-item')
+            # Extract publication date
+            publication_date = None
+            date_element = soup.select_one('.item-date, .date, meta[name="DCTERMS.issued"]')
+            if date_element:
+                if date_element.name == 'meta':
+                    publication_date = date_element.get('content', '')
+                else:
+                    publication_date = date_element.text.strip()
             
-            if not item_elements:
-                # Try an even more generic selector
-                item_elements = soup.select('.item-wrapper') or soup.select('.item')
+            return {
+                "abstract": abstract,
+                "authors": ", ".join(authors) if authors else "",
+                "publication_date": publication_date
+            }
             
-            print(f"Found {len(item_elements)} item elements on the page")
-            
-            # If still no items found, extract any potential items from the page
-            if not item_elements:
-                print("No standard item elements found. Attempting to extract information from page structure.")
-                # Log a sample of the HTML to debug
-                print(f"Page title: {soup.title.string if soup.title else 'No title'}")
-                print(f"Sample HTML (first 500 chars): {soup.prettify()[:500]}")
-                
-                # Look for any links that might be publications
-                article_links = soup.select('a[href*="handle"]')
-                for link in article_links:
-                    title = link.text.strip()
-                    if title and len(title) > 5:  # Skip very short titles that are likely navigation
-                        item_url = link.get('href')
-                        if item_url and not item_url.startswith('http'):
-                            item_url = f"{self.base_url}{item_url}"
-                        
-                        items.append({
-                            "title": title,
-                            "url": item_url,
-                            "author": "",
-                            "description": "",
-                            "publication_date": "",
-                            "resource_type": resource_type,
-                            "source": "knowhub"
-                        })
-            
-            # Process standard item elements if found
-            for item in item_elements:
-                # Extract title and URL
-                title_element = item.select_one('h4 a, h3 a, .artifact-title a, a.title')
-                if not title_element:
-                    # Try other possible title selectors
-                    title_element = item.select_one('a[href*="handle"]')
-                
-                if not title_element:
-                    # If still no title element, try to extract any meaningful link
-                    title_element = item.select_one('a')
-                
-                if title_element:
-                    title = title_element.text.strip()
-                    item_url = title_element.get('href')
-                    
-                    if item_url and not item_url.startswith('http'):
-                        item_url = f"{self.base_url}{item_url}"
-                    
-                    # Extract authors
-                    authors_element = item.select_one('.artifact-authors, .item-authors, .author')
-                    authors = authors_element.text.strip() if authors_element else ""
-                    
-                    # Extract abstract/description
-                    description_element = item.select_one('.artifact-abstract, .item-description, .description')
-                    description = description_element.text.strip() if description_element else ""
-                    
-                    # Extract date
-                    date_element = item.select_one('.artifact-date, .item-date, .date, span.date')
-                    publication_date = date_element.text.strip() if date_element else None
-                    
-                    # Create item dictionary
-                    item_data = {
-                        "title": title,
-                        "url": item_url,
-                        "author": authors,
-                        "description": self.summarizer.summarize(description),
-                        "publication_date": publication_date,
-                        "resource_type": resource_type,
-                        "source": "knowhub"
-                    }
-                    
-                    items.append(item_data)
-            
-            print(f"Extracted {len(items)} {resource_type} items")
-            return items
-            
-        except requests.exceptions.Timeout:
-            print(f"Connection timed out when fetching {resource_type} from {url}. Consider increasing the timeout.")
-            return []
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching {resource_type} from {url}: {e}")
-            return []
         except Exception as e:
-            print(f"Unexpected error when processing {resource_type}: {e}")
-            return []
-    
-    def fetch_all_resources(self) -> List[Dict[str, Any]]:
-        """Fetch all types of resources from KnowHub."""
-        all_resources = []
-        
-        # Fetch publications
-        publications = self.fetch_items_by_type('publications')
-        all_resources.extend(publications)
-        
-        # Fetch other resource types
-        for resource_type in self.endpoints.keys():
-            resources = self.fetch_items_by_type(resource_type)
-            all_resources.extend(resources)
-        
-        return all_resources
+            logging.error(f"Error fetching item details: {e}")
+            return {}
 
 def check_resources_table() -> bool:
     """Check if resources_resource table exists and has necessary columns."""
@@ -208,7 +373,7 @@ def check_resources_table() -> bool:
         table_exists = cur.fetchone()[0]
         
         if not table_exists:
-            print("resources_resource table does not exist. Please create it first.")
+            logging.error("resources_resource table does not exist. Please create it first.")
             return False
         
         # Check if 'source' column exists
@@ -221,18 +386,18 @@ def check_resources_table() -> bool:
         source_column_exists = cur.fetchone()[0]
         
         if not source_column_exists:
-            print("'source' column does not exist in resources_resource table. Adding it...")
+            logging.info("'source' column does not exist in resources_resource table. Adding it...")
             cur.execute("""
                 ALTER TABLE resources_resource 
                 ADD COLUMN IF NOT EXISTS source VARCHAR(50);
             """)
             conn.commit()
         
-        print("resources_resource table is ready.")
+        logging.info("resources_resource table is ready.")
         return True
         
     except Exception as e:
-        print(f"Error checking resources table: {e}")
+        logging.error(f"Error checking resources table: {e}")
         return False
     finally:
         if cur:
@@ -241,14 +406,7 @@ def check_resources_table() -> bool:
             conn.close()
 
 def insert_single_resource(item: Dict[str, Any]) -> Optional[int]:
-    """Insert a single KnowHub resource into the resources_resource table.
-    
-    Args:
-        item: Resource item to insert
-        
-    Returns:
-        ID of the inserted resource or None if insertion failed
-    """
+    """Insert a single KnowHub resource into the resources_resource table."""
     if not item:
         return None
     
@@ -264,7 +422,7 @@ def insert_single_resource(item: Dict[str, Any]) -> Optional[int]:
             cur.execute("SELECT id FROM resources_resource WHERE url = %s", (item.get("url"),))
             result = cur.fetchone()
             if result:
-                print(f"Resource with URL {item.get('url')} already exists with ID {result[0]}")
+                logging.info(f"Resource with URL {item.get('url')} already exists with ID {result[0]}")
                 return result[0]
         
         # Get next available ID
@@ -291,8 +449,8 @@ def insert_single_resource(item: Dict[str, Any]) -> Optional[int]:
                 year_match = re.search(r'\b(19|20)\d{2}\b', date_str)
                 if year_match:
                     publication_year = int(year_match.group(0))
-            except:
-                pass
+            except Exception as e:
+                logging.warning(f"Error extracting publication year: {e}")
         
         # Insert the resource
         cur.execute("""
@@ -317,16 +475,16 @@ def insert_single_resource(item: Dict[str, Any]) -> Optional[int]:
         conn.commit()
         
         if result:
-            print(f"Inserted resource with ID {result[0]}: {item.get('title')}")
+            logging.info(f"Inserted resource with ID {result[0]}: {item.get('title')}")
             return result[0]
         else:
-            print(f"Failed to insert resource: {item.get('title')}")
+            logging.warning(f"Failed to insert resource: {item.get('title')}")
             return None
         
     except Exception as e:
         if conn:
             conn.rollback()
-        print(f"Error inserting resource '{item.get('title')}': {e}")
+        logging.error(f"Error inserting resource '{item.get('title')}': {e}")
         return None
     
     finally:
@@ -334,29 +492,6 @@ def insert_single_resource(item: Dict[str, Any]) -> Optional[int]:
             cur.close()
         if conn:
             conn.close()
-
-def insert_into_resources(data: List[Dict[str, Any]]) -> int:
-    """Insert multiple KnowHub resources into resources_resource table.
-    
-    This is a batch function that calls insert_single_resource() for each item.
-    
-    Args:
-        data: List of resource items to insert
-        
-    Returns:
-        Number of items successfully inserted
-    """
-    if not data:
-        return 0
-    
-    inserted_count = 0
-    
-    for item in data:
-        result_id = insert_single_resource(item)
-        if result_id:
-            inserted_count += 1
-    
-    return inserted_count
 
 def main():
     """Main function to scrape KnowHub and insert data into the database."""
@@ -377,37 +512,51 @@ def main():
         
         # Process each resource type separately and insert as we go
         for resource_type in ['publications'] + list(scraper.endpoints.keys()):
-            print(f"\nProcessing {resource_type}...")
+            logging.info(f"\nProcessing {resource_type}...")
             resources = scraper.fetch_items_by_type(resource_type)
             
             if not resources:
-                print(f"No {resource_type} found.")
+                logging.warning(f"No {resource_type} found.")
                 continue
                 
-            print(f"Found {len(resources)} {resource_type}. Inserting into database...")
+            logging.info(f"Found {len(resources)} {resource_type}. Inserting into database...")
             
             # Insert resources one by one for fault tolerance
             for item in resources:
                 total_resources += 1
+                
+                # Fetch additional details if URL is available
+                if item.get("url"):
+                    try:
+                        details = scraper.fetch_item_details(item["url"])
+                        # Update item with additional details
+                        if details.get("abstract"):
+                            item["description"] = details["abstract"]
+                        if details.get("authors"):
+                            item["author"] = details["authors"]
+                        if details.get("publication_date"):
+                            item["publication_date"] = details["publication_date"]
+                    except Exception as e:
+                        logging.warning(f"Error fetching details for {item['url']}: {e}")
                 
                 # Insert the individual resource
                 result_id = insert_single_resource(item)
                 if result_id:
                     inserted_count += 1
                 
-                # Add a small delay to avoid overwhelming the database
-                time.sleep(0.1)
+                # Add a small delay to avoid overwhelming the server
+                time.sleep(0.5)
                 
-            print(f"Completed {resource_type}: {inserted_count} inserted so far.")
+            logging.info(f"Completed {resource_type}: {inserted_count} inserted so far.")
         
         if total_resources == 0:
-            print("No resources found in KnowHub.")
+            logging.warning("No resources found in KnowHub.")
         
         elapsed_time = time.time() - start_time
-        print(f"Done! Inserted {inserted_count} resources out of {total_resources} in {elapsed_time:.2f} seconds.")
+        logging.info(f"Done! Inserted {inserted_count} resources out of {total_resources} in {elapsed_time:.2f} seconds.")
     
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logging.error(f"An error occurred: {e}")
         import traceback
         traceback.print_exc()
 
