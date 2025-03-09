@@ -39,7 +39,15 @@ class KnowhubScraper:
             'multimedia': f"{self.base_url}/handle/123456789/4"
         }
         self.summarizer = summarizer or TextSummarizer()
+        
+        # Configure session with proper headers and timeout
         self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+        })
     
     def fetch_items_by_type(self, resource_type: str) -> List[Dict[str, Any]]:
         """Fetch items from KnowHub based on resource type.
@@ -60,57 +68,111 @@ class KnowhubScraper:
         
         try:
             print(f"Fetching {resource_type} from {url}")
-            response = self.session.get(url)
+            
+            # Use a timeout to avoid hanging indefinitely
+            response = self.session.get(url, timeout=30)
             response.raise_for_status()
             
             # Parse HTML response
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Extract items - this will need customization based on KnowHub's HTML structure
+            # Extract items based on the HTML structure visible in the screenshot
             items = []
             
-            # Find all item listings
-            item_elements = soup.select('.ds-artifact-item')  # Adjust selector based on actual HTML
+            # First try to find items in the standard layout shown in the screenshot
+            item_elements = soup.select('div.artifact-description')
             
+            if not item_elements:
+                # Try alternative selectors if the first one doesn't work
+                item_elements = soup.select('.ds-artifact-item')
+            
+            if not item_elements:
+                # Try an even more generic selector
+                item_elements = soup.select('.item-wrapper') or soup.select('.item')
+            
+            print(f"Found {len(item_elements)} item elements on the page")
+            
+            # If still no items found, extract any potential items from the page
+            if not item_elements:
+                print("No standard item elements found. Attempting to extract information from page structure.")
+                # Log a sample of the HTML to debug
+                print(f"Page title: {soup.title.string if soup.title else 'No title'}")
+                print(f"Sample HTML (first 500 chars): {soup.prettify()[:500]}")
+                
+                # Look for any links that might be publications
+                article_links = soup.select('a[href*="handle"]')
+                for link in article_links:
+                    title = link.text.strip()
+                    if title and len(title) > 5:  # Skip very short titles that are likely navigation
+                        item_url = link.get('href')
+                        if item_url and not item_url.startswith('http'):
+                            item_url = f"{self.base_url}{item_url}"
+                        
+                        items.append({
+                            "title": title,
+                            "url": item_url,
+                            "author": "",
+                            "description": "",
+                            "publication_date": "",
+                            "resource_type": resource_type,
+                            "source": "knowhub"
+                        })
+            
+            # Process standard item elements if found
             for item in item_elements:
-                # Extract title
-                title_element = item.select_one('.ds-artifact-title a')
-                title = title_element.text.strip() if title_element else "No title"
-                item_url = title_element['href'] if title_element and 'href' in title_element.attrs else None
+                # Extract title and URL
+                title_element = item.select_one('h4 a, h3 a, .artifact-title a, a.title')
+                if not title_element:
+                    # Try other possible title selectors
+                    title_element = item.select_one('a[href*="handle"]')
                 
-                if item_url and not item_url.startswith('http'):
-                    item_url = f"{self.base_url}{item_url}"
+                if not title_element:
+                    # If still no title element, try to extract any meaningful link
+                    title_element = item.select_one('a')
                 
-                # Extract authors
-                authors_element = item.select_one('.ds-artifact-authors')
-                authors = authors_element.text.strip() if authors_element else ""
-                
-                # Extract abstract/description
-                description_element = item.select_one('.ds-artifact-abstract')
-                description = description_element.text.strip() if description_element else ""
-                
-                # Extract date
-                date_element = item.select_one('.ds-artifact-date')
-                publication_date = date_element.text.strip() if date_element else None
-                
-                # Create item dictionary
-                item_data = {
-                    "title": title,
-                    "url": item_url,
-                    "author": authors,
-                    "description": self.summarizer.summarize(description),
-                    "publication_date": publication_date,
-                    "resource_type": resource_type,
-                    "source": "knowhub"
-                }
-                
-                items.append(item_data)
+                if title_element:
+                    title = title_element.text.strip()
+                    item_url = title_element.get('href')
+                    
+                    if item_url and not item_url.startswith('http'):
+                        item_url = f"{self.base_url}{item_url}"
+                    
+                    # Extract authors
+                    authors_element = item.select_one('.artifact-authors, .item-authors, .author')
+                    authors = authors_element.text.strip() if authors_element else ""
+                    
+                    # Extract abstract/description
+                    description_element = item.select_one('.artifact-abstract, .item-description, .description')
+                    description = description_element.text.strip() if description_element else ""
+                    
+                    # Extract date
+                    date_element = item.select_one('.artifact-date, .item-date, .date, span.date')
+                    publication_date = date_element.text.strip() if date_element else None
+                    
+                    # Create item dictionary
+                    item_data = {
+                        "title": title,
+                        "url": item_url,
+                        "author": authors,
+                        "description": self.summarizer.summarize(description),
+                        "publication_date": publication_date,
+                        "resource_type": resource_type,
+                        "source": "knowhub"
+                    }
+                    
+                    items.append(item_data)
             
-            print(f"Found {len(items)} {resource_type} items")
+            print(f"Extracted {len(items)} {resource_type} items")
             return items
             
+        except requests.exceptions.Timeout:
+            print(f"Connection timed out when fetching {resource_type} from {url}. Consider increasing the timeout.")
+            return []
         except requests.exceptions.RequestException as e:
             print(f"Error fetching {resource_type} from {url}: {e}")
+            return []
+        except Exception as e:
+            print(f"Unexpected error when processing {resource_type}: {e}")
             return []
     
     def fetch_all_resources(self) -> List[Dict[str, Any]]:
