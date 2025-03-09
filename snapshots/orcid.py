@@ -11,7 +11,7 @@ DB_PARAMS = {
     "dbname": os.getenv("POSTGRES_DB", "aphrc"),
     "user": os.getenv("POSTGRES_USER", "postgres"),
     "password": os.getenv("POSTGRES_PASSWORD", "p0stgres"),
-    "host": os.getenv("POSTGRES_HOST", "postgres"),
+    "host": os.getenv("POSTGRES_HOST", "localhost"),
     "port": "5432"
 }
 
@@ -248,7 +248,7 @@ def insert_into_resources(work, next_id=None):
     
     conn = psycopg2.connect(**DB_PARAMS)
     cur = conn.cursor()
-    
+
     try:
         # Check if a work with this DOI already exists
         if work.get("doi"):
