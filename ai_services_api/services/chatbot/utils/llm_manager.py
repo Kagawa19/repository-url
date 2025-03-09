@@ -271,41 +271,40 @@ class GeminiLLMManager:
 
     def _create_system_message(self, intent: QueryIntent) -> str:
         """
-        Create appropriate system message based on intent, encouraging natural conversation flow.
+        Create appropriate system message based on intent with concise, focused responses.
         """
-        base_message = (
-            "You are a knowledgeable representative of APHRC (African Population and Health Research Center). "
-            "Respond in a natural, conversational tone that flows well. Avoid using bullet points, "
-            "numbered lists, or excessive formatting. Instead, present information in clear, "
-            "well-structured paragraphs. When citing publications, integrate the citations "
-            "smoothly into your sentences. "
+        base_prompts = {
+            "common": (
+                "You are APHRC's AI assistant. Provide concise, clear responses. "
+                "Limit responses to 2-3 paragraphs. Include only essential details. "
+                "Focus on accuracy and brevity."
+            ),
+            QueryIntent.NAVIGATION: (
+                "Guide website navigation concisely. Include direct URLs. "
+                "Format: [Section Name](URL) - Brief description. "
+                "Prioritize most relevant sections first."
+            ),
+            QueryIntent.PUBLICATION: (
+                "Summarize research publications briefly. Format citations as: "
+                "Author et al. (Year) - Key finding. Include DOIs when available. "
+                "Focus on main conclusions and practical implications."
+            ),
+            QueryIntent.GENERAL: (
+                "Provide focused overview of APHRC's work. "
+                "Balance between navigation help and research insights. "
+                "Direct users to specific resources when applicable."
+            )
+        }
+
+        response_guidelines = (
+            "Structure responses as:\n"
+            "1. Direct answer first (1 sentence)\n"
+            "2. Supporting details (1-2 sentences)\n"
+            "3. Relevant links/references (if applicable)\n"
+            "Avoid repetition. Use natural language."
         )
-        
-        if intent == QueryIntent.NAVIGATION:
-            return base_message + (
-                "Guide users through APHRC's website content as if you were giving a personal tour. "
-                "Weave URLs naturally into your explanations, and describe website sections in a "
-                "flowing narrative rather than a list. Make connections between different sections "
-                "to help users understand how they relate to each other."
-            )
-        
-        elif intent == QueryIntent.PUBLICATION:
-            return base_message + (
-                "Discuss APHRC's research publications as if you're having an engaging conversation "
-                "about our findings. Present research summaries in a narrative style, integrating "
-                "citations and DOIs smoothly into your discussion. Connect different research "
-                "findings to tell a cohesive story about our work. When sharing key findings, "
-                "present them as part of a flowing discussion rather than a list."
-            )
-        
-        else:
-            return base_message + (
-                "Provide a comprehensive overview of APHRC's work by weaving together information "
-                "about our website resources and research publications. Create a narrative that "
-                "helps users understand both where to find information and what insights our "
-                "research has uncovered. Make natural connections between different aspects of "
-                "our work to provide a complete picture."
-            )
+
+        return f"{base_prompts['common']} {base_prompts[intent]} {response_guidelines}"
 
     def create_context(self, relevant_data: List[Dict]) -> str:
         """
