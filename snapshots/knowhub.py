@@ -11,6 +11,7 @@ import os
 import json
 import logging
 import re
+import random
 
 # Configure logging
 logging.basicConfig(
@@ -32,6 +33,16 @@ DB_PARAMS = {
     "host": "localhost",
     "port": "5432"
 }
+
+# Use a list of free proxies - you may need to update these with working proxies
+PROXIES = [
+    '',  # Empty entry for direct connection
+    # Add working proxies if needed
+]
+
+def get_random_proxy():
+    """Get a random proxy from the list"""
+    return random.choice(PROXIES)
 
 def check_resources_table():
     """Check if resources_resource table exists"""
@@ -149,7 +160,7 @@ def insert_resource(item):
         if conn:
             conn.close()
 
-def fetch_publications(url, resource_type=None, max_retries=3, page_load_timeout=60):
+def fetch_publications(url, resource_type=None, max_retries=3, page_load_timeout=30):
     """
     Fetch publications from the provided URL with robust timeout handling.
     
@@ -170,79 +181,58 @@ def fetch_publications(url, resource_type=None, max_retries=3, page_load_timeout
     chrome_options.add_argument('--disable-gpu')
     chrome_options.add_argument('--window-size=1920,1080')
     chrome_options.add_argument('--ignore-certificate-errors')
+    chrome_options.add_argument('--disable-extensions')
+    chrome_options.add_argument('--disable-setuid-sandbox')
+    
+    # Add user agent to appear as a regular browser
+    chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
     
     # Initialize the WebDriver
     publications = []
     driver = None
     
-    try:
-        logger.info(f"Initializing Chrome WebDriver for {url}")
-        driver = webdriver.Chrome(options=chrome_options)
-        
-        # Set page load timeout
-        driver.set_page_load_timeout(page_load_timeout)
-        
-        retry_count = 0
-        while retry_count < max_retries:
+    for retry_count in range(max_retries):
+        try:
+            # Try with a random proxy on each retry
+            proxy = get_random_proxy()
+            if proxy:
+                chrome_options.add_argument(f'--proxy-server={proxy}')
+                logger.info(f"Using proxy: {proxy}")
+            else:
+                logger.info("Using direct connection (no proxy)")
+            
+            logger.info(f"Attempt {retry_count + 1}/{max_retries}: Initializing Chrome WebDriver for {url}")
+            driver = webdriver.Chrome(options=chrome_options)
+            
+            # Set page load timeout
+            driver.set_page_load_timeout(page_load_timeout)
+            
             try:
-                logger.info(f"Attempt {retry_count + 1}: Loading URL {url}")
+                logger.info(f"Loading URL: {url}")
                 driver.get(url)
                 
                 # Wait for the page to load
                 logger.info("Waiting for page to load...")
-                wait = WebDriverWait(driver, 20)
-                wait.until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
                 
                 # Log page title for debugging
                 logger.info(f"Page loaded. Title: {driver.title}")
                 
-                # First wait for any major container to appear
-                logger.info("Looking for content containers...")
-                selectors = [
-                    '.artifact-description',
-                    '.ds-artifact-item',
-                    '.artifact-title',
-                    'div.item', 
-                    'h4.artifact-title'
-                ]
-                
-                for selector in selectors:
-                    try:
-                        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
-                        logger.info(f"Found container with selector: {selector}")
-                        break
-                    except TimeoutException:
-                        continue
+                # Take a screenshot for debugging
+                driver.save_screenshot(f"knowhub_page_{resource_type}.png")
+                logger.info(f"Saved screenshot to knowhub_page_{resource_type}.png")
                 
                 # Let the page fully settle
-                time.sleep(3)
-                
-                # Handle scrolling to load all content
-                logger.info("Scrolling to load all content...")
-                last_height = driver.execute_script("return document.body.scrollHeight")
-                scroll_attempts = 0
-                max_scroll_attempts = 5  # Limit scrolling attempts
-                
-                while scroll_attempts < max_scroll_attempts:
-                    # Scroll down
-                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                    time.sleep(2)  # Wait for content to load
-                    
-                    # Calculate new scroll height and compare with last scroll height
-                    new_height = driver.execute_script("return document.body.scrollHeight")
-                    if new_height == last_height:
-                        break
-                    last_height = new_height
-                    scroll_attempts += 1
-                
-                logger.info(f"Completed {scroll_attempts} scroll attempts")
+                time.sleep(2)
                 
                 # Try different selectors to find items
                 item_selectors = [
                     'div.artifact-description',
                     'div.ds-artifact-item',
                     'div.recent-submissions li',
-                    'table.ds-table tr'
+                    'table.ds-table tr',
+                    'h4.artifact-title',
+                    'li.ds-artifact-item'
                 ]
                 
                 items = []
@@ -260,8 +250,42 @@ def fetch_publications(url, resource_type=None, max_retries=3, page_load_timeout
                         logger.warning(f"Error finding items with selector {selector}: {e}")
                 
                 if not items:
-                    logger.warning("No items found with any selector")
-                    break
+                    # Try to look for any links that might be publications
+                    logger.info("No items found with primary selectors, trying link analysis")
+                    links = driver.find_elements(By.CSS_SELECTOR, 'a[href*="handle"]')
+                    if links:
+                        logger.info(f"Found {len(links)} potential publication links")
+                        
+                        for link in links:
+                            try:
+                                href = link.get_attribute('href')
+                                if 'handle' in href and len(link.text.strip()) > 5:
+                                    publications.append({
+                                        'title': link.text.strip(),
+                                        'url': href,
+                                        'authors': [],
+                                        'publication_date': None,
+                                        'description': None,
+                                        'type': resource_type,
+                                        'source': 'knowhub'
+                                    })
+                            except:
+                                continue
+                        
+                        if publications:
+                            logger.info(f"Extracted {len(publications)} publications from links")
+                            driver.quit()
+                            return publications
+                    
+                    # If we still found nothing, let's save the page source for debugging
+                    with open(f"knowhub_source_{resource_type}.html", "w", encoding="utf-8") as f:
+                        f.write(driver.page_source)
+                    logger.warning(f"No items found. Page source saved to knowhub_source_{resource_type}.html")
+                    
+                    # Try a different approach on next retry
+                    driver.quit()
+                    driver = None
+                    continue
                 
                 # Process items
                 logger.info(f"Processing {len(items)} items...")
@@ -271,7 +295,7 @@ def fetch_publications(url, resource_type=None, max_retries=3, page_load_timeout
                         
                         # Extract title and URL
                         try:
-                            title_selectors = ['h4 a', 'h3 a', '.artifact-title a', 'a[href*="handle"]']
+                            title_selectors = ['h4 a', 'h3 a', '.artifact-title a', 'a[href*="handle"]', 'a']
                             title_element = None
                             
                             for title_selector in title_selectors:
@@ -353,26 +377,8 @@ def fetch_publications(url, resource_type=None, max_retries=3, page_load_timeout
                             logger.error(f"Error extracting description for item {i+1}: {e}")
                             publication['description'] = None
                         
-                        # Extract publication type
-                        try:
-                            type_selectors = ['.type', '.artifact-type', '.ds-artifact-type']
-                            publication_type = resource_type  # Default to the resource_type parameter
-                            
-                            for type_selector in type_selectors:
-                                try:
-                                    type_element = item.find_element(By.CSS_SELECTOR, type_selector)
-                                    element_type = type_element.text.strip()
-                                    if element_type:
-                                        publication_type = element_type
-                                        break
-                                except:
-                                    continue
-                            
-                            publication['type'] = publication_type
-                            
-                        except Exception as e:
-                            logger.error(f"Error extracting type for item {i+1}: {e}")
-                            publication['type'] = resource_type
+                        # Set publication type
+                        publication['type'] = resource_type
                         
                         # Add source
                         publication['source'] = 'knowhub'
@@ -390,25 +396,33 @@ def fetch_publications(url, resource_type=None, max_retries=3, page_load_timeout
                 
             except TimeoutException:
                 logger.warning(f"Timeout loading {url}, attempt {retry_count + 1}/{max_retries}")
-                retry_count += 1
                 
-                if retry_count >= max_retries:
-                    logger.error(f"Failed to load {url} after {max_retries} attempts")
-                else:
-                    logger.info("Retrying...")
+                # Save the current page source even if it's incomplete
+                try:
+                    with open(f"knowhub_timeout_{resource_type}_{retry_count}.html", "w", encoding="utf-8") as f:
+                        f.write(driver.page_source)
+                    logger.info(f"Partial page source saved to knowhub_timeout_{resource_type}_{retry_count}.html")
+                except:
+                    pass
+                
+                if driver:
                     driver.quit()
-                    driver = webdriver.Chrome(options=chrome_options)
-                    
+                    driver = None
+                
             except Exception as e:
                 logger.error(f"Error loading {url}: {e}")
-                break
+                if driver:
+                    driver.quit()
+                    driver = None
         
-    except Exception as e:
-        logger.error(f"Error initializing WebDriver: {e}")
+        except Exception as e:
+            logger.error(f"Error initializing WebDriver: {e}")
+            if driver:
+                driver.quit()
+                driver = None
     
-    finally:
-        if driver:
-            driver.quit()
+    if driver:
+        driver.quit()
     
     return publications
 
