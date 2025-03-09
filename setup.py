@@ -21,7 +21,7 @@ import os
 import time
 
 
-
+from ai_services_api.services.centralized_repository.expert_matching.matcher import Matcher
 from ai_services_api.services.centralized_repository.openalex.openalex_processor import OpenAlexProcessor
 from ai_services_api.services.centralized_repository.publication_processor import PublicationProcessor
 from ai_services_api.services.centralized_repository.ai_summarizer import TextSummarizer
@@ -132,6 +132,75 @@ class SystemInitializer:
         except Exception as e:
             logger.error(f"Error fetching experts data: {e}")
             return []
+
+    async def match_experts_with_resources(self) -> None:
+        """Match experts with resources based on author names."""
+        try:
+            logger.info("Starting expert-resource matching process...")
+            print("🔍 Starting expert-resource matching process...")
+            
+            # Fetch all experts from the database
+            experts = self.db.execute("""
+                SELECT * FROM experts_expert
+                WHERE is_active = TRUE
+            """)
+            
+            # Fetch all resources from the database
+            resources = self.db.execute("""
+                SELECT * FROM resources_resource
+            """)
+            
+            if not experts or not resources:
+                logger.warning("No experts or resources found for matching.")
+                print("⚠️ No experts or resources found for matching.")
+                return
+            
+            logger.info(f"Found {len(experts)} experts and {len(resources)} resources for matching.")
+            print(f"📊 Found {len(experts)} experts and {len(resources)} resources for matching.")
+            
+            # Create a matcher instance
+            matcher = Matcher()
+            
+            # Perform the matching
+            matches = matcher.match_experts_to_resources(experts, resources)
+            
+            # Process the matches - store in the database
+            if matches:
+                logger.info(f"Found {len(matches)} expert-resource matches.")
+                print(f"✅ Found {len(matches)} expert-resource matches.")
+                
+                # Store matches in the database
+                for expert, resource in matches:
+                    try:
+                        # Check if match already exists
+                        existing_match = self.db.execute("""
+                            SELECT id FROM expert_resource_mappings
+                            WHERE expert_id = %s AND resource_id = %s
+                        """, (expert.id, resource.id))
+                        
+                        if not existing_match:
+                            # Insert the new match
+                            self.db.execute("""
+                                INSERT INTO expert_resource_mappings
+                                (expert_id, resource_id, match_type, created_at)
+                                VALUES (%s, %s, %s, NOW())
+                            """, (expert.id, resource.id, 'author_match'))
+                            
+                            logger.info(f"Stored match: Expert {expert.id} - Resource {resource.id}")
+                    except Exception as e:
+                        logger.error(f"Error storing match for Expert {expert.id} - Resource {resource.id}: {e}")
+                        print(f"❌ Error storing match: {e}")
+            else:
+                logger.warning("No matches found between experts and resources.")
+                print("⚠️ No matches found between experts and resources.")
+                
+            logger.info("Expert-resource matching process completed.")
+            print("🎉 Expert-resource matching process completed.")
+            
+        except Exception as e:
+            logger.error(f"Error in expert-resource matching process: {e}")
+            print(f"💥 Critical Error in Expert-Resource Matching: {e}")
+
 
     async def initialize_database(self) -> None:
         """Initialize database and create tables using DatabaseInitializer"""
@@ -658,6 +727,11 @@ class SystemInitializer:
                 )
                 await web_processor.process_content()
                 logger.info('Web content processed successfully.')
+            
+            # Match experts with resources
+            logger.info('Matching experts with resources...')
+            await self.match_experts_with_resources()
+            logger.info('Expert-resource matching completed successfully.')
             
             logger.info('System initialization completed successfully!')
         except Exception as e:

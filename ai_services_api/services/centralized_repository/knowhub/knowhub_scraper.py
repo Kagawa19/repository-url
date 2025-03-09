@@ -155,7 +155,7 @@ class KnowhubScraper:
             logger.error(f"Error fetching {content_type}: {str(e)}")
             return []
 
-    def fetch_all_content(self, limit: int = 2) -> Dict[str, List[Dict]]:
+    def fetch_all_content(self, limit: int = 1500) -> Dict[str, List[Dict]]:
         """Fetch content from all endpoints including original publications."""
         all_content = {}
         
