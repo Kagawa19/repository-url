@@ -1,107 +1,301 @@
-import requests
-from bs4 import BeautifulSoup
+import time
+import logging
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+import json
+import psycopg2
+import os
 
-class KnowhubScraper:
-    def __init__(self, base_url='https://knowhub.aphrc.org'):
-        self.base_url = base_url
-        self.endpoints = {
-            'publications': f"{self.base_url}/handle/123456789/1",
-            'documents': f"{self.base_url}/handle/123456789/2",
-            'reports': f"{self.base_url}/handle/123456789/3",
-            'multimedia': f"{self.base_url}/handle/123456789/4"
-        }
-        
-        # Set proper headers to make request more likely to succeed
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5'
-        }
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s: %(message)s', 
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+# Database connection settings
+DB_PARAMS = {
+    "dbname": os.getenv("POSTGRES_DB", "aphrc"),
+    "user": os.getenv("POSTGRES_USER", "postgres"),
+    "password": os.getenv("POSTGRES_PASSWORD", "p0stgres"),
+    "host": "localhost",
+    "port": "5432"
+}
+
+def check_resources_table():
+    """Check if resources_resource table exists"""
+    conn = psycopg2.connect(**DB_PARAMS)
+    cur = conn.cursor()
     
-    def fetch_publications(self, endpoint):
-        url = self.endpoints.get(endpoint)
-        if not url:
-            print(f"Endpoint '{endpoint}' not found.")
-            return []
+    # Check if resources_resource table exists
+    cur.execute("""
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_name = 'resources_resource'
+        );
+    """)
+    table_exists = cur.fetchone()[0]
+    
+    if not table_exists:
+        logger.error("resources_resource table does not exist. Please create it first.")
+        cur.close()
+        conn.close()
+        return False
+    
+    logger.info("resources_resource table found.")
+    cur.close()
+    conn.close()
+    return True
+
+def insert_resource(item):
+    """Insert work data into resources_resource table"""
+    if not item:
+        return None
+    
+    conn = psycopg2.connect(**DB_PARAMS)
+    cur = conn.cursor()
+
+    try:
+        # Check if a work with this URL already exists
+        if item.get("url"):
+            cur.execute("SELECT id FROM resources_resource WHERE url = %s", (item.get("url"),))
+            result = cur.fetchone()
+            if result:
+                logger.info(f"Resource with URL {item.get('url')} already exists with ID {result[0]}")
+                cur.close()
+                conn.close()
+                return result[0]
         
-        try:
-            print(f"Fetching {endpoint} from {url}")
-            response = requests.get(url, headers=self.headers, timeout=30, verify=False)
+        # Get next available ID
+        cur.execute("SELECT MAX(id) FROM resources_resource")
+        max_id = cur.fetchone()[0]
+        next_id = (max_id or 0) + 1
+        
+        # Prepare authors JSON
+        authors = None
+        if item.get("authors"):
+            authors = json.dumps(item.get("authors"))
+        
+        # Insert the resource
+        cur.execute("""
+            INSERT INTO resources_resource 
+            (id, title, abstract, url, type, authors, 
+             publication_year, source)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
+            RETURNING id
+        """, (
+            next_id,
+            item.get("title"),
+            item.get("description"),
+            item.get("url"),
+            item.get("type"),
+            authors,
+            item.get("publication_year"),
+            item.get("source", "knowhub")
+        ))
+        
+        result = cur.fetchone()
+        conn.commit()
+        
+        if result:
+            logger.info(f"Inserted resource with ID {result[0]}: {item.get('title')}")
+            return result[0]
+        else:
+            logger.warning(f"Failed to insert resource: {item.get('title')}")
+            return None
+        
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error inserting resource: {e}")
+        return None
+    
+    finally:
+        cur.close()
+        conn.close()
+
+def scrape_knowhub():
+    """Scrape KnowHub using Selenium"""
+    # URL of the page
+    base_url = 'https://knowhub.aphrc.org'
+    endpoints = {
+        'publications': f"{base_url}/handle/123456789/1",
+        'documents': f"{base_url}/handle/123456789/2",
+        'reports': f"{base_url}/handle/123456789/3",
+        'multimedia': f"{base_url}/handle/123456789/4"
+    }
+    
+    # Set up Chrome options
+    chrome_options = Options()
+    chrome_options.add_argument('--headless')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--ignore-certificate-errors')
+    chrome_options.add_argument('--ignore-ssl-errors')
+    
+    # Initialize the WebDriver
+    try:
+        driver = webdriver.Chrome(options=chrome_options)
+        wait = WebDriverWait(driver, 20)  # 20 second wait
+        logger.info("Chrome WebDriver initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize Chrome WebDriver: {e}")
+        return
+    
+    total_items = 0
+    
+    try:
+        # Check database table
+        if not check_resources_table():
+            driver.quit()
+            return
+        
+        # Process each resource type
+        for resource_type, url in endpoints.items():
+            logger.info(f"Processing {resource_type} from {url}")
             
-            if response.status_code == 200:
-                # Parse HTML content
-                soup = BeautifulSoup(response.text, 'html.parser')
+            try:
+                driver.get(url)
+                time.sleep(5)  # Allow page to load
+                logger.info(f"Page title: {driver.title}")
                 
-                # Extract publications from the HTML
-                publications = []
+                # Try different selectors
+                selectors = [
+                    '.artifact-description',
+                    '.ds-artifact-item',
+                    '.recent-submissions li',
+                    'div.item',
+                    'table.ds-table tr'
+                ]
                 
-                # Try different selectors that might contain publication listings
-                items = soup.select('.artifact-description') or \
-                       soup.select('.ds-artifact-item') or \
-                       soup.select('.recent-submissions li')
+                items_found = False
                 
-                for item in items:
+                for selector in selectors:
                     try:
-                        # Extract title and URL
-                        title_elem = item.select_one('h4 a, h3 a, .artifact-title a, a[href*="handle"]')
-                        if not title_elem:
-                            continue
+                        logger.info(f"Trying selector: {selector}")
+                        items = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector)))
+                        
+                        if items:
+                            logger.info(f"Found {len(items)} items with selector {selector}")
+                            items_found = True
                             
-                        title = title_elem.text.strip()
-                        url = title_elem.get('href')
-                        if url and not url.startswith('http'):
-                            url = f"{self.base_url}{url}"
-                        
-                        # Extract authors
-                        authors = []
-                        author_elem = item.select_one('.artifact-author, .authors, .creator')
-                        if author_elem:
-                            authors_text = author_elem.text.strip()
-                            # Split by common separators
-                            for separator in [';', ',', ' and ']:
-                                if separator in authors_text:
-                                    authors = [name.strip() for name in authors_text.split(separator) if name.strip()]
-                                    break
-                            # If no separators found, use the whole string
-                            if not authors:
-                                authors = [authors_text]
-                        
-                        # Extract description/abstract
-                        description = ""
-                        desc_elem = item.select_one('.artifact-abstract, .abstract, .description')
-                        if desc_elem:
-                            description = desc_elem.text.strip()
-                        
-                        publications.append({
-                            'title': title,
-                            'url': url,
-                            'authors': authors,
-                            'description': description,
-                            'type': endpoint
-                        })
-                        
+                            for item in items:
+                                try:
+                                    # Extract title
+                                    title = None
+                                    try:
+                                        title_elem = item.find_element(By.CSS_SELECTOR, 'h4 a, h3 a, a.title, a[href*="handle"]')
+                                        title = title_elem.text.strip()
+                                        # Get URL
+                                        url = title_elem.get_attribute('href')
+                                    except NoSuchElementException:
+                                        # Try alternate selectors
+                                        try:
+                                            title_elem = item.find_element(By.CSS_SELECTOR, 'a')
+                                            title = title_elem.text.strip()
+                                            url = title_elem.get_attribute('href')
+                                        except:
+                                            logger.warning("Could not find title or URL, skipping item")
+                                            continue
+                                    
+                                    if not title or not url:
+                                        continue
+                                    
+                                    # Extract authors
+                                    authors = []
+                                    try:
+                                        # Try different author selectors
+                                        for author_selector in ['.artifact-author', '.author', '.creators']:
+                                            try:
+                                                author_elem = item.find_element(By.CSS_SELECTOR, author_selector)
+                                                author_text = author_elem.text.strip()
+                                                if author_text:
+                                                    # Split and clean author names
+                                                    author_list = [name.strip() for name in author_text.split(';')]
+                                                    authors = [{"name": name} for name in author_list if name]
+                                                    break
+                                            except:
+                                                continue
+                                    except:
+                                        pass
+                                    
+                                    # Extract description/abstract
+                                    description = ""
+                                    try:
+                                        for desc_selector in ['.artifact-abstract', '.abstract', '.description']:
+                                            try:
+                                                desc_elem = item.find_element(By.CSS_SELECTOR, desc_selector)
+                                                description = desc_elem.text.strip()
+                                                if description:
+                                                    break
+                                            except:
+                                                continue
+                                    except:
+                                        pass
+                                    
+                                    # Extract date/year
+                                    publication_year = None
+                                    try:
+                                        for date_selector in ['.date', '.issued', '.artifact-date']:
+                                            try:
+                                                date_elem = item.find_element(By.CSS_SELECTOR, date_selector)
+                                                date_text = date_elem.text.strip()
+                                                # Extract year using regex
+                                                import re
+                                                year_match = re.search(r'\b(19|20)\d{2}\b', date_text)
+                                                if year_match:
+                                                    publication_year = int(year_match.group(0))
+                                                    break
+                                            except:
+                                                continue
+                                    except:
+                                        pass
+                                    
+                                    # Create resource object
+                                    resource = {
+                                        "title": title,
+                                        "description": description,
+                                        "url": url,
+                                        "authors": authors,
+                                        "publication_year": publication_year,
+                                        "type": resource_type,
+                                        "source": "knowhub"
+                                    }
+                                    
+                                    # Insert into database
+                                    result = insert_resource(resource)
+                                    if result:
+                                        total_items += 1
+                                    
+                                except Exception as e:
+                                    logger.error(f"Error processing item: {e}")
+                            
+                            # Break out of selector loop once we find items
+                            break
+                    except TimeoutException:
+                        logger.warning(f"Timeout waiting for selector {selector}")
                     except Exception as e:
-                        print(f"Error extracting publication: {e}")
+                        logger.error(f"Error with selector {selector}: {e}")
                 
-                return publications
-            else:
-                print(f"Failed to fetch publications. Status code: {response.status_code}")
-                return []
+                if not items_found:
+                    logger.warning(f"No items found for {resource_type}")
                 
-        except Exception as e:
-            print(f"Error fetching {endpoint}: {e}")
-            return []
-
-# Example usage
-scraper = KnowhubScraper()
-
-for endpoint in ['publications', 'documents', 'reports', 'multimedia']:
-    publications = scraper.fetch_publications(endpoint)
-    print(f"\nFound {len(publications)} {endpoint}:")
+            except Exception as e:
+                logger.error(f"Error processing {resource_type}: {e}")
     
-    for pub in publications[:5]:  # Show first 5 only
-        print(f"Title: {pub['title']}")
-        print(f"URL: {pub['url']}")
-        print(f"Authors: {', '.join(pub['authors'])}")
-        print(f"Description: {pub['description'][:100]}..." if pub['description'] else "No description")
-        print()
+    except Exception as e:
+        logger.error(f"Error in scrape_knowhub: {e}")
+    
+    finally:
+        driver.quit()
+        logger.info(f"Scraping completed. Total items stored: {total_items}")
+
+if __name__ == "__main__":
+    scrape_knowhub()
