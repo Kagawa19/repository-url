@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 import os
-import json
-import requests
-import psycopg2
-import time
 import logging
-import hashlib
-import zlib  # For generating integer hash
+from datetime import datetime
+import json
+import zlib
+import psycopg2
+
+from ai_services_api.services.centralized_repository.ai_summarizer import TextSummarizer
+from ai_services_api.services.centralized_repository.text_processor import safe_str, truncate_text
+
+from dataclasses import dataclass, field, asdict
+from typing import Dict, List, Optional
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, 
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Database connection settings
@@ -21,43 +27,6 @@ DB_PARAMS = {
     "host": os.getenv("POSTGRES_HOST", "localhost"),
     "port": "5432"
 }
-
-def setup_database():
-    """Verify the resources_resource table exists and its structure"""
-    conn = psycopg2.connect(**DB_PARAMS)
-    cur = conn.cursor()
-    
-    try:
-        # Check table existence
-        cur.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_name = 'resources_resource'
-            );
-        """)
-        table_exists = cur.fetchone()[0]
-        
-        if not table_exists:
-            logger.error("resources_resource table does not exist. Please create it first.")
-            return False
-        
-        # Check columns
-        cur.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name = 'resources_resource'
-        """)
-        columns = [col[0] for col in cur.fetchall()]
-        
-        logger.info(f"Columns in resources_resource: {columns}")
-        return True
-    
-    except Exception as e:
-        logger.error(f"Database check error: {e}")
-        return False
-    finally:
-        cur.close()
-        conn.close()
 
 def generate_unique_id(resource):
     """
@@ -72,7 +41,6 @@ def generate_unique_id(resource):
         id_string = f"{resource.get('source', '')}{resource.get('identifiers', {}).get('handle', '')}"
     
     # Generate a consistent integer hash
-    # Use zlib.crc32 to generate a positive 32-bit integer
     unique_id = abs(zlib.crc32(id_string.encode('utf-8')))
     
     # Ensure the ID is within a reasonable range
@@ -89,7 +57,7 @@ def insert_resources_to_database(resources):
         int: Number of successfully inserted resources
     """
     if not resources:
-        logger.warning("No resources to insert.")
+        logger.warning("No resources to save.")
         return 0
     
     # Connect to database
@@ -173,39 +141,46 @@ def insert_resources_to_database(resources):
         conn.close()
 
 def main():
-    start_time = time.time()
+    """
+    Main function to scrape and save resources from all KnowHub collections
+    """
+    start_time = datetime.utcnow()
     
-    # Verify database setup
-    if not setup_database():
-        return
-    
-    # Sample resource data (replace with your actual data collection method)
-    sample_resources = [
-        {
-            'title': 'Sample Research Paper',
-            'doi': '10.1000/sample123',
-            'abstract': 'This is a sample abstract about an important research topic.',
-            'authors': [{'name': 'John Doe'}, {'name': 'Jane Smith'}],
-            'type': 'journal_article',
-            'source': 'knowhub',
-            'date_issue': '2023-01-15',
-            'identifiers': {'handle': 'sample-handle'},
-            'collection': 'publications',
-            'publication_year': '2023'
-        }
-        # Add more resources here
-    ]
-    
+    # Create KnowhubScraper instance
     try:
-        # Insert resources
-        inserted_count = insert_resources_to_database(sample_resources)
+        # Initialize summarizer (optional)
+        summarizer = TextSummarizer()
         
-        # Print summary
-        elapsed_time = time.time() - start_time
-        logger.info(f"Completed. Inserted {inserted_count} resources in {elapsed_time:.2f} seconds.")
+        # Create scraper instance
+        with KnowhubScraper(summarizer=summarizer) as scraper:
+            # Fetch all collections
+            logger.info("Starting to fetch all collections from KnowHub")
+            
+            # Get all content from different collections
+            all_content = scraper.fetch_all_collections()
+            
+            # Combine resources from all collections
+            all_resources = []
+            for collection_type, resources in all_content.items():
+                logger.info(f"Processing {len(resources)} resources from {collection_type}")
+                all_resources.extend(resources)
+            
+            # Insert resources into database
+            logger.info(f"Attempting to insert {len(all_resources)} total resources")
+            inserted_count = insert_resources_to_database(all_resources)
+            
+            # Print summary
+            elapsed_time = (datetime.utcnow() - start_time).total_seconds()
+            logger.info(f"Scraping completed. Total resources: {len(all_resources)}")
+            logger.info(f"Successfully inserted: {inserted_count} resources")
+            logger.info(f"Total time taken: {elapsed_time:.2f} seconds")
+            
+            # Print collection-wise breakdown
+            for collection_type, resources in all_content.items():
+                logger.info(f"{collection_type.capitalize()}: {len(resources)} resources")
     
     except Exception as e:
-        logger.error(f"An error occurred: {e}")
+        logger.error(f"An error occurred during scraping: {e}")
         import traceback
         traceback.print_exc()
 
