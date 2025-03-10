@@ -490,7 +490,8 @@ class SystemInitializer:
                     
                     # Create KnowHub scraper
                     knowhub_scraper = KnowhubScraper(summarizer=TextSummarizer())
-                    all_content = knowhub_scraper.fetch_all_content(limit=2)
+                    # Remove the limit parameter completely to fetch all content
+                    all_content = knowhub_scraper.fetch_all_content()
                     
                     for content_type, items in all_content.items():
                         if items:
@@ -519,7 +520,8 @@ class SystemInitializer:
                 try:
                     logger.info("Processing Research Nexus publications...")
                     research_nexus_scraper = ResearchNexusScraper(summarizer=TextSummarizer())
-                    research_nexus_publications = research_nexus_scraper.fetch_content(limit=2)
+                    # Remove the limit parameter
+                    research_nexus_publications = research_nexus_scraper.fetch_content()
 
                     if research_nexus_publications:
                         for pub in research_nexus_publications:
@@ -546,7 +548,8 @@ class SystemInitializer:
                     logger.info("="*50)
                     
                     website_scraper = WebsiteScraper(summarizer=TextSummarizer())
-                    website_publications = website_scraper.fetch_content(limit=2)
+                    # Remove the limit parameter
+                    website_publications = website_scraper.fetch_content()
                     
                     if website_publications:
                         logger.info(f"\nProcessing {len(website_publications)} website publications")
