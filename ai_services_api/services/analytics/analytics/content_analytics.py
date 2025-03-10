@@ -742,6 +742,7 @@ def display_content_analytics(
             st.info("No message data available for the selected period.")
     
     # Add detailed metrics tables in an expander
+    # Remove the duplicated metrics_tab2 block
     with st.expander("View Detailed Metrics"):
         metrics_tab1, metrics_tab2, metrics_tab3 = st.tabs(["Resource Metrics", "Expert Metrics", "Message Metrics"])
         
@@ -754,19 +755,18 @@ def display_content_analytics(
                     st.subheader("Source Distribution")
                     st.dataframe(metrics['source_distribution'], use_container_width=True)
                 
-                # Add download button
+                # Add download button with a unique key
                 csv = metrics['resource_metrics'].to_csv(index=False)
                 st.download_button(
                     label="Download Resource Metrics CSV",
                     data=csv,
                     file_name="resource_metrics.csv",
-                    mime="text/csv"
+                    mime="text/csv",
+                    key="resource_metrics_download"  # Added unique key
                 )
             else:
                 st.info("No resource metrics available.")
         
-        
-        
         with metrics_tab2:
             if has_expert_data:
                 st.dataframe(metrics['expert_metrics'], use_container_width=True)
@@ -775,32 +775,14 @@ def display_content_analytics(
                     st.subheader("Domain Distribution")
                     st.dataframe(metrics['domain_distribution'], use_container_width=True)
                 
-                # Add download button
+                # Add download button with a unique key
                 csv = metrics['expert_metrics'].to_csv(index=False)
                 st.download_button(
                     label="Download Expert Metrics CSV",
                     data=csv,
                     file_name="expert_metrics.csv",
-                    mime="text/csv"
-                )
-            else:
-                st.info("No expert metrics available.")
-        
-        with metrics_tab2:
-            if has_expert_data:
-                st.dataframe(metrics['expert_metrics'], use_container_width=True)
-                
-                if 'domain_distribution' in metrics and not metrics['domain_distribution'].empty:
-                    st.subheader("Domain Distribution")
-                    st.dataframe(metrics['domain_distribution'], use_container_width=True)
-                
-                # Add download button
-                csv = metrics['expert_metrics'].to_csv(index=False)
-                st.download_button(
-                    label="Download Expert Metrics CSV",
-                    data=csv,
-                    file_name="expert_metrics.csv",
-                    mime="text/csv"
+                    mime="text/csv",
+                    key="expert_metrics_download"  # Added unique key
                 )
             else:
                 st.info("No expert metrics available.")
@@ -813,13 +795,14 @@ def display_content_analytics(
                     st.subheader("Sender Statistics")
                     st.dataframe(metrics['sender_stats'], use_container_width=True)
                 
-                # Add download button
+                # Add download button with a unique key
                 csv = metrics['message_metrics'].to_csv(index=False)
                 st.download_button(
                     label="Download Message Metrics CSV",
                     data=csv,
                     file_name="message_metrics.csv",
-                    mime="text/csv"
+                    mime="text/csv",
+                    key="message_metrics_download"  # Added unique key
                 )
             else:
                 st.info("No message metrics available.")
