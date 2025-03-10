@@ -139,7 +139,7 @@ class ScraperConfig:
     base_url: str = os.getenv('KNOWHUB_BASE_URL', 'https://knowhub.aphrc.org')
     cache_dir: str = os.getenv('KNOWHUB_CACHE_DIR', '/tmp/knowhub_cache')
     cache_ttl: int = int(os.getenv('KNOWHUB_CACHE_TTL', '86400'))  # 24 hours in seconds
-    request_timeout: int = int(os.getenv('KNOWHUB_REQUEST_TIMEOUT', '30'))
+    request_timeout: int = int(os.getenv('KNOWHUB_REQUEST_TIMEOUT', '10'))
     max_workers: int = int(os.getenv('KNOWHUB_MAX_WORKERS', '4'))
     max_retries: int = int(os.getenv('KNOWHUB_MAX_RETRIES', '3'))
     initial_rate_limit_delay: float = float(os.getenv('KNOWHUB_INITIAL_RATE_LIMIT', '1.0'))
@@ -164,10 +164,18 @@ class ScraperConfig:
 
 
 class KnowhubScraper:
-    def __init__(self, summarizer: Optional[TextSummarizer] = None, config: Optional[ScraperConfig] = None):
+    def __init__(self, summarizer: Optional[TextSummarizer] = None, config: Optional[ScraperConfig] = None,
+                db_connection_string: Optional[str] = None):
         """Initialize KnowhubScraper with enhanced capabilities."""
         # Initialize configuration
         self.config = config or ScraperConfig()
+        
+        # Get database connection string from environment if not provided
+        self.db_connection_string = db_connection_string or os.getenv(
+            'KNOWHUB_DB_CONNECTION_STRING', 
+            f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@"
+            f"{os.getenv('POSTGRES_HOST')}:{os.getenv('POSTGRES_PORT')}/{os.getenv('POSTGRES_DB')}"
+        )
         
         # Base URLs and endpoints
         self.base_url = self.config.base_url
@@ -215,6 +223,7 @@ class KnowhubScraper:
         logger.info("KnowhubScraper initialized with configuration: %s", self.config.to_dict())
         logger.info(f"Using publications URL: {self.publications_url}")
         logger.info(f"Additional endpoints: {', '.join(self.endpoints.keys())}")
+        logger.info(f"Database connection string: {self.db_connection_string[:20]}...")
 
     def _create_session(self) -> requests.Session:
         """Create a requests session with retry capabilities."""
@@ -242,7 +251,7 @@ class KnowhubScraper:
             self._summarizer = TextSummarizer()
         return self._summarizer
 
-    def fetch_publications(self, limit: int = 10) -> List[Dict]:
+    def fetch_publications(self, limit: int = 10, auto_save: bool = False) -> List[Dict]:
         """Fetch publications from Knowhub with parallel processing and caching."""
         publications = []
         try:
@@ -255,6 +264,9 @@ class KnowhubScraper:
             cached_data = self.cache.get(cache_key)
             if cached_data:
                 logger.info(f"Retrieved {len(cached_data)} publications from cache")
+                if auto_save and cached_data:
+                    saved_count = self.batch_save_to_database(cached_data)
+                    logger.info(f"Auto-saved {saved_count} publications from cache to database")
                 return cached_data
             
             # Access the main publications page
@@ -294,6 +306,11 @@ class KnowhubScraper:
             if publications:
                 self.cache.set(cache_key, publications, expire=self.config.cache_ttl)
             
+            # Auto-save if requested
+            if auto_save and publications:
+                saved_count = self.batch_save_to_database(publications)
+                logger.info(f"Auto-saved {saved_count} publications to database")
+            
             logger.info(f"Successfully fetched {len(publications)} publications")
             return publications
             
@@ -321,7 +338,7 @@ class KnowhubScraper:
             logger.error(f"Error processing publication: {e}", exc_info=True)
             return None
 
-    def fetch_additional_content(self, content_type: str, limit: int = 10) -> List[Dict]:
+    def fetch_additional_content(self, content_type: str, limit: int = 10, auto_save: bool = False) -> List[Dict]:
         """Fetch content from additional endpoints with caching."""
         if content_type not in self.endpoints:
             logger.error(f"Invalid content type: {content_type}")
@@ -339,6 +356,9 @@ class KnowhubScraper:
             cached_data = self.cache.get(cache_key)
             if cached_data:
                 logger.info(f"Retrieved {len(cached_data)} {content_type} items from cache")
+                if auto_save and cached_data:
+                    saved_count = self.batch_save_to_database(cached_data)
+                    logger.info(f"Auto-saved {saved_count} {content_type} items from cache to database")
                 return cached_data
             
             # Fetch and parse page
@@ -374,6 +394,11 @@ class KnowhubScraper:
             # Store in cache for future use
             if contents:
                 self.cache.set(cache_key, contents, expire=self.config.cache_ttl)
+                
+            # Auto-save if requested
+            if auto_save and contents:
+                saved_count = self.batch_save_to_database(contents)
+                logger.info(f"Auto-saved {saved_count} {content_type} items to database")
             
             logger.info(f"Successfully fetched {len(contents)} {content_type} items")
             return contents
@@ -408,7 +433,7 @@ class KnowhubScraper:
             logger.error(f"Error processing {content_type} item: {e}", exc_info=True)
             return None
 
-    def fetch_all_content(self, limit: int = 1500) -> Dict[str, List[Dict]]:
+    def fetch_all_content(self, limit: int = 1500, auto_save: bool = False) -> Dict[str, List[Dict]]:
         """Fetch content from all endpoints including original publications."""
         all_content = {}
         
@@ -421,15 +446,22 @@ class KnowhubScraper:
         cached_data = self.cache.get(cache_key)
         if cached_data:
             logger.info(f"Retrieved all content from cache")
+            if auto_save:
+                total_saved = 0
+                for content_type, items in cached_data.items():
+                    saved = self.batch_save_to_database(items)
+                    logger.info(f"Auto-saved {saved} {content_type} items from cache to database")
+                    total_saved += saved
+                logger.info(f"Total auto-saved from cache: {total_saved} items")
             return cached_data
         
         # Fetch from original publications endpoint
         logger.info("Fetching from original publications endpoint...")
-        all_content['publications'] = self.fetch_publications(limit=limit)
+        all_content['publications'] = self.fetch_publications(limit=limit, auto_save=auto_save)
         
         # Fetch from additional endpoints using parallel processing
         future_to_content_type = {
-            self.executor.submit(self.fetch_additional_content, content_type, limit): content_type
+            self.executor.submit(self.fetch_additional_content, content_type, limit, auto_save): content_type
             for content_type in self.endpoints
         }
         
@@ -915,22 +947,8 @@ class KnowhubScraper:
         author_name = author_name.strip()
         
         # Remove trailing commas
-        author_name = re.sub(r',\s*$', '', author_name)
-        
-        # Fix capitalization (keeping McName capitalization patterns)
-        def capitalize_name_part(match):
-            part = match.group(0)
-            # Handle special cases like "McDowell"
-            if part.lower().startswith("mc") and len(part) > 2:
-                return "Mc" + part[2].upper() + part[3:].lower()
-            return part.capitalize()
-        
-        # Split on common separators and capitalize each part
-        parts = re.split(r'[\s,;]+', author_name)
-        normalized_parts = [capitalize_name_part(part) for part in parts if part]
-        
-        # Rejoin with spaces
-        return " ".join(normalized_parts)
+        author_name = re.sub(r',\s*,', '', author_name)
+            
 
     def _normalize_keyword(self, keyword: str) -> str:
         """Normalize keywords."""
@@ -941,10 +959,6 @@ class KnowhubScraper:
         keyword = keyword.strip().lower()
         
         # Remove trailing punctuation
-        keyword = re.sub(r'[;,.\s]+$', '', keyword)
-        
-        return keyword
-
     def _normalize_language(self, language: str) -> str:
         """Normalize language codes."""
         if not language:
@@ -1112,10 +1126,16 @@ class KnowhubScraper:
             logger.error(f"Error in summary generation: {e}")
             return title
 
-    def batch_save_to_database(self, publications: List[Dict], db_connection_string: str) -> int:
+    def batch_save_to_database(self, publications: List[Dict], db_connection_string: Optional[str] = None) -> int:
         """Save multiple publications to database in efficient batches."""
         if not publications:
             logger.warning("No publications to save")
+            return 0
+            
+        # Use provided connection string or fall back to instance's
+        conn_string = db_connection_string or self.db_connection_string
+        if not conn_string:
+            logger.error("No database connection string provided")
             return 0
             
         logger.info(f"Saving {len(publications)} publications to database in batches")
@@ -1127,7 +1147,7 @@ class KnowhubScraper:
         
         try:
             # Connect to database
-            conn = psycopg2.connect(db_connection_string)
+            conn = psycopg2.connect(conn_string)
             cursor = conn.cursor()
             
             # Process in batches
@@ -1153,22 +1173,45 @@ class KnowhubScraper:
                                 pub.get('doi'),
                                 pub.get('abstract'),
                                 pub.get('summary'),
-                                pub.get('authors'),
-                                pub.get('domains'),
+                                pub.get('authors', []),
+                                pub.get('description', ''),
                                 pub.get('type', 'other'),
-                                'knowhub',  # source
-                                pub.get('publication_year')
+                                pub.get('source', 'knowhub'),
+                                pub.get('date_issue'),
+                                pub.get('citation'),
+                                pub.get('language', 'en'),
+                                pub.get('identifiers', '{}'),
+                                pub.get('collection', 'knowhub'),
+                                pub.get('publishers', '{}'),
+                                pub.get('subtitles', '{}')
                             )
                             
                             # Insert publication
                             cursor.execute("""
                                 INSERT INTO resources_resource
-                                (title, doi, abstract, summary, authors, domains, type, source, publication_year)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                (title, doi, abstract, summary, authors, description, type, source, 
+                                 date_issue, citation, language, identifiers, collection, publishers, subtitles)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                 RETURNING id
                             """, values)
                             
                             pub_id = cursor.fetchone()[0]
+                            
+                            # Insert tags if they exist
+                            if 'tags' in pub:
+                                for tag in pub['tags']:
+                                    tag_values = (
+                                        tag['name'],
+                                        tag['tag_type'],
+                                        tag.get('additional_metadata', '{}'),
+                                        pub_id
+                                    )
+                                    cursor.execute("""
+                                        INSERT INTO resources_tag
+                                        (name, tag_type, additional_metadata, resource_id)
+                                        VALUES (%s, %s, %s, %s)
+                                    """, tag_values)
+                            
                             successful += 1
                     
                     # Commit the batch
@@ -1192,6 +1235,36 @@ class KnowhubScraper:
             if conn:
                 conn.close()
             logger.info(f"Database operation completed, saved {successful} publications")
+
+    def scrape_and_save_all(self, limit_per_endpoint: int = 100) -> Dict:
+        """Scrape all content types and save to database."""
+        results = {}
+        total_saved = 0
+        
+        try:
+            # Fetch and save publications
+            pubs = self.fetch_publications(limit=limit_per_endpoint)
+            saved_pubs = self.batch_save_to_database(pubs)
+            results['publications'] = {'fetched': len(pubs), 'saved': saved_pubs}
+            total_saved += saved_pubs
+            
+            # Fetch and save each content type
+            for content_type in self.endpoints.keys():
+                content = self.fetch_additional_content(content_type, limit=limit_per_endpoint)
+                saved = self.batch_save_to_database(content)
+                results[content_type] = {'fetched': len(content), 'saved': saved}
+                total_saved += saved
+                
+            # Add metrics and totals
+            results['metrics'] = self.get_metrics()
+            results['total_saved'] = total_saved
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error in scrape_and_save_all: {e}", exc_info=True)
+            results['error'] = str(e)
+            return results
 
     def get_metrics(self) -> Dict:
         """Get current metrics."""
@@ -1229,3 +1302,23 @@ class KnowhubScraper:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
         self.close()
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Run the KnowhubScraper')
+    parser.add_argument('--limit', type=int, default=100, help='Limit per endpoint')
+    parser.add_argument('--save', action='store_true', help='Save to database')
+    args = parser.parse_args()
+    
+    print(f"Starting KnowhubScraper with limit={args.limit}, save={args.save}")
+    
+    with KnowhubScraper() as scraper:
+        if args.save:
+            results = scraper.scrape_and_save_all(args.limit)
+            print(f"Scraping completed. Total saved: {results.get('total_saved', 0)}")
+        else:
+            all_content = scraper.fetch_all_content(args.limit)
+            print(f"Scraping completed. Total items: {sum(len(items) for items in all_content.values())}")
+        
+        print("Metrics:", scraper.get_metrics())

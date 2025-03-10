@@ -1,10 +1,12 @@
-from google.ai import generativelanguage as glm
-import google.generativeai as genai
+import requests
+import certifi
 
-# Set up your API key
-genai.configure(api_key='AIzaSyChW4wRNJ6A9kllmAWsI5L3BYgvFdfZ9wU')
+api_url = "https://knowhub.aphrc.org/rest/items/1602"
 
-# List available models
-models = genai.list_models()
-for model in models:
-    print(model.name)
+# Use certifi's CA bundle
+response = requests.get(api_url, verify=certifi.where())
+
+if response.status_code == 200:
+    print(response.json())
+else:
+    print("Error:", response.status_code, response.text)
