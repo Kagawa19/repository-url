@@ -139,11 +139,11 @@ class ScraperConfig:
     base_url: str = os.getenv('KNOWHUB_BASE_URL', 'https://knowhub.aphrc.org')
     cache_dir: str = os.getenv('KNOWHUB_CACHE_DIR', '/tmp/knowhub_cache')
     cache_ttl: int = int(os.getenv('KNOWHUB_CACHE_TTL', '86400'))  # 24 hours in seconds
-    request_timeout: int = int(os.getenv('KNOWHUB_REQUEST_TIMEOUT', '10'))
+    request_timeout: int = int(os.getenv('KNOWHUB_REQUEST_TIMEOUT', ''))
     max_workers: int = int(os.getenv('KNOWHUB_MAX_WORKERS', '4'))
-    max_retries: int = int(os.getenv('KNOWHUB_MAX_RETRIES', '3'))
+    max_retries: int = int(os.getenv('KNOWHUB_MAX_RETRIES', '6'))
     initial_rate_limit_delay: float = float(os.getenv('KNOWHUB_INITIAL_RATE_LIMIT', '1.0'))
-    batch_size: int = int(os.getenv('KNOWHUB_BATCH_SIZE', '50'))
+    batch_size: int = int(os.getenv('KNOWHUB_BATCH_SIZE', '20'))
     html_selectors: Dict[str, List[str]] = field(default_factory=lambda: {
         'item': [
             ['div', 'article'], 
