@@ -135,54 +135,54 @@ class AdaptiveRateLimiter:
 
 @dataclass
 class ScraperConfig:
-        """Configuration for the KnowhubScraper."""
-            base_url: str = os.getenv('KNOWHUB_BASE_URL', 'https://knowhub.aphrc.org')
-                cache_dir: str = os.getenv('KNOWHUB_CACHE_DIR', '/tmp/knowhub_cache')
-                    cache_ttl: int = int(os.getenv('KNOWHUB_CACHE_TTL', '86400'))  # 24 hours in seconds
-                        request_timeout: int = int(os.getenv('KNOWHUB_REQUEST_TIMEOUT', ''))
-                            max_workers: int = int(os.getenv('KNOWHUB_MAX_WORKERS', '4'))
-                                max_retries: int = int(os.getenv('KNOWHUB_MAX_RETRIES', '6'))
-                                    initial_rate_limit_delay: float = float(os.getenv('KNOWHUB_INITIAL_RATE_LIMIT', '1.0'))
-                                        batch_size: int = int(os.getenv('KNOWHUB_BATCH_SIZE', '20'))
-                                            html_selectors: Dict[str, List[str]] = field(default_factory=lambda: {
-                                                    'item': [
-                                                                ['div', 'article'], 
-                                                                            ['ds-artifact-item', 'item-wrapper', 'row artifact-description']
-                                                                                    ],
-                                                                                            'title': [
-                                                                                                        ['h4', 'h3', 'h2'], 
-                                                                                                                    ['artifact-title', 'item-title']
-                                                                                                                            ],
-                                                                                                                                    'metadata': [
-                                                                                                                                                ['div'], 
-                                                                                                                                                            ['item-metadata', 'artifact-info']
-                                                                                                                                                                    ]
-                                                                                                                                                                        })
-                                                                                                                                                                        
-                                                                                                                                                                            def to_dict(self) -> Dict:
-                                                                                                                                                                                    return asdict(self)
-                                                                                                                                                                                    
-                                                                                                                                                                                    
-                                                                                                                                                                                    class KnowhubScraper:
-                                                                                                                                                                                        # Add to the KnowhubScraper class, joining with the methods you already have
-                                                                                                                                                                                        
-                                                                                                                                                                                        # Modify the __init__ method to enhance logging and debug info
-                                                                                                                                                                                            def __init__(self, summarizer: Optional[TextSummarizer] = None, config: Optional[ScraperConfig] = None,
-                                                                                                                                                                                                            db_connection_string: Optional[str] = None):
-                                                                                                                                                                                                                    """Initialize KnowhubScraper with enhanced capabilities."""
-                                                                                                                                                                                                                            # Initialize configuration
-                                                                                                                                                                                                                                    self.config = config or ScraperConfig()
-                                                                                                                                                                                                                                            
-                                                                                                                                                                                                                                                    # Get database connection string from environment if not provided
-                                                                                                                                                                                                                                                            self.db_connection_string = db_connection_string or os.getenv(
-                                                                                                                                                                                                                                                                        'KNOWHUB_DB_CONNECTION_STRING', 
-                                                                                                                                                                                                                                                                                    f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@"
-                                                                                                                                                                                                                                                                                                f"{os.getenv('POSTGRES_HOST')}:{os.getenv('POSTGRES_PORT')}/{os.getenv('POSTGRES_DB')}"
-                                                                                                                                                                                                                                                                                                        )
-                                                                                                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                                                                                                        # Base URLs and endpoints
-                                                                                                                                                                                                                                                                                                                                self.base_url = self.config.base_url
-                                                                                                                                                                                                                                                                                                                                        self.publications_url = f"{self.base_url}/handle/123456789/1"
+    """Configuration for the KnowhubScraper."""
+    base_url: str = os.getenv('KNOWHUB_BASE_URL', 'https://knowhub.aphrc.org')
+    cache_dir: str = os.getenv('KNOWHUB_CACHE_DIR', '/tmp/knowhub_cache')
+    cache_ttl: int = int(os.getenv('KNOWHUB_CACHE_TTL', '86400'))  # 24 hours in seconds
+    request_timeout: int = int(os.getenv('KNOWHUB_REQUEST_TIMEOUT', ''))
+    max_workers: int = int(os.getenv('KNOWHUB_MAX_WORKERS', '4'))
+    max_retries: int = int(os.getenv('KNOWHUB_MAX_RETRIES', '6'))
+    initial_rate_limit_delay: float = float(os.getenv('KNOWHUB_INITIAL_RATE_LIMIT', '1.0'))
+    batch_size: int = int(os.getenv('KNOWHUB_BATCH_SIZE', '20'))
+    html_selectors: Dict[str, List[str]] = field(default_factory=lambda: {
+        'item': [
+            ['div', 'article'], 
+            ['ds-artifact-item', 'item-wrapper', 'row artifact-description']
+        ],
+        'title': [
+            ['h4', 'h3', 'h2'], 
+            ['artifact-title', 'item-title']
+        ],
+        'metadata': [
+            ['div'], 
+            ['item-metadata', 'artifact-info']
+        ]
+    })
+
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+
+class KnowhubScraper:
+    # Add to the KnowhubScraper class, joining with the methods you already have
+
+# Modify the __init__ method to enhance logging and debug info
+    def __init__(self, summarizer: Optional[TextSummarizer] = None, config: Optional[ScraperConfig] = None,
+                db_connection_string: Optional[str] = None):
+        """Initialize KnowhubScraper with enhanced capabilities."""
+        # Initialize configuration
+        self.config = config or ScraperConfig()
+        
+        # Get database connection string from environment if not provided
+        self.db_connection_string = db_connection_string or os.getenv(
+            'KNOWHUB_DB_CONNECTION_STRING', 
+            f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@"
+            f"{os.getenv('POSTGRES_HOST')}:{os.getenv('POSTGRES_PORT')}/{os.getenv('POSTGRES_DB')}"
+        )
+        
+        # Base URLs and endpoints
+        self.base_url = self.config.base_url
+        self.publications_url = f"{self.base_url}/handle/123456789/1"
         
         # Update endpoints to match exact type names
         self.endpoints = {

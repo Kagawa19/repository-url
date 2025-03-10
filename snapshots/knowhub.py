@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 import os
 import logging
-from datetime import datetime
 import json
-import zlib
 import psycopg2
+import zlib
+from datetime import datetime
 
-from ai_services_api.services.centralized_repository.ai_summarizer import TextSummarizer
-from ai_services_api.services.centralized_repository.text_processor import safe_str, truncate_text
-
-from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional
+from knowhub_scraper import KnowhubScraper
 
 # Configure logging
 logging.basicConfig(
@@ -148,11 +144,8 @@ def main():
     
     # Create KnowhubScraper instance
     try:
-        # Initialize summarizer (optional)
-        summarizer = TextSummarizer()
-        
         # Create scraper instance
-        with KnowhubScraper(summarizer=summarizer) as scraper:
+        with KnowhubScraper() as scraper:
             # Fetch all collections
             logger.info("Starting to fetch all collections from KnowHub")
             
