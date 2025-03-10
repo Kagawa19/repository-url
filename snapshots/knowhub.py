@@ -6,6 +6,7 @@ import psycopg2
 import time
 import logging
 import hashlib
+import zlib  # For generating integer hash
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -60,8 +61,8 @@ def setup_database():
 
 def generate_unique_id(resource):
     """
-    Generate a unique identifier for a resource
-    Uses a hash of key identifying information
+    Generate a unique integer ID for a resource
+    Uses a combination of attributes to create a deterministic integer
     """
     # Create a string representation of unique identifiers
     id_string = f"{resource.get('doi', '')}{resource.get('title', '')}"
@@ -70,8 +71,12 @@ def generate_unique_id(resource):
     if not id_string.strip():
         id_string = f"{resource.get('source', '')}{resource.get('identifiers', {}).get('handle', '')}"
     
-    # Generate a hash
-    return hashlib.md5(id_string.encode()).hexdigest()
+    # Generate a consistent integer hash
+    # Use zlib.crc32 to generate a positive 32-bit integer
+    unique_id = abs(zlib.crc32(id_string.encode('utf-8')))
+    
+    # Ensure the ID is within a reasonable range
+    return unique_id % 2147483647  # Max signed 32-bit integer
 
 def insert_resources_to_database(resources):
     """
@@ -110,7 +115,7 @@ def insert_resources_to_database(resources):
                     
                     # Prepare values, ensuring JSON fields are properly serialized
                     values = (
-                        unique_id,  # Use generated unique ID as primary key
+                        unique_id,  # Use generated unique integer ID
                         resource.get('doi'),
                         resource.get('title', 'Untitled Resource'),
                         resource.get('abstract'),
@@ -125,7 +130,8 @@ def insert_resources_to_database(resources):
                         json.dumps(resource.get('identifiers', {})) if resource.get('identifiers') else None,
                         resource.get('collection', 'knowhub'),
                         json.dumps(resource.get('publishers', {})) if resource.get('publishers') else None,
-                        json.dumps(resource.get('subtitles', {})) if resource.get('subtitles') else None
+                        json.dumps(resource.get('subtitles', {})) if resource.get('subtitles') else None,
+                        resource.get('publication_year')
                     )
                     
                     # Perform insert with custom unique ID handling
@@ -133,8 +139,8 @@ def insert_resources_to_database(resources):
                         INSERT INTO resources_resource 
                         (id, doi, title, abstract, summary, authors, description, 
                          type, source, date_issue, citation, language, 
-                         identifiers, collection, publishers, subtitles)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         identifiers, collection, publishers, subtitles, publication_year)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (id) DO UPDATE SET 
                         doi = COALESCE(EXCLUDED.doi, resources_resource.doi),
                         title = COALESCE(EXCLUDED.title, resources_resource.title),
@@ -184,7 +190,8 @@ def main():
             'source': 'knowhub',
             'date_issue': '2023-01-15',
             'identifiers': {'handle': 'sample-handle'},
-            'collection': 'publications'
+            'collection': 'publications',
+            'publication_year': '2023'
         }
         # Add more resources here
     ]
