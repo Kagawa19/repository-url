@@ -129,8 +129,9 @@ def get_content_metrics(conn, start_date, end_date):
             
             # Add source column if available
             if 'source' in resource_columns:
-                select_columns.append("source")
-                group_by_columns.append("source")
+                # Use COALESCE to handle NULL values
+                select_columns.append("COALESCE(source, 'unknown') as source")
+                group_by_columns.append("COALESCE(source, 'unknown')")
             else:
                 select_columns.append("'unknown' as source")
                 
@@ -167,6 +168,11 @@ def get_content_metrics(conn, start_date, end_date):
                     resource_metrics = resource_metrics.rename(columns={'type': 'resource_type'})
                 elif 'resource_type' not in resource_metrics.columns:
                     resource_metrics['resource_type'] = 'unknown'
+                
+                # Make sure source doesn't have any NULLs (should already be handled by COALESCE in SQL)
+                if 'source' in resource_metrics.columns:
+                    resource_metrics['source'] = resource_metrics['source'].fillna('unknown')
+                    resource_metrics['source'] = resource_metrics['source'].replace('', 'unknown')
                     
                 # Add publication_year distribution if available
                 if 'publication_year' in resource_columns:
@@ -188,6 +194,21 @@ def get_content_metrics(conn, start_date, end_date):
                 
                 # Store resource metrics
                 metrics['resource_metrics'] = resource_metrics
+                
+                # Also get direct source distribution
+                cursor.execute("""
+                    SELECT 
+                        COALESCE(source, 'unknown') as source,
+                        COUNT(*) as count
+                    FROM resources_resource
+                    GROUP BY COALESCE(source, 'unknown')
+                    ORDER BY count DESC
+                """)
+                
+                source_data = cursor.fetchall()
+                if source_data:
+                    source_df = pd.DataFrame(source_data, columns=['source', 'count'])
+                    metrics['source_distribution'] = source_df
         
         # Get expert metrics if experts_expert table exists
         if experts_exist:
@@ -490,14 +511,24 @@ def display_content_analytics(
                 with col2:
                     # Create aggregated source counts
                     if 'source' in metrics['resource_metrics'].columns:
-                        source_counts = metrics['resource_metrics'].groupby('source')['total_resources'].sum().reset_index()
+                        # Use the dedicated source distribution if available
+                        if 'source_distribution' in metrics and not metrics['source_distribution'].empty:
+                            source_counts = metrics['source_distribution']
+                        else:
+                            # Clean empty or null values
+                            metrics['resource_metrics']['source'] = metrics['resource_metrics']['source'].fillna('unknown')
+                            metrics['resource_metrics']['source'] = metrics['resource_metrics']['source'].replace('', 'unknown')
+                            
+                            # Create the aggregated counts
+                            source_counts = metrics['resource_metrics'].groupby('source')['total_resources'].sum().reset_index()
                         
+                        # Create the visualization
                         resource_source_fig = px.bar(
                             source_counts, 
                             x='source', 
-                            y='total_resources',
+                            y='count' if 'count' in source_counts.columns else 'total_resources',
                             title='Resources by Source',
-                            color='total_resources',
+                            color='count' if 'count' in source_counts.columns else 'total_resources',
                             color_continuous_scale='Blues'
                         )
                         
@@ -718,6 +749,11 @@ def display_content_analytics(
             if has_resource_data:
                 st.dataframe(metrics['resource_metrics'], use_container_width=True)
                 
+                # Show source distribution if available
+                if 'source_distribution' in metrics and not metrics['source_distribution'].empty:
+                    st.subheader("Source Distribution")
+                    st.dataframe(metrics['source_distribution'], use_container_width=True)
+                
                 # Add download button
                 csv = metrics['resource_metrics'].to_csv(index=False)
                 st.download_button(
@@ -728,6 +764,27 @@ def display_content_analytics(
                 )
             else:
                 st.info("No resource metrics available.")
+        
+        
+        
+        with metrics_tab2:
+            if has_expert_data:
+                st.dataframe(metrics['expert_metrics'], use_container_width=True)
+                
+                if 'domain_distribution' in metrics and not metrics['domain_distribution'].empty:
+                    st.subheader("Domain Distribution")
+                    st.dataframe(metrics['domain_distribution'], use_container_width=True)
+                
+                # Add download button
+                csv = metrics['expert_metrics'].to_csv(index=False)
+                st.download_button(
+                    label="Download Expert Metrics CSV",
+                    data=csv,
+                    file_name="expert_metrics.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.info("No expert metrics available.")
         
         with metrics_tab2:
             if has_expert_data:
