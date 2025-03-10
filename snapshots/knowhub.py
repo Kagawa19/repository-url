@@ -410,4 +410,16 @@ def main():
         elapsed_time = (datetime.now(timezone.utc) - start_time).total_seconds()
         logger.info(f"Scraping completed. Total resources: {len(all_resources)}")
         logger.info(f"Successfully inserted: {inserted_count} resources")
-        logger.info(f"Total time taken: {elapsed_time:.2f} seconds
+        logger.info(f"Total time taken: {elapsed_time:.2f} seconds")
+        
+        # Print collection-wise breakdown
+        for collection_type, resources in all_content.items():
+            logger.info(f"{collection_type.capitalize()}: {len(resources)} resources")
+    
+    except Exception as e:
+        logger.error(f"An error occurred during scraping: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    main()
