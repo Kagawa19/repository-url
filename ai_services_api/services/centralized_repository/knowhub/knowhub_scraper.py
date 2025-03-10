@@ -1307,7 +1307,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Run the KnowhubScraper')
-    parser.add_argument('--limit', type=int, default=100, help='Limit per endpoint')
+    parser.add_argument('--limit', type=int, default=1500, help='Limit per endpoint')
     parser.add_argument('--save', action='store_true', help='Save to database')
     args = parser.parse_args()
     
