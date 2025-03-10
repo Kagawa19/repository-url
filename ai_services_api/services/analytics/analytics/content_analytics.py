@@ -83,12 +83,18 @@ def get_table_columns(conn, table_name: str) -> List[str]:
     finally:
         cursor.close()
 
-def get_content_metrics(conn):
+def get_content_metrics(
+    conn, 
+    start_date: Optional[datetime] = None, 
+    end_date: Optional[datetime] = None
+) -> Dict:
     """
     Retrieve content metrics from the database.
     
     Args:
         conn: Database connection
+        start_date: Optional start date for filtering metrics
+        end_date: Optional end date for filtering metrics
     
     Returns:
         dict: Dictionary of metrics from different database tables
@@ -109,7 +115,17 @@ def get_content_metrics(conn):
         experts_exist = check_table_exists(conn, 'experts_expert')
         messages_exist = check_table_exists(conn, 'expert_messages')
         
-        # Get resource metrics if resources_resource table exists
+        # Prepare date filtering conditions
+        date_condition = ""
+        date_params = []
+        if start_date:
+            date_condition += " AND created_at >= %s"
+            date_params.append(start_date)
+        if end_date:
+            date_condition += " AND created_at <= %s"
+            date_params.append(end_date)
+        
+        # Get resources_resource columns
         if resources_exist:
             # Get resources_resource columns
             resource_columns = get_table_columns(conn, 'resources_resource')
@@ -137,11 +153,12 @@ def get_content_metrics(conn):
             query = f"""
                 SELECT {', '.join(select_columns)}
                 FROM resources_resource
+                WHERE 1=1 {date_condition}
                 {f"GROUP BY {', '.join(group_by_columns)}" if group_by_columns else ""}
             """
             
-            # Execute query
-            cursor.execute(query)
+            # Execute query with date parameters
+            cursor.execute(query, tuple(date_params))
                 
             columns = [desc[0] for desc in cursor.description]
             data = cursor.fetchall()
@@ -156,22 +173,25 @@ def get_content_metrics(conn):
                 elif 'resource_type' not in resource_metrics.columns:
                     resource_metrics['resource_type'] = 'unknown'
                 
-                # Make sure source doesn't have any NULLs (should already be handled by COALESCE in SQL)
+                # Make sure source doesn't have any NULLs
                 if 'source' in resource_metrics.columns:
                     resource_metrics['source'] = resource_metrics['source'].fillna('unknown')
                     resource_metrics['source'] = resource_metrics['source'].replace('', 'unknown')
                     
                 # Add publication_year distribution if available
                 if 'publication_year' in resource_columns:
-                    cursor.execute("""
+                    year_query = """
                         SELECT 
                             publication_year, 
                             COUNT(*) as count
                         FROM resources_resource
                         WHERE publication_year IS NOT NULL
+                        {date_condition}
                         GROUP BY publication_year
                         ORDER BY publication_year
-                    """)
+                    """.format(date_condition=date_condition)
+                    
+                    cursor.execute(year_query, tuple(date_params))
                     
                     year_data = cursor.fetchall()
                     if year_data:
@@ -183,14 +203,17 @@ def get_content_metrics(conn):
                 metrics['resource_metrics'] = resource_metrics
                 
                 # Also get direct source distribution
-                cursor.execute("""
+                source_query = f"""
                     SELECT 
                         COALESCE(source, 'unknown') as source,
                         COUNT(*) as count
                     FROM resources_resource
+                    WHERE 1=1 {date_condition}
                     GROUP BY COALESCE(source, 'unknown')
                     ORDER BY count DESC
-                """)
+                """
+                
+                cursor.execute(source_query, tuple(date_params))
                 
                 source_data = cursor.fetchall()
                 if source_data:
@@ -221,9 +244,9 @@ def get_content_metrics(conn):
                     COUNT(CASE WHEN fields IS NOT NULL AND fields != '{}' THEN 1 END) as experts_with_fields
                 """
                 
-            domain_query += " FROM experts_expert"
+            domain_query += f" FROM experts_expert WHERE 1=1 {date_condition}"
             
-            cursor.execute(domain_query)
+            cursor.execute(domain_query, tuple(date_params))
             expert_counts = cursor.fetchone()
             
             if expert_counts:
@@ -249,16 +272,19 @@ def get_content_metrics(conn):
                 # Get domain distribution if available
                 if 'domains' in expert_columns:
                     try:
-                        cursor.execute("""
+                        domain_query = f"""
                             SELECT 
                                 d.domain,
                                 COUNT(*) as expert_count
                             FROM experts_expert e, 
                                 UNNEST(e.domains) d(domain)
+                            WHERE 1=1 {date_condition}
                             GROUP BY d.domain
                             ORDER BY expert_count DESC
                             LIMIT 10
-                        """)
+                        """
+                        
+                        cursor.execute(domain_query, tuple(date_params))
                         
                         domain_data = cursor.fetchall()
                         if domain_data:
@@ -284,10 +310,11 @@ def get_content_metrics(conn):
             query = f"""
                 SELECT {', '.join(select_columns)}
                 FROM expert_messages
+                WHERE 1=1 {date_condition}
             """
             
             # Execute query
-            cursor.execute(query)
+            cursor.execute(query, tuple(date_params))
                 
             message_data = cursor.fetchone()
             
@@ -308,14 +335,15 @@ def get_content_metrics(conn):
                 
                 # Get message distribution by time if available
                 if 'created_at' in message_columns:
-                    cursor.execute("""
+                    cursor.execute(f"""
                         SELECT 
                             EXTRACT(HOUR FROM created_at) as hour,
                             COUNT(*) as message_count
                         FROM expert_messages
+                        WHERE 1=1 {date_condition}
                         GROUP BY hour
                         ORDER BY hour
-                    """)
+                    """, tuple(date_params))
                     
                     hour_data = cursor.fetchall()
                     if hour_data:
@@ -325,16 +353,17 @@ def get_content_metrics(conn):
                 
                 # Get sender-receiver pairs if available
                 if 'sender_id' in message_columns and 'receiver_id' in message_columns:
-                    cursor.execute("""
+                    cursor.execute(f"""
                         SELECT 
                             sender_id,
                             COUNT(*) as sent_count,
                             COUNT(DISTINCT receiver_id) as unique_receivers
                         FROM expert_messages
+                        WHERE 1=1 {date_condition}
                         GROUP BY sender_id
                         ORDER BY sent_count DESC
                         LIMIT 10
-                    """)
+                    """, tuple(date_params))
                     
                     sender_data = cursor.fetchall()
                     if sender_data:
@@ -351,7 +380,6 @@ def get_content_metrics(conn):
         logger.error(f"Error retrieving content metrics: {e}")
         # Return empty DataFrames in case of error
         return metrics
-
 def display_content_analytics(
     metrics: Dict[str, pd.DataFrame], 
     filters: Optional[Dict] = None

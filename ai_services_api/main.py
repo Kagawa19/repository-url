@@ -9,6 +9,8 @@ from ai_services_api.controllers.recommendation_router import api_router as reco
 from ai_services_api.controllers.message_router import api_router as message_router
 from ai_services_api.services.chatbot.utils.redis_connection import redis_pool
 from ai_services_api.controllers.publications_router import api_router as publications_router
+from ai_services_api.controllers.autocomplete_router import api_router as autocomplete_router
+
 
 
 # Create the FastAPI app instance
@@ -45,6 +47,8 @@ app.include_router(recommendation_router, prefix="/recommendation")
 app.include_router(search_router, prefix="/search")
 app.include_router(message_router, prefix="/message")
 app.include_router(publications_router, prefix="/publications")
+app.include_router(autocomplete_router, prefix="/autocomplete")
+
 
 
 @app.get("/", response_class=HTMLResponse)
