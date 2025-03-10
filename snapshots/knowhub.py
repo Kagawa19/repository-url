@@ -5,6 +5,7 @@ import requests
 import psycopg2
 import time
 import logging
+import hashlib
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -21,11 +22,12 @@ DB_PARAMS = {
 }
 
 def setup_database():
-    """Verify the resources_resource table exists"""
+    """Verify the resources_resource table exists and its structure"""
     conn = psycopg2.connect(**DB_PARAMS)
     cur = conn.cursor()
     
     try:
+        # Check table existence
         cur.execute("""
             SELECT EXISTS (
                 SELECT FROM information_schema.tables 
@@ -38,7 +40,15 @@ def setup_database():
             logger.error("resources_resource table does not exist. Please create it first.")
             return False
         
-        logger.info("resources_resource table found.")
+        # Check columns
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'resources_resource'
+        """)
+        columns = [col[0] for col in cur.fetchall()]
+        
+        logger.info(f"Columns in resources_resource: {columns}")
         return True
     
     except Exception as e:
@@ -47,6 +57,21 @@ def setup_database():
     finally:
         cur.close()
         conn.close()
+
+def generate_unique_id(resource):
+    """
+    Generate a unique identifier for a resource
+    Uses a hash of key identifying information
+    """
+    # Create a string representation of unique identifiers
+    id_string = f"{resource.get('doi', '')}{resource.get('title', '')}"
+    
+    # If no doi or title, use more fields
+    if not id_string.strip():
+        id_string = f"{resource.get('source', '')}{resource.get('identifiers', {}).get('handle', '')}"
+    
+    # Generate a hash
+    return hashlib.md5(id_string.encode()).hexdigest()
 
 def insert_resources_to_database(resources):
     """
@@ -66,14 +91,6 @@ def insert_resources_to_database(resources):
     conn = psycopg2.connect(**DB_PARAMS)
     cur = conn.cursor()
     
-    # Columns for resources_resource table
-    columns = [
-        "doi", "title", "abstract", "summary", "authors", 
-        "description", "type", "source", "date_issue", 
-        "citation", "language", "identifiers", 
-        "collection", "publishers", "subtitles"
-    ]
-    
     successful_inserts = 0
     total_resources = len(resources)
     
@@ -88,34 +105,39 @@ def insert_resources_to_database(resources):
                 cur.execute("BEGIN;")
                 
                 for resource in batch:
+                    # Generate a unique ID
+                    unique_id = generate_unique_id(resource)
+                    
                     # Prepare values, ensuring JSON fields are properly serialized
                     values = (
+                        unique_id,  # Use generated unique ID as primary key
                         resource.get('doi'),
                         resource.get('title', 'Untitled Resource'),
                         resource.get('abstract'),
                         resource.get('summary'),
-                        json.dumps(resource.get('authors', [])),
+                        json.dumps(resource.get('authors', [])) if resource.get('authors') else None,
                         resource.get('description'),
                         resource.get('type', 'other'),
                         resource.get('source', 'knowhub'),
                         resource.get('date_issue'),
                         resource.get('citation'),
                         resource.get('language', 'en'),
-                        json.dumps(resource.get('identifiers', {})),
+                        json.dumps(resource.get('identifiers', {})) if resource.get('identifiers') else None,
                         resource.get('collection', 'knowhub'),
-                        json.dumps(resource.get('publishers', {})),
-                        json.dumps(resource.get('subtitles', {}))
+                        json.dumps(resource.get('publishers', {})) if resource.get('publishers') else None,
+                        json.dumps(resource.get('subtitles', {})) if resource.get('subtitles') else None
                     )
                     
-                    # Perform upsert (insert or update if exists)
+                    # Perform insert with custom unique ID handling
                     cur.execute("""
                         INSERT INTO resources_resource 
-                        (doi, title, abstract, summary, authors, description, 
+                        (id, doi, title, abstract, summary, authors, description, 
                          type, source, date_issue, citation, language, 
                          identifiers, collection, publishers, subtitles)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (doi) DO UPDATE SET 
-                        title = EXCLUDED.title,
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (id) DO UPDATE SET 
+                        doi = COALESCE(EXCLUDED.doi, resources_resource.doi),
+                        title = COALESCE(EXCLUDED.title, resources_resource.title),
                         abstract = COALESCE(EXCLUDED.abstract, resources_resource.abstract),
                         summary = COALESCE(EXCLUDED.summary, resources_resource.summary)
                     """, values)
@@ -129,6 +151,10 @@ def insert_resources_to_database(resources):
             except Exception as batch_error:
                 conn.rollback()
                 logger.error(f"Error inserting batch: {batch_error}")
+                
+                # Log detailed error information
+                import traceback
+                traceback.print_exc()
         
         return successful_inserts
     
