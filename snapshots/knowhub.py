@@ -2,11 +2,13 @@
 import os
 import logging
 import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 import json
 import psycopg2
 import zlib
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 from urllib.parse import urljoin
 import concurrent.futures
@@ -46,23 +48,69 @@ class KnowhubScraper:
         # Track seen handles to avoid duplicates
         self.seen_handles = set()
         
-        # Create a requests session
-        self.session = requests.Session()
+        # Create a requests session with retry and backoff
+        self.session = self._create_requests_session()
+
+    def _create_requests_session(self):
+        """Create a requests session with retry and backoff strategies"""
+        session = requests.Session()
+        
+        # Configure retry strategy
+        retry_strategy = Retry(
+            total=5,  # Total number of retries
+            status_forcelist=[429, 500, 502, 503, 504],  # HTTP status codes to retry
+            allowed_methods=["HEAD", "GET", "OPTIONS"],
+            backoff_factor=1  # Exponential backoff
+        )
+        
+        # Mount retry adapter for both HTTP and HTTPS
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
         
         # Set headers to mimic a browser
-        self.session.headers.update({
+        session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
         })
+        
+        return session
 
-    def _fetch_page(self, url):
-        """Fetch a page with error handling"""
+    def _fetch_page(self, url, timeout=30):
+        """
+        Fetch a page with robust error handling and multiple retry strategies
+        
+        Args:
+            url (str): URL to fetch
+            timeout (int): Timeout in seconds
+        
+        Returns:
+            str or None: Page content or None if failed
+        """
         try:
-            response = self.session.get(url, timeout=10)
+            # Attempt to fetch the page with a longer timeout
+            response = self.session.get(
+                url, 
+                timeout=timeout,
+                verify=False  # Disable SSL verification if needed
+            )
+            
+            # Raise an exception for bad status codes
             response.raise_for_status()
+            
             return response.text
-        except Exception as e:
-            logger.error(f"Error fetching {url}: {e}")
+        
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error fetching {url}: {e}")
+            
+            # Additional specific error logging
+            if isinstance(e, requests.exceptions.ConnectionError):
+                logger.error("Connection error - check network connectivity")
+            elif isinstance(e, requests.exceptions.Timeout):
+                logger.error("Request timed out - check server responsiveness")
+            elif isinstance(e, requests.exceptions.HTTPError):
+                logger.error(f"HTTP error occurred: {e.response.status_code}")
+            
             return None
 
     def _extract_item_details(self, item_url):
@@ -160,6 +208,7 @@ class KnowhubScraper:
             # Fetch the collection page
             page_content = self._fetch_page(collection_url)
             if not page_content:
+                logger.warning(f"Could not fetch content from {collection_url}")
                 return []
             
             # Parse the page
@@ -177,17 +226,17 @@ class KnowhubScraper:
                     unique_item_links.add(full_url)
                     self.seen_handles.add(href)
             
-            # Process items in parallel
+            # Parallel processing of items with more robust error handling
             items = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                # Submit extraction tasks
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                # Submit extraction tasks with timeout
                 future_to_url = {
                     executor.submit(self._extract_item_details, url): url 
                     for url in unique_item_links
                 }
                 
-                # Collect results
-                for future in concurrent.futures.as_completed(future_to_url):
+                # Collect results with timeout
+                for future in concurrent.futures.as_completed(future_to_url, timeout=60):
                     url = future_to_url[future]
                     try:
                         item = future.result()
@@ -335,7 +384,7 @@ def main():
     """
     Main function to scrape and save resources from all KnowHub collections
     """
-    start_time = datetime.utcnow()
+    start_time = datetime.now(timezone.utc)
     
     try:
         # Create scraper instance
@@ -358,19 +407,7 @@ def main():
         inserted_count = insert_resources_to_database(all_resources)
         
         # Print summary
-        elapsed_time = (datetime.utcnow() - start_time).total_seconds()
+        elapsed_time = (datetime.now(timezone.utc) - start_time).total_seconds()
         logger.info(f"Scraping completed. Total resources: {len(all_resources)}")
         logger.info(f"Successfully inserted: {inserted_count} resources")
-        logger.info(f"Total time taken: {elapsed_time:.2f} seconds")
-        
-        # Print collection-wise breakdown
-        for collection_type, resources in all_content.items():
-            logger.info(f"{collection_type.capitalize()}: {len(resources)} resources")
-    
-    except Exception as e:
-        logger.error(f"An error occurred during scraping: {e}")
-        import traceback
-        traceback.print_exc()
-
-if __name__ == "__main__":
-    main()
+        logger.info(f"Total time taken: {elapsed_time:.2f} seconds
