@@ -47,7 +47,7 @@ class ResearchNexusScraper:
             logger.error(f"Chrome initialization failed: {e}")
             raise
 
-    def fetch_content(self, limit: int = 1000, search_term: str = "aphrc") -> List[Dict]:
+    def fetch_content(self, limit: int = 1, search_term: str = "aphrc") -> List[Dict]:
         """
         Fetch publications data in format compatible with resources_resource table.
         """

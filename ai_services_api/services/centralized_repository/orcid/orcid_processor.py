@@ -105,7 +105,7 @@ class OrcidProcessor:
         logger.info(f"Processing publications for {len(experts)} experts")
         
         publication_count = 0
-        max_publications = 5
+        max_publications = 2
         
         async with aiohttp.ClientSession() as session:
             for expert in experts:
