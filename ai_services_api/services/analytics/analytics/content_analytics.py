@@ -83,14 +83,12 @@ def get_table_columns(conn, table_name: str) -> List[str]:
     finally:
         cursor.close()
 
-def get_content_metrics(conn, start_date, end_date):
+def get_content_metrics(conn):
     """
     Retrieve content metrics from the database.
     
     Args:
         conn: Database connection
-        start_date: Start date for filtering metrics
-        end_date: End date for filtering metrics
     
     Returns:
         dict: Dictionary of metrics from different database tables
@@ -134,27 +132,16 @@ def get_content_metrics(conn, start_date, end_date):
                 group_by_columns.append("COALESCE(source, 'unknown')")
             else:
                 select_columns.append("'unknown' as source")
-                
-            # Add updated_at filter if available
-            date_filter = ""
-            if 'updated_at' in resource_columns:
-                date_filter = "WHERE updated_at BETWEEN %s AND %s"
-            elif 'created_at' in resource_columns:
-                date_filter = "WHERE created_at BETWEEN %s AND %s"
             
             # Create full query
             query = f"""
                 SELECT {', '.join(select_columns)}
                 FROM resources_resource
-                {date_filter}
                 {f"GROUP BY {', '.join(group_by_columns)}" if group_by_columns else ""}
             """
             
-            # Execute query with or without date parameters
-            if date_filter:
-                cursor.execute(query, (start_date, end_date))
-            else:
-                cursor.execute(query)
+            # Execute query
+            cursor.execute(query)
                 
             columns = [desc[0] for desc in cursor.description]
             data = cursor.fetchall()
@@ -293,23 +280,14 @@ def get_content_metrics(conn, start_date, end_date):
             if 'draft' in message_columns:
                 select_columns.append("COUNT(CASE WHEN draft THEN 1 END) as draft_count")
             
-            # Add created_at filter if available
-            date_filter = ""
-            if 'created_at' in message_columns:
-                date_filter = "WHERE created_at BETWEEN %s AND %s"
-            
             # Create full query
             query = f"""
                 SELECT {', '.join(select_columns)}
                 FROM expert_messages
-                {date_filter}
             """
             
-            # Execute query with or without date parameters
-            if date_filter:
-                cursor.execute(query, (start_date, end_date))
-            else:
-                cursor.execute(query)
+            # Execute query
+            cursor.execute(query)
                 
             message_data = cursor.fetchone()
             
@@ -335,10 +313,9 @@ def get_content_metrics(conn, start_date, end_date):
                             EXTRACT(HOUR FROM created_at) as hour,
                             COUNT(*) as message_count
                         FROM expert_messages
-                        WHERE created_at BETWEEN %s AND %s
                         GROUP BY hour
                         ORDER BY hour
-                    """, (start_date, end_date))
+                    """)
                     
                     hour_data = cursor.fetchall()
                     if hour_data:
@@ -354,11 +331,10 @@ def get_content_metrics(conn, start_date, end_date):
                             COUNT(*) as sent_count,
                             COUNT(DISTINCT receiver_id) as unique_receivers
                         FROM expert_messages
-                        WHERE created_at BETWEEN %s AND %s
                         GROUP BY sender_id
                         ORDER BY sent_count DESC
                         LIMIT 10
-                    """, (start_date, end_date))
+                    """)
                     
                     sender_data = cursor.fetchall()
                     if sender_data:
