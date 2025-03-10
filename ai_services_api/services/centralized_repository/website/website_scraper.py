@@ -38,7 +38,6 @@ from urllib3.util.retry import Retry
 from ai_services_api.services.centralized_repository.ai_summarizer import TextSummarizer
 from ai_services_api.services.centralized_repository.database_manager import DatabaseManager
 from ai_services_api.services.centralized_repository.text_processor import safe_str
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -219,39 +218,27 @@ class BrowserPool:
 @dataclass
 class ScraperConfig:
     """Configuration for the WebsiteScraper."""
-    base_url: str = os.getenv('WEBSITE_BASE_URL', 'https://aphrc.org/publications/')
+    base_url: str = os.getenv('WEBSITE_BASE_URL', 'https://aphrc.org') # Updated base URL
     cache_dir: str = os.getenv('WEBSITE_CACHE_DIR', '/tmp/website_cache')
     cache_ttl: int = int(os.getenv('WEBSITE_CACHE_TTL', '86400'))  # 24 hours in seconds
     request_timeout: int = int(os.getenv('WEBSITE_REQUEST_TIMEOUT', '30'))
     browser_timeout: int = int(os.getenv('WEBSITE_BROWSER_TIMEOUT', '20'))
-    max_workers: int = int(os.getenv('WEBSITE_MAX_WORKERS', '3'))
-    max_browsers: int = int(os.getenv('WEBSITE_MAX_BROWSERS', '3'))
+    max_workers: int = int(os.getenv('WEBSITE_MAX_WORKERS', '5')) # Increased workers
+    max_browsers: int = int(os.getenv('WEBSITE_MAX_BROWSERS', '5')) # Increased browsers
     max_retries: int = int(os.getenv('WEBSITE_MAX_RETRIES', '3'))
     initial_rate_limit_delay: float = float(os.getenv('WEBSITE_INITIAL_RATE_LIMIT', '2.0'))
-    batch_size: int = int(os.getenv('WEBSITE_BATCH_SIZE', '50'))
+    batch_size: int = int(os.getenv('WEBSITE_BATCH_SIZE', '100')) # Increased batch size
     css_selectors: Dict[str, List[str]] = field(default_factory=lambda: {
-        'publication_cards': [
-            ".highlighted-publication", ".alm-item", ".publication-card", 
-            "div[class*='publication']", "article.post", ".resource-item"
-        ],
-        'title': [
-            "h3", "h2", ".title", ".entry-title", "h4.title", ".resource-title"
-        ],
-        'content': [
-            ".excerpt", ".description", ".content", "p", ".summary", 
-            ".resource-description", ".entry-summary"
-        ],
-        'url': [
-            "h3 a", "h2 a", ".title a", "a[href*='publication']", 
-            "a[href*='wp-content']", ".read-more a"
-        ],
-        'content_page': [
-            "div.entry-content", "article.content-area", "div.publication-content", 
-            ".post-content", "div.content-wrapper", "article .content"
+        'links': [ # Generic link selectors
+            'a[href]', 'a[class*="-link"]', 'a[class*="button"]', 'a[class*="nav"]'
+        ],  
+        'text': [ # Generic text selectors
+            'p', 'article', 'div[class*="content"]', 'div[class*="text"]',
+            'section', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', '.post-content'
         ],
         'load_more': [
-            ".alm-load-more-btn", ".load-more", "a.next", ".pagination a", 
-            "button[class*='load']", ".nav-links .next"
+            '.alm-load-more-btn', '.load-more', 'a.next', '.pagination a', 
+            'button[class*="load"]', '.nav-links .next'
         ]
     })
 
@@ -319,6 +306,7 @@ class WebsiteScraper:
             raise
             
         logger.info("WebsiteScraper initialized with configuration: %s", self.config.to_dict())
+
 
     def _setup_chrome_options(self) -> Options:
         """Set up Chrome options for headless browsing."""
