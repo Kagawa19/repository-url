@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+import os
+import psycopg2
+import psycopg2.extras
+import json
+import logging
+from dotenv import load_dotenv
+import google.generativeai as genai
+import concurrent.futures
+from tqdm import tqdm
+
+# Load environment variables
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Database connection parameters
+DB_PARAMS = {
+    "dbname": os.getenv("POSTGRES_DB", "aphrc"),
+    "user": os.getenv("POSTGRES_USER", "postgres"),
+    "password": os.getenv("POSTGRES_PASSWORD", "p0stgres"),
+    "host": os.getenv("POSTGRES_HOST", "localhost"),
+    "port": "5432"
+}
+
+# Configure Gemini API
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY must be set in .env file")
+
+genai.configure(api_key=GEMINI_API_KEY)
+
+def generate_summary(text, max_length=300):
+    """
+    Generate a summary using Gemini API
+    
+    Args:
+        text (str): Text to summarize
+        max_length (int): Maximum length of summary
+    
+    Returns:
+        str: Generated summary
+    """
+    try:
+        # Ensure text is not too long
+        text = text[:2000]  # Limit input to prevent overwhelming the API
+        
+        # Use Gemini Pro model
+        model = genai.GenerativeModel('gemini-pro')
+        
+        # Craft a prompt that encourages concise summarization
+        prompt = f"""Provide a concise, informative summary of the following text. 
+        The summary should be clear, capture the key points, and be no more than {max_length} words. 
+        If the text is very short or lacks substantial content, create a brief descriptive summary:
+
+        TEXT: {text}
+        
+        SUMMARY:"""
+        
+        # Generate summary
+        response = model.generate_content(prompt)
+        
+        # Extract and clean the summary
+        summary = response.text.strip()
+        
+        # Truncate to max length if necessary
+        return summary[:max_length]
+    
+    except Exception as e:
+        logger.error(f"Error generating summary: {e}")
+        return ""
+
+def fetch_resources_without_summary(batch_size=100):
+    """
+    Fetch resources that don't have a summary
+    
+    Args:
+        batch_size (int): Number of resources to fetch in one batch
+    
+    Returns:
+        list: List of resources without summaries
+    """
+    conn = psycopg2.connect(**DB_PARAMS)
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # Fetch resources without a summary
+            cur.execute("""
+                SELECT id, title, abstract, description, type
+                FROM resources_resource
+                WHERE summary IS NULL OR summary = ''
+                LIMIT %s
+            """, (batch_size,))
+            
+            return cur.fetchall()
+    except Exception as e:
+        logger.error(f"Error fetching resources: {e}")
+        return []
+    finally:
+        conn.close()
+
+def update_resource_summary(resource_id, summary):
+    """
+    Update a resource with its generated summary
+    
+    Args:
+        resource_id (int): ID of the resource
+        summary (str): Generated summary
+    """
+    conn = psycopg2.connect(**DB_PARAMS)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE resources_resource
+                SET summary = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (summary, resource_id))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error updating summary for resource {resource_id}: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+def process_resource(resource):
+    """
+    Process a single resource to generate and update its summary
+    
+    Args:
+        resource (dict): Resource dictionary
+    
+    Returns:
+        tuple: (resource_id, summary)
+    """
+    # Determine the best text source for summarization
+    text_source = None
+    if resource['abstract'] and len(resource['abstract']) > 50:
+        text_source = resource['abstract']
+    elif resource['description'] and len(resource['description']) > 50:
+        text_source = resource['description']
+    else:
+        text_source = f"{resource['title']} - {resource['type']} resource"
+    
+    # Generate summary
+    summary = generate_summary(text_source)
+    
+    # Update database
+    if summary:
+        update_resource_summary(resource['id'], summary)
+    
+    return (resource['id'], summary)
+
+def main():
+    """
+    Main function to generate summaries for resources without summaries
+    """
+    try:
+        while True:
+            # Fetch resources without summaries
+            resources = fetch_resources_without_summary()
+            
+            # Break if no more resources
+            if not resources:
+                logger.info("No more resources without summaries.")
+                break
+            
+            logger.info(f"Processing {len(resources)} resources")
+            
+            # Use concurrent processing to speed up summary generation
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                # Use tqdm for progress tracking
+                list(tqdm(
+                    executor.map(process_resource, resources), 
+                    total=len(resources), 
+                    desc="Generating Summaries"
+                ))
+            
+            # Short pause to prevent overwhelming the API
+            import time
+            time.sleep(1)
+    
+    except Exception as e:
+        logger.error(f"An error occurred: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    main()
