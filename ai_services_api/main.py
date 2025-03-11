@@ -1,5 +1,5 @@
 from ai_services_api.core.openapi import Contact
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -11,7 +11,20 @@ from ai_services_api.services.chatbot.utils.redis_connection import redis_pool
 from ai_services_api.controllers.publications_router import api_router as publications_router
 from ai_services_api.controllers.autocomplete_router import api_router as autocomplete_router
 
-
+# Define allowed GET routes
+ALLOWED_GET_ROUTES = [
+    "/",
+    "/chatbot",
+    "/recommendation", 
+    "/search",
+    "/content",
+    "/health",
+    "/chatbot/",
+    "/recommendation/",
+    "/search/",
+    "/publications/",
+    "/autocomplete/"
+]
 
 # Create the FastAPI app instance
 app = FastAPI(
@@ -24,11 +37,28 @@ app = FastAPI(
     )
 )
 
-# Define shutdown event
+# Middleware for GET request URL validation
+@app.middleware("http")
+async def validate_get_request(request: Request, call_next):
+    # Only apply to GET requests
+    if request.method == "GET":
+        # Get the full path
+        path = request.url.path
+        
+        # Check if the path starts with any of the allowed routes
+        if not any(path.startswith(allowed_route.rstrip('/')) for allowed_route in ALLOWED_GET_ROUTES):
+            # If not in allowed routes, raise a 403 Forbidden error
+            raise HTTPException(status_code=403, detail="Access to this URL is not permitted")
+    
+    # Continue with the request if it passes validation
+    response = await call_next(request)
+    return response
+
+# Shutdown event
 async def shutdown_event():
     """Cleanup Redis connections on shutdown."""
     await redis_pool.close()
-    
+
 # Add shutdown event handler
 app.add_event_handler("shutdown", shutdown_event)
 
@@ -49,8 +79,7 @@ app.include_router(message_router, prefix="/message")
 app.include_router(publications_router, prefix="/publications")
 app.include_router(autocomplete_router, prefix="/autocomplete")
 
-
-
+# Routes with HTML responses
 @app.get("/", response_class=HTMLResponse)
 async def read_index():
     with open("ai_services_api/templates/index.html") as f:
