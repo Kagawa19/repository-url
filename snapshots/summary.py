@@ -40,7 +40,8 @@ def list_available_models():
     List available Gemini models
     """
     try:
-        models = genai.list_models()
+        # Convert generator to list for easier manipulation
+        models = list(genai.list_models())
         logger.info("Available Gemini Models:")
         for m in models:
             logger.info(f"- {m.name}")
@@ -52,14 +53,16 @@ def list_available_models():
 def get_best_model():
     """
     Find the best available text generation model
+    Prioritize fastest models
     """
     models = list_available_models()
     
-    # Priority list of model names to try
+    # Priority list of model names to try (fastest first)
     model_priorities = [
-        'gemini-1.5-pro',
-        'gemini-pro',
-        'gemini-1.0-pro'
+        'gemini-1.5-flash-latest',  # Fastest model
+        'gemini-1.5-flash',
+        'gemini-1.5-pro-latest',
+        'gemini-1.5-pro'
     ]
     
     for priority_model in model_priorities:
@@ -69,8 +72,13 @@ def get_best_model():
                 return model.name
     
     # Fallback
-    logger.warning("No preferred model found. Using first available model.")
-    return models[0].name if models else None
+    if models:
+        fallback_model = models[0].name
+        logger.warning(f"No preferred model found. Using fallback model: {fallback_model}")
+        return fallback_model
+    
+    logger.error("No available models found!")
+    return None
 
 def generate_summary(text, model_name, max_length=300):
     """
