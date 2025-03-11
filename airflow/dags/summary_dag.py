@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
+from airflow.utils.dates import days_ago
 import os
 import logging
 import json
@@ -13,10 +14,20 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 import sys
 
+# Import email notification utilities
+try:
+    from airflow_utils import success_email, failure_email
+except ImportError:
+    # Fallback email notification functions if not imported
+    def success_email(context):
+        logging.info("Task succeeded. Success email would be sent.")
+    
+    def failure_email(context):
+        logging.error("Task failed. Failure email would be sent.")
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 # Load environment variables and make sure GEMINI_API_KEY is set
 def load_environment_variables():
     """Load environment variables from .env file and inject default API key if needed"""
@@ -50,20 +61,24 @@ default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
     'start_date': datetime(2023, 1, 1),
-    'email_on_failure': False,
+    'email': ['your-email@example.com'],  # Replace with your email
+    'email_on_failure': True,
     'email_on_retry': False,
+    'email_on_success': True,  # Add option to send success emails
     'retries': 2,
     'retry_delay': timedelta(minutes=2),
 }
 
-# Define the DAG
+# Define the DAG with updated configuration
 dag = DAG(
     'resource_summary_generator_dag',
     default_args=default_args,
     description='Generate summaries for resources using Gemini API',
     schedule_interval='@daily',  # Run once a day
     catchup=False,
+    max_active_runs=1  # Ensure only one run at a time
 )
+
 
 # Database connection utilities
 def get_db_connection_params():
@@ -494,6 +509,10 @@ generate_summaries_task = PythonOperator(
     task_id='generate_resource_summaries',
     python_callable=generate_resource_summaries,
     dag=dag,
+    on_success_callback=success_email,  # Add success email notification
+    on_failure_callback=failure_email,  # Add failure email notification
+    provide_context=True,  # Provide context for email callbacks
+    execution_timeout=timedelta(hours=2)  # Add a generous timeout
 )
 
 # Task dependencies can be added here if there are multiple tasks

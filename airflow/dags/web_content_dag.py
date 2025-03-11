@@ -5,6 +5,9 @@ from datetime import timedelta
 import logging
 import os
 
+# Import email notification functions
+from airflow_utils import setup_logging, load_environment_variables, success_email, failure_email
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -23,8 +26,10 @@ default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
     'start_date': days_ago(1),
-    'email_on_failure': False,
+    'email': ['briankimu97@gmail.com'],  # Your email address
+    'email_on_failure': True,
     'email_on_retry': False,
+    'email_on_success': True,  # Set to True to receive success emails
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
 }
@@ -105,10 +110,13 @@ dag = DAG(
     max_active_runs=1  # Ensure only one run at a time
 )
 
-# Define task
+# Define task with email notification
 process_web_content_operator = PythonOperator(
     task_id='process_web_content',
     python_callable=process_web_content_task,
+    on_success_callback=success_email,
+    on_failure_callback=failure_email,
+    provide_context=True,  # Important to provide context to callback functions
     dag=dag,
     # Set a generous timeout to allow for comprehensive processing
     execution_timeout=timedelta(hours=2)

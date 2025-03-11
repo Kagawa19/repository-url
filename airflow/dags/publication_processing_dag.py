@@ -6,6 +6,9 @@ import os
 import logging
 import json
 
+# Import email notification functions
+from airflow_utils import setup_logging, load_environment_variables, success_email, failure_email
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -22,19 +25,6 @@ from ai_services_api.services.centralized_repository.orcid.orcid_processor impor
 from ai_services_api.services.centralized_repository.knowhub.knowhub_scraper import KnowhubScraper
 from ai_services_api.services.centralized_repository.website.website_scraper import WebsiteScraper
 from ai_services_api.services.centralized_repository.nexus.researchnexus_scraper import ResearchNexusScraper
-
-def setup_logging():
-    """Configure logging settings."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    return logging.getLogger(__name__)
-
-def load_environment_variables():
-    """Load environment variables needed for processing."""
-    logger.info("Environment variables loaded successfully")
 
 def process_publications_task():
     """Process publications from all sources."""
@@ -125,8 +115,10 @@ default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
     'start_date': days_ago(1),
-    'email_on_failure': False,
+    'email': ['briankimu97@gmail.com'],  # Your email address
+    'email_on_failure': True,
     'email_on_retry': False,
+    'email_on_success': True,  # Set to True to receive success emails
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
 }
@@ -142,5 +134,8 @@ dag = DAG(
 process_publications_operator = PythonOperator(
     task_id='process_publications',
     python_callable=process_publications_task,
+    on_success_callback=success_email,
+    on_failure_callback=failure_email,
+    provide_context=True,  # Important to provide context to callback functions
     dag=dag
 )

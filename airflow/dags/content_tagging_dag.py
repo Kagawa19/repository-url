@@ -9,6 +9,9 @@ from urllib.parse import urlparse
 import psycopg2
 import json
 
+# Import utility functions and email notification functions
+from airflow_utils import setup_logging, load_environment_variables, success_email, failure_email
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -78,7 +81,6 @@ def get_db_cursor(autocommit=False):
 
 # Import necessary processors
 from ai_services_api.services.centralized_repository.ai_summarizer import TextSummarizer
-from airflow_utils import setup_logging, load_environment_variables
 
 # Simple database wrapper to match original API
 class DatabaseManager:
@@ -268,30 +270,20 @@ def _classify_publication(title, abstract, domains, field_structure):
     logger.info(f"No direct match. Using default classification: {default_classification}")
     return default_classification
 
-def setup_logging():
-    """Configure logging settings."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    return logging.getLogger(__name__)
-
-def load_environment_variables():
-    """Load environment variables needed for processing."""
-    # You can add specific environment variable loading logic here if needed
-    logger.info("Environment variables loaded successfully")
-
+# DAG default arguments
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
     'start_date': days_ago(1),
-    'email_on_failure': False,
+    'email': ['briankimu97@gmail.com'],  # Your email address
+    'email_on_failure': True,
     'email_on_retry': False,
+    'email_on_success': True,  # Set to True to receive success emails
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
 }
 
+# Define the DAG
 dag = DAG(
     'corpus_classification_dag',
     default_args=default_args,
@@ -300,8 +292,12 @@ dag = DAG(
     catchup=False
 )
 
-classify_publications_task = PythonOperator(
+# Define the classification task with email notification
+classify_publications_task_operator = PythonOperator(
     task_id='classify_publications',
     python_callable=classify_publications_task,
+    on_success_callback=success_email,
+    on_failure_callback=failure_email,
+    provide_context=True,  # Important to provide context to callback functions
     dag=dag
 )
