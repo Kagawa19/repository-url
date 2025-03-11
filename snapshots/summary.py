@@ -35,12 +35,50 @@ if not GEMINI_API_KEY:
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-def generate_summary(text, max_length=300):
+def list_available_models():
+    """
+    List available Gemini models
+    """
+    try:
+        models = genai.list_models()
+        logger.info("Available Gemini Models:")
+        for m in models:
+            logger.info(f"- {m.name}")
+        return models
+    except Exception as e:
+        logger.error(f"Error listing models: {e}")
+        return []
+
+def get_best_model():
+    """
+    Find the best available text generation model
+    """
+    models = list_available_models()
+    
+    # Priority list of model names to try
+    model_priorities = [
+        'gemini-1.5-pro',
+        'gemini-pro',
+        'gemini-1.0-pro'
+    ]
+    
+    for priority_model in model_priorities:
+        for model in models:
+            if priority_model in model.name:
+                logger.info(f"Selected model: {model.name}")
+                return model.name
+    
+    # Fallback
+    logger.warning("No preferred model found. Using first available model.")
+    return models[0].name if models else None
+
+def generate_summary(text, model_name, max_length=300):
     """
     Generate a summary using Gemini API
     
     Args:
         text (str): Text to summarize
+        model_name (str): Name of the Gemini model to use
         max_length (int): Maximum length of summary
     
     Returns:
@@ -50,8 +88,8 @@ def generate_summary(text, max_length=300):
         # Ensure text is not too long
         text = text[:2000]  # Limit input to prevent overwhelming the API
         
-        # Use Gemini Pro model
-        model = genai.GenerativeModel('gemini-pro')
+        # Use selected Gemini model
+        model = genai.GenerativeModel(model_name)
         
         # Craft a prompt that encourages concise summarization
         prompt = f"""Provide a concise, informative summary of the following text. 
@@ -72,7 +110,7 @@ def generate_summary(text, max_length=300):
         return summary[:max_length]
     
     except Exception as e:
-        logger.error(f"Error generating summary: {e}")
+        logger.error(f"Error generating summary with {model_name}: {e}")
         return ""
 
 def fetch_resources_without_summary(batch_size=100):
@@ -126,12 +164,13 @@ def update_resource_summary(resource_id, summary):
     finally:
         conn.close()
 
-def process_resource(resource):
+def process_resource(resource, model_name):
     """
     Process a single resource to generate and update its summary
     
     Args:
         resource (dict): Resource dictionary
+        model_name (str): Name of the Gemini model to use
     
     Returns:
         tuple: (resource_id, summary)
@@ -146,7 +185,7 @@ def process_resource(resource):
         text_source = f"{resource['title']} - {resource['type']} resource"
     
     # Generate summary
-    summary = generate_summary(text_source)
+    summary = generate_summary(text_source, model_name)
     
     # Update database
     if summary:
@@ -159,6 +198,12 @@ def main():
     Main function to generate summaries for resources without summaries
     """
     try:
+        # Get the best available model
+        model_name = get_best_model()
+        if not model_name:
+            logger.error("No suitable Gemini model found. Exiting.")
+            return
+        
         while True:
             # Fetch resources without summaries
             resources = fetch_resources_without_summary()
@@ -174,7 +219,7 @@ def main():
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                 # Use tqdm for progress tracking
                 list(tqdm(
-                    executor.map(process_resource, resources), 
+                    executor.map(lambda r: process_resource(r, model_name), resources), 
                     total=len(resources), 
                     desc="Generating Summaries"
                 ))
