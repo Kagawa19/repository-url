@@ -542,10 +542,16 @@ class WebsiteScraper:
         seen = set()
         return [k for k in keywords if not (k in seen or seen.add(k))]
 
-    def fetch_content(self, limit: int = 10) -> List[Dict]:
-        """Fetch publications from APHRC website with improved caching and parallelism."""
+    def fetch_content(self, search_term: Optional[str] = None, max_pages: Optional[int] = None) -> List[Dict]:
+        """
+        Fetch publications from website with improved caching and parallelism.
+        
+        Args:
+            search_term (str, optional): Search term to filter publications
+            max_pages (int, optional): Maximum number of pages to scrape (None for unlimited)
+        """
         # Check cache first for the full result set
-        cache_key = f"website_content_{limit}_{datetime.utcnow().strftime('%Y%m%d')}"
+        cache_key = f"website_content_{search_term or 'all'}_{datetime.utcnow().strftime('%Y%m%d')}"
         cached_content = self.cache.get(cache_key)
         if cached_content:
             logger.info(f"Retrieved {len(cached_content)} publications from cache")
@@ -573,7 +579,7 @@ class WebsiteScraper:
 
             # Process publication cards
             page_num = 1
-            while len(publications) < limit:
+            while max_pages is None or page_num <= max_pages:
                 try:
                     logger.info(f"Processing page {page_num}")
                     
@@ -592,10 +598,7 @@ class WebsiteScraper:
                     
                     # Process cards in parallel
                     futures = []
-                    for i, card in enumerate(publication_cards):
-                        if len(futures) + len(publications) >= limit:
-                            break
-                            
+                    for card in publication_cards:
                         # Submit the task to thread pool
                         future = self.executor.submit(self._process_publication_card, card, visited)
                         futures.append(future)
@@ -609,10 +612,6 @@ class WebsiteScraper:
                         except Exception as e:
                             logger.error(f"Error processing publication card: {e}")
                     
-                    # Break if we have enough publications
-                    if len(publications) >= limit:
-                        break
-                        
                     # Try to load more
                     if not self._click_load_more():
                         logger.info("No more publications to load")
