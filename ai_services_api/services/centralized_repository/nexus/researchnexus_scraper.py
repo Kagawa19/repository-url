@@ -53,7 +53,7 @@ class ResearchNexusScraper:
         
         Args:
             search_term (str): Keyword to search for
-            max_pages (int, optional): Maximum number of result pages to scrape (None for unlimited)
+            max_pages (int, optional): Maximum number of pages to scrape
         """
         publications = []
         try:
@@ -250,93 +250,6 @@ class ResearchNexusScraper:
                 logger.error(f"Error cleaning up download directory: {e}")
                 
         return publications
-
-            def get_doi_from_paper_page(paper_url):
-                """Helper function to extract DOI from individual paper pages"""
-                try:
-                    self.driver.get(paper_url)
-                    # Wait for DOI element and extract it
-                    doi_element = WebDriverWait(self.driver, 10).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, "[data-doi]"))
-                    )
-                    return doi_element.get_attribute("data-doi")
-                except Exception as e:
-                    logger.error(f"Error getting DOI from {paper_url}: {e}")
-                    return None
-            
-            for _, row in df.iterrows():
-                if len(publications) >= limit:
-                    break
-                    
-                try:
-                    title = safe_str(row['Title'])
-                    
-                    # Fixed ID processing
-                    paper_id = str(int(row['ID'])) if pd.notna(row.get('ID')) else None
-                    
-                    # Construct and visit paper URL to get DOI
-                    if paper_id:
-                        paper_url = f"https://research-nexus.net/paper/{paper_id}/"
-                        doi = get_doi_from_paper_page(paper_url)
-                    else:
-                        doi = None
-                        logger.warning(f"No paper ID found for: {title}")
-                    
-                    authors = []
-                    if pd.notna(row.get('Authors')):
-                        author_count = row['Authors']
-                        if isinstance(author_count, (int, float)):
-                            authors = [f"Author {i+1}" for i in range(int(author_count))]
-                    
-                    domains = []
-                    if pd.notna(row.get('Countries')):
-                        locations = str(row['Countries'])
-                        domains = [loc.strip() for loc in locations.split(',') if loc.strip()]
-                    
-                    abstract = safe_str(row.get('Excerpt', f"Research about {title}"))
-                    
-                    try:
-                        summary = self.summarizer.summarize(title, abstract)
-                    except Exception as e:
-                        logger.error(f"Summary generation failed: {e}")
-                        summary = abstract[:500] if abstract else f"Research about {title}"
-                    
-                    publication = {
-                        'title': title,
-                        'doi': doi,
-                        'summary': summary,
-                        'source': 'researchnexus',
-                        'type': 'publication',
-                        'authors': authors,
-                        'domains': domains,
-                        'citations': int(row.get('Citations', 0)),
-                        'scrape_date': datetime.now().isoformat()
-                    }
-                    
-                    publications.append(publication)
-                    logger.info(f"Processed publication: {title}")
-                    
-                except Exception as e:
-                    logger.error(f"Error processing publication row: {e}")
-                    continue
-                    
-            # Cleanup
-            try:
-                os.remove(csv_path)
-                os.rmdir(download_dir)
-            except Exception as e:
-                logger.error(f"Error cleaning up files: {e}")
-                
-        except Exception as e:
-            logger.error(f"Error in fetch_content: {e}")
-            raise
-            
-        finally:
-            if len(publications) == 0:
-                logger.warning("No publications were fetched")
-                
-        return publications
-
     def _generate_doi(self, title: str) -> str:
         """Generate a consistent DOI from title."""
         hash_object = hashlib.sha256(title.encode())
