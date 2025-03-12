@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import csv
+import ast
 import psycopg2
 import psycopg2.extras
 import json
@@ -43,6 +44,8 @@ class ResourceImporter:
         """Establish a database connection"""
         try:
             self.connection = psycopg2.connect(**DB_PARAMS)
+            # Ensure each transaction is independent
+            self.connection.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
             self.cursor = self.connection.cursor()
         except psycopg2.Error as e:
             logger.error(f"Error connecting to the database: {e}")
@@ -55,6 +58,30 @@ class ResourceImporter:
                 self.cursor.close()
             self.connection.close()
             logger.info("Database connection closed.")
+
+    def safe_parse(self, value):
+        """
+        Safely parse different string representations
+        
+        Args:
+            value (str): Value to parse
+        
+        Returns:
+            Parsed value
+        """
+        if not value or value.strip() in ['', '[]', '{}']:
+            return None
+        
+        try:
+            # Try JSON parsing first
+            return json.loads(value.replace("'", '"'))
+        except (json.JSONDecodeError, TypeError):
+            try:
+                # Try literal evaluation (for dict-like strings)
+                return ast.literal_eval(value)
+            except (ValueError, SyntaxError):
+                # If all parsing fails, return the original value
+                return value
 
     def check_resource_exists(self, doi=None, title=None):
         """
@@ -90,27 +117,6 @@ class ResourceImporter:
             logger.error(f"Error checking resource existence: {e}")
             return False
 
-    def parse_json_field(self, field):
-        """
-        Parse JSON-like field safely
-        
-        Args:
-            field (str): Field to parse
-        
-        Returns:
-            Parsed JSON or None
-        """
-        if not field or field.strip() in ['', '[]', '{}']:
-            return None
-        
-        try:
-            # Handle potential single quotes
-            field = field.replace("'", '"')
-            return json.loads(field)
-        except json.JSONDecodeError:
-            logger.warning(f"Could not parse JSON field: {field}")
-            return None
-
     def import_resources(self):
         """
         Import resources from CSV to database
@@ -141,30 +147,32 @@ class ResourceImporter:
                             self.duplicate_resources += 1
                             continue
                         
-                        # Prepare insert values
+                        # Prepare insert values with robust parsing
                         insert_values = (
                             resource.get('id'),  # id
                             resource.get('doi'),  # doi
                             resource.get('title'),  # title
                             resource.get('abstract'),  # abstract
                             resource.get('summary'),  # summary
-                            self.parse_json_field(resource.get('domains', '[]')),  # domains
-                            self.parse_json_field(resource.get('topics', '{}')),  # topics
+                            self.safe_parse(resource.get('domains', '[]')),  # domains
+                            self.safe_parse(resource.get('topics', '{}')),  # topics
                             resource.get('description'),  # description
                             resource.get('expert_id'),  # expert_id
                             resource.get('type'),  # type
-                            self.parse_json_field(resource.get('subtitles', '{}')),  # subtitles
-                            self.parse_json_field(resource.get('publishers', '{}')),  # publishers
+                            self.safe_parse(resource.get('subtitles', '{}')),  # subtitles
+                            self.safe_parse(resource.get('publishers', '{}')),  # publishers
                             resource.get('collection'),  # collection
                             resource.get('date_issue'),  # date_issue
                             resource.get('citation'),  # citation
                             resource.get('language'),  # language
-                            self.parse_json_field(resource.get('identifiers', '{}')),  # identifiers
+                            self.safe_parse(resource.get('identifiers', '{}')),  # identifiers
                             resource.get('created_at'),  # created_at
                             resource.get('updated_at'),  # updated_at
                             resource.get('source'),  # source
-                            self.parse_json_field(resource.get('authors', '[]')),  # authors
-                            resource.get('publication_year')  # publication_year
+                            self.safe_parse(resource.get('authors', '[]')),  # authors
+                            resource.get('publication_year'),  # publication_year
+                            resource.get('field'),  # field
+                            resource.get('subfield')  # subfield
                         )
                         
                         # Execute insert
@@ -173,9 +181,10 @@ class ResourceImporter:
                                 id, doi, title, abstract, summary, domains, topics, 
                                 description, expert_id, type, subtitles, publishers, 
                                 collection, date_issue, citation, language, identifiers, 
-                                created_at, updated_at, source, authors, publication_year
+                                created_at, updated_at, source, authors, publication_year, 
+                                field, subfield
                             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-                                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             ON CONFLICT (id) DO NOTHING
                         """, insert_values)
                         
@@ -189,15 +198,9 @@ class ResourceImporter:
                         logger.error(f"Error processing resource: {row_error}")
                         logger.error(f"Problematic resource: {resource}")
                         self.skipped_resources += 1
-                
-                # Commit the transaction
-                self.connection.commit()
         
         except Exception as e:
             logger.error(f"Error importing resources: {e}")
-            # Rollback in case of error
-            if self.connection:
-                self.connection.rollback()
         
         finally:
             # Close database connection
