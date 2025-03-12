@@ -6,6 +6,7 @@ import json
 import psycopg2
 import psycopg2.extras
 import logging
+import time
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -38,6 +39,10 @@ class ResourceImporter:
         self.inserted_resources = 0
         self.skipped_resources = 0
         self.duplicate_resources = 0
+        self.id_conflicts_resolved = 0
+        
+        # ID generation counter
+        self.next_id = None
 
     def connect_to_database(self):
         """Establish a database connection"""
@@ -60,6 +65,55 @@ class ResourceImporter:
                 self.cursor.close()
             self.connection.close()
             logger.info("Database connection closed.")
+
+    def get_next_available_id(self):
+        """Get the next available ID from the database"""
+        if self.next_id is not None:
+            return self.next_id
+            
+        try:
+            # Query the max ID from the database
+            self.cursor.execute("SELECT MAX(id) FROM resources_resource")
+            result = self.cursor.fetchone()
+            
+            # Start with max_id + 1, or 1 if no records
+            max_id = result[0] if result and result[0] else 0
+            self.next_id = max_id + 1
+            logger.info(f"Next available ID starts at: {self.next_id}")
+            return self.next_id
+        except psycopg2.Error as e:
+            logger.error(f"Error getting next available ID: {e}")
+            # Default to a high number to avoid conflicts
+            self.next_id = int(time.time())
+            return self.next_id
+
+    def generate_new_id(self):
+        """Generate a new unique ID"""
+        new_id = self.get_next_available_id()
+        self.next_id += 1
+        return new_id
+
+    def check_id_exists(self, id_value):
+        """Check if an ID already exists in the database"""
+        try:
+            if not id_value:
+                return False
+                
+            # Convert to integer if it's a string
+            if isinstance(id_value, str):
+                try:
+                    id_value = int(id_value)
+                except ValueError:
+                    return False
+                    
+            self.cursor.execute(
+                "SELECT EXISTS(SELECT 1 FROM resources_resource WHERE id = %s)",
+                (id_value,)
+            )
+            return self.cursor.fetchone()[0]
+        except psycopg2.Error as e:
+            logger.error(f"Error checking ID existence: {e}")
+            return True  # Assume it exists on error to be safe
 
     def parse_integer(self, value):
         """Parse a string to integer, returning None for empty/invalid values"""
@@ -180,32 +234,29 @@ class ResourceImporter:
                 # Process each resource
                 for resource in resources:
                     try:
-                        resource_id = resource.get('id')
+                        original_id = resource.get('id')
                         
-                        # Debug problematic resource
-                        if resource_id == '2134532010':
-                            logger.info(f"Processing problematic resource with ID: {resource_id}")
-                            logger.info(f"Raw domains value: '{resource.get('domains')}'")
-                            logger.info(f"Raw expert_id value: '{resource.get('expert_id')}'")
-                        
-                        # Check if resource already exists
+                        # Check if resource already exists by DOI or title
                         if self.check_resource_exists(
                             doi=resource.get('doi'), 
                             title=resource.get('title')
                         ):
                             self.duplicate_resources += 1
+                            logger.info(f"Skipping duplicate resource: {resource.get('title')}")
                             continue
+                        
+                        # Check if ID conflicts, and generate a new one if needed
+                        resource_id = self.parse_integer(original_id)
+                        if resource_id is None or self.check_id_exists(resource_id):
+                            resource_id = self.generate_new_id()
+                            self.id_conflicts_resolved += 1
+                            logger.info(f"Generated new ID {resource_id} for resource (original ID: {original_id})")
                         
                         # Parse integer fields
                         expert_id = self.parse_integer(resource.get('expert_id'))
                         
                         # Parse domains specially as PostgreSQL array
                         domains_value = self.parse_postgres_array(resource.get('domains'))
-                        
-                        # For the problematic resource, log what we're doing with domains
-                        if resource_id == '2134532010':
-                            logger.info(f"Parsed domains value: {domains_value}")
-                            logger.info(f"Parsed expert_id value: {expert_id}")
                         
                         # Parse other JSON fields
                         topics = self.parse_jsonb(resource.get('topics'))
@@ -217,8 +268,7 @@ class ResourceImporter:
                         # Parse summary with special handling
                         summary = self.parse_summary(resource.get('summary'))
                         
-                        # Insert into database
-                        # Note that domains is passed directly since parse_postgres_array returns the correct PostgreSQL format
+                        # Insert into database with a new ID if needed
                         self.cursor.execute("""
                             INSERT INTO resources_resource (
                                 id, doi, title, abstract, summary, domains, topics, 
@@ -229,15 +279,15 @@ class ResourceImporter:
                             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
                                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """, (
-                            resource_id, 
+                            resource_id,  # Use the new ID if generated
                             resource.get('doi'),
                             resource.get('title'),
                             resource.get('abstract'),
                             summary,
-                            domains_value,  # Use the PostgreSQL array format
+                            domains_value,  
                             psycopg2.extras.Json(topics),
                             resource.get('description'),
-                            expert_id,  # Use parsed integer value
+                            expert_id,  
                             resource.get('type'),
                             psycopg2.extras.Json(subtitles),
                             psycopg2.extras.Json(publishers),
@@ -278,6 +328,7 @@ class ResourceImporter:
             logger.info(f"Total Resources: {self.total_resources}")
             logger.info(f"Inserted Resources: {self.inserted_resources}")
             logger.info(f"Duplicate Resources: {self.duplicate_resources}")
+            logger.info(f"ID Conflicts Resolved: {self.id_conflicts_resolved}")
             logger.info(f"Skipped Resources: {self.skipped_resources}")
 
     def check_resource_exists(self, doi=None, title=None):
