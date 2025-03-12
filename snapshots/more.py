@@ -2,12 +2,12 @@
 import os
 import csv
 import ast
+import json
 import psycopg2
 import psycopg2.extras
-import json
 import logging
 from dotenv import load_dotenv
-from datetime import datetime
+from typing import Any, Dict
 
 # Load environment variables
 load_dotenv()
@@ -59,35 +59,42 @@ class ResourceImporter:
             self.connection.close()
             logger.info("Database connection closed.")
 
-    def safe_parse(self, value):
+    def safe_parse(self, value: Any) -> Any:
         """
         Safely parse different string representations
         
         Args:
-            value (str or dict): Value to parse
+            value (Any): Value to parse
         
         Returns:
-            Parsed value or None
+            Parsed value
         """
-        # If already a dict or list, return as-is
-        if isinstance(value, (dict, list)):
+        # If already a list or dict, return as-is
+        if isinstance(value, (list, dict)):
             return value
         
         # Handle empty or whitespace values
-        if not value or value.strip() in ['', '[]', '{}', 'None']:
+        if not value or value in ['', '[]', '{}', 'None', 'none']:
             return None
         
+        # Handle tuple-like summaries
+        if isinstance(value, str) and value.startswith('(') and value.endswith(')'):
+            value = value.strip('()')
+        
+        # Try parsing as a literal (handles dict-like strings)
         try:
-            # Try JSON parsing first (handles single quotes)
-            parsed = json.loads(value.replace("'", '"'))
+            # Replace single quotes with double quotes for JSON compatibility
+            cleaned_value = value.replace("'", '"')
+            # Try JSON parsing first
+            parsed = json.loads(cleaned_value)
             return parsed
         except (json.JSONDecodeError, TypeError):
             try:
-                # Try literal evaluation (for dict-like strings)
+                # Fallback to ast literal evaluation
                 parsed = ast.literal_eval(value)
                 return parsed
             except (ValueError, SyntaxError):
-                # If all parsing fails, return the original value or None
+                # If all parsing fails, return original value or None
                 return value if value.strip() else None
 
     def check_resource_exists(self, doi=None, title=None):
@@ -154,13 +161,20 @@ class ResourceImporter:
                             self.duplicate_resources += 1
                             continue
                         
+                        # Clean summary
+                        summary = resource.get('summary', '')
+                        if isinstance(summary, tuple):
+                            summary = str(summary)
+                        if summary and summary.startswith('(') and summary.endswith(')'):
+                            summary = summary.strip('()')
+                        
                         # Prepare insert values with robust parsing
                         insert_values = (
                             resource.get('id'),  # id
                             resource.get('doi'),  # doi
                             resource.get('title'),  # title
                             resource.get('abstract'),  # abstract
-                            str(resource.get('summary', '')).replace("('", '').replace("',)", ''),  # summary
+                            summary,  # summary
                             self.safe_parse(resource.get('domains', '[]')) or [],  # domains
                             self.safe_parse(resource.get('topics', '{}')) or {},  # topics
                             resource.get('description'),  # description
