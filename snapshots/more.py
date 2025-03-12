@@ -64,24 +64,31 @@ class ResourceImporter:
         Safely parse different string representations
         
         Args:
-            value (str): Value to parse
+            value (str or dict): Value to parse
         
         Returns:
-            Parsed value
+            Parsed value or None
         """
-        if not value or value.strip() in ['', '[]', '{}']:
+        # If already a dict or list, return as-is
+        if isinstance(value, (dict, list)):
+            return value
+        
+        # Handle empty or whitespace values
+        if not value or value.strip() in ['', '[]', '{}', 'None']:
             return None
         
         try:
-            # Try JSON parsing first
-            return json.loads(value.replace("'", '"'))
+            # Try JSON parsing first (handles single quotes)
+            parsed = json.loads(value.replace("'", '"'))
+            return parsed
         except (json.JSONDecodeError, TypeError):
             try:
                 # Try literal evaluation (for dict-like strings)
-                return ast.literal_eval(value)
+                parsed = ast.literal_eval(value)
+                return parsed
             except (ValueError, SyntaxError):
-                # If all parsing fails, return the original value
-                return value
+                # If all parsing fails, return the original value or None
+                return value if value.strip() else None
 
     def check_resource_exists(self, doi=None, title=None):
         """
@@ -153,23 +160,23 @@ class ResourceImporter:
                             resource.get('doi'),  # doi
                             resource.get('title'),  # title
                             resource.get('abstract'),  # abstract
-                            resource.get('summary'),  # summary
-                            self.safe_parse(resource.get('domains', '[]')),  # domains
-                            self.safe_parse(resource.get('topics', '{}')),  # topics
+                            str(resource.get('summary', '')).replace("('", '').replace("',)", ''),  # summary
+                            self.safe_parse(resource.get('domains', '[]')) or [],  # domains
+                            self.safe_parse(resource.get('topics', '{}')) or {},  # topics
                             resource.get('description'),  # description
                             resource.get('expert_id'),  # expert_id
                             resource.get('type'),  # type
-                            self.safe_parse(resource.get('subtitles', '{}')),  # subtitles
-                            self.safe_parse(resource.get('publishers', '{}')),  # publishers
+                            self.safe_parse(resource.get('subtitles', '{}')) or {},  # subtitles
+                            self.safe_parse(resource.get('publishers', '{}')) or {},  # publishers
                             resource.get('collection'),  # collection
                             resource.get('date_issue'),  # date_issue
                             resource.get('citation'),  # citation
                             resource.get('language'),  # language
-                            self.safe_parse(resource.get('identifiers', '{}')),  # identifiers
+                            self.safe_parse(resource.get('identifiers', '{}')) or {},  # identifiers
                             resource.get('created_at'),  # created_at
                             resource.get('updated_at'),  # updated_at
                             resource.get('source'),  # source
-                            self.safe_parse(resource.get('authors', '[]')),  # authors
+                            self.safe_parse(resource.get('authors', '[]')) or [],  # authors
                             resource.get('publication_year'),  # publication_year
                             resource.get('field'),  # field
                             resource.get('subfield')  # subfield
