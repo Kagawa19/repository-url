@@ -68,31 +68,52 @@ class ResourceImporter:
         Returns:
             Parsed value
         """
-        # Handle empty or whitespace values
-        if not value or value in ['', '[]', '{}', 'None', 'none', '{}']:
+        # Handle empty, None, or whitespace values
+        if not value or not isinstance(value, str) or value.strip() in ['', '[]', '{}', 'None', 'none', '{}']:
             return None
         
         # Handle summary tuple-like strings
-        if isinstance(value, str) and value.startswith('(') and value.endswith(')'):
-            return None
-        
-        # Try parsing as a literal (handles dict-like strings)
-        try:
-            # Replace single quotes with double quotes for JSON compatibility
-            # But preserve apostrophes in actual text
-            cleaned_value = value.replace("'", '"')
-            
-            # First try JSON parsing
-            parsed = json.loads(cleaned_value)
-            return parsed
-        except (json.JSONDecodeError, TypeError):
+        if value.startswith('(') and value.endswith(')'):
+            # Extract content from tuple-like string if possible
             try:
-                # Fallback to ast literal evaluation
-                parsed = ast.literal_eval(value)
-                return parsed
+                # Try to parse as a literal tuple
+                parsed_tuple = ast.literal_eval(value)
+                if isinstance(parsed_tuple, tuple) and len(parsed_tuple) > 0:
+                    return parsed_tuple[0]
+                return None
             except (ValueError, SyntaxError):
-                # If all parsing fails, return original value or None
-                return value if value.strip() else None
+                # If parsing fails, clean up the string manually
+                inner_content = value[1:-1].strip()
+                if inner_content.startswith('"') and inner_content.endswith('"'):
+                    return inner_content[1:-1]
+                elif inner_content.startswith("'") and inner_content.endswith("'"):
+                    return inner_content[1:-1]
+                return None
+        
+        # Explicit handling for empty arrays and objects
+        if value == '[]':
+            return []
+        if value == '{}':
+            return {}
+            
+        # Try JSON parsing first
+        try:
+            # Normalize quotes for JSON compatibility but only for dict/list-like strings
+            if (value.startswith('{') and value.endswith('}')) or (value.startswith('[') and value.endswith(']')):
+                # Replace single quotes with double quotes for JSON compatibility
+                cleaned_value = value.replace("'", '"')
+                parsed = json.loads(cleaned_value)
+                return parsed
+        except json.JSONDecodeError:
+            pass
+            
+        # Try ast parsing as a fallback
+        try:
+            parsed = ast.literal_eval(value)
+            return parsed
+        except (ValueError, SyntaxError):
+            # Return the original string if all parsing fails
+            return value
 
     def check_resource_exists(self, doi=None, title=None):
         """
@@ -158,29 +179,53 @@ class ResourceImporter:
                             self.duplicate_resources += 1
                             continue
                         
-                        # Prepare insert values with robust parsing
+                        # Prepare fields with default values if missing
+                        domains = self.safe_parse(resource.get('domains'))
+                        domains = [] if domains is None else domains
+                        
+                        topics = self.safe_parse(resource.get('topics'))
+                        topics = {} if topics is None else topics
+                        
+                        subtitles = self.safe_parse(resource.get('subtitles'))
+                        subtitles = {} if subtitles is None else subtitles
+                        
+                        publishers = self.safe_parse(resource.get('publishers'))
+                        publishers = {} if publishers is None else publishers
+                        
+                        identifiers = self.safe_parse(resource.get('identifiers'))
+                        identifiers = {} if identifiers is None else identifiers
+                        
+                        authors = self.safe_parse(resource.get('authors'))
+                        authors = [] if authors is None else authors
+                        
+                        # Handle summary with special care
+                        summary = resource.get('summary', '')
+                        if summary and summary.startswith('(') and summary.endswith(')'):
+                            summary = summary.replace("('", '').replace("',)", '')
+                        
+                        # Prepare insert values
                         insert_values = (
                             resource.get('id'),  # id
                             resource.get('doi'),  # doi
                             resource.get('title'),  # title
                             resource.get('abstract', ''),  # abstract
-                            resource.get('summary', '').replace("('", '').replace("',)", ''),  # summary
-                            json.dumps(self.safe_parse(resource.get('domains', '[]')) or []),  # domains
-                            json.dumps(self.safe_parse(resource.get('topics', '{}')) or {}),  # topics
+                            summary,  # summary
+                            json.dumps(domains),  # domains
+                            json.dumps(topics),  # topics
                             resource.get('description', ''),  # description
                             resource.get('expert_id'),  # expert_id
                             resource.get('type'),  # type
-                            json.dumps(self.safe_parse(resource.get('subtitles', '{}')) or {}),  # subtitles
-                            json.dumps(self.safe_parse(resource.get('publishers', '{}')) or {}),  # publishers
+                            json.dumps(subtitles),  # subtitles
+                            json.dumps(publishers),  # publishers
                             resource.get('collection', ''),  # collection
                             resource.get('date_issue', ''),  # date_issue
                             resource.get('citation', ''),  # citation
                             resource.get('language', ''),  # language
-                            json.dumps(self.safe_parse(resource.get('identifiers', '{}')) or {}),  # identifiers
+                            json.dumps(identifiers),  # identifiers
                             resource.get('created_at'),  # created_at
                             resource.get('updated_at'),  # updated_at
                             resource.get('source', ''),  # source
-                            json.dumps(self.safe_parse(resource.get('authors', '[]')) or []),  # authors
+                            json.dumps(authors),  # authors
                             resource.get('publication_year', ''),  # publication_year
                             resource.get('field', ''),  # field
                             resource.get('subfield', '')  # subfield
