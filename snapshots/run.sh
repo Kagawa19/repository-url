@@ -1,0 +1,1 @@
+docker-compose exec api python /app/ai_services_api/services/search/indexing/index_creator.py
