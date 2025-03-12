@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 import os
 import csv
-import ast
 import json
 import psycopg2
 import psycopg2.extras
 import logging
 from dotenv import load_dotenv
-from typing import Any, Dict
 
 # Load environment variables
 load_dotenv()
@@ -59,43 +57,31 @@ class ResourceImporter:
             self.connection.close()
             logger.info("Database connection closed.")
 
-    def safe_parse(self, value: Any) -> Any:
+    def safe_parse(self, value):
         """
         Safely parse different string representations
         
         Args:
-            value (Any): Value to parse
+            value (str): Value to parse
         
         Returns:
-            Parsed value
+            Parsed value or None
         """
-        # If already a list or dict, return as-is
-        if isinstance(value, (list, dict)):
-            return value
-        
         # Handle empty or whitespace values
-        if not value or value in ['', '[]', '{}', 'None', 'none']:
+        if not value or value in ['', '[]', '{}', 'None', 'none', '""']:
             return None
         
-        # Handle tuple-like summaries
-        if isinstance(value, str) and value.startswith('(') and value.endswith(')'):
-            value = value.strip('()')
-        
-        # Try parsing as a literal (handles dict-like strings)
+        # If it looks like a list or dict string, try to parse
         try:
             # Replace single quotes with double quotes for JSON compatibility
             cleaned_value = value.replace("'", '"')
-            # Try JSON parsing first
+            
+            # Try JSON parsing
             parsed = json.loads(cleaned_value)
             return parsed
         except (json.JSONDecodeError, TypeError):
-            try:
-                # Fallback to ast literal evaluation
-                parsed = ast.literal_eval(value)
-                return parsed
-            except (ValueError, SyntaxError):
-                # If all parsing fails, return original value or None
-                return value if value.strip() else None
+            # If parsing fails, return the original value or None
+            return value if value.strip() else None
 
     def check_resource_exists(self, doi=None, title=None):
         """
@@ -161,39 +147,32 @@ class ResourceImporter:
                             self.duplicate_resources += 1
                             continue
                         
-                        # Clean summary
-                        summary = resource.get('summary', '')
-                        if isinstance(summary, tuple):
-                            summary = str(summary)
-                        if summary and summary.startswith('(') and summary.endswith(')'):
-                            summary = summary.strip('()')
-                        
                         # Prepare insert values with robust parsing
                         insert_values = (
                             resource.get('id'),  # id
                             resource.get('doi'),  # doi
                             resource.get('title'),  # title
                             resource.get('abstract'),  # abstract
-                            summary,  # summary
+                            resource.get('summary', ''),  # summary
                             self.safe_parse(resource.get('domains', '[]')) or [],  # domains
-                            self.safe_parse(resource.get('topics', '{}')) or {},  # topics
-                            resource.get('description'),  # description
+                            self.safe_parse(resource.get('topics', 'null')) or {},  # topics
+                            resource.get('description', ''),  # description
                             resource.get('expert_id'),  # expert_id
                             resource.get('type'),  # type
-                            self.safe_parse(resource.get('subtitles', '{}')) or {},  # subtitles
-                            self.safe_parse(resource.get('publishers', '{}')) or {},  # publishers
-                            resource.get('collection'),  # collection
-                            resource.get('date_issue'),  # date_issue
-                            resource.get('citation'),  # citation
-                            resource.get('language'),  # language
-                            self.safe_parse(resource.get('identifiers', '{}')) or {},  # identifiers
+                            self.safe_parse(resource.get('subtitles', 'null')) or {},  # subtitles
+                            self.safe_parse(resource.get('publishers', 'null')) or {},  # publishers
+                            resource.get('collection', ''),  # collection
+                            resource.get('date_issue', ''),  # date_issue
+                            resource.get('citation', ''),  # citation
+                            resource.get('language', ''),  # language
+                            self.safe_parse(resource.get('identifiers', 'null')) or {},  # identifiers
                             resource.get('created_at'),  # created_at
                             resource.get('updated_at'),  # updated_at
-                            resource.get('source'),  # source
+                            resource.get('source', ''),  # source
                             self.safe_parse(resource.get('authors', '[]')) or [],  # authors
-                            resource.get('publication_year'),  # publication_year
-                            resource.get('field'),  # field
-                            resource.get('subfield')  # subfield
+                            resource.get('publication_year', ''),  # publication_year
+                            resource.get('field', ''),  # field
+                            resource.get('subfield', '')  # subfield
                         )
                         
                         # Execute insert
