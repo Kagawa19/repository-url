@@ -61,6 +61,15 @@ class ResourceImporter:
             self.connection.close()
             logger.info("Database connection closed.")
 
+    def parse_integer(self, value):
+        """Parse a string to integer, returning None for empty/invalid values"""
+        if not value or value.strip() == '':
+            return None
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return None
+
     def parse_summary(self, value):
         """Parse summary field which is sometimes stored as a tuple-like string"""
         if not value:
@@ -177,6 +186,7 @@ class ResourceImporter:
                         if resource_id == '2134532010':
                             logger.info(f"Processing problematic resource with ID: {resource_id}")
                             logger.info(f"Raw domains value: '{resource.get('domains')}'")
+                            logger.info(f"Raw expert_id value: '{resource.get('expert_id')}'")
                         
                         # Check if resource already exists
                         if self.check_resource_exists(
@@ -186,12 +196,16 @@ class ResourceImporter:
                             self.duplicate_resources += 1
                             continue
                         
+                        # Parse integer fields
+                        expert_id = self.parse_integer(resource.get('expert_id'))
+                        
                         # Parse domains specially as PostgreSQL array
                         domains_value = self.parse_postgres_array(resource.get('domains'))
                         
                         # For the problematic resource, log what we're doing with domains
                         if resource_id == '2134532010':
                             logger.info(f"Parsed domains value: {domains_value}")
+                            logger.info(f"Parsed expert_id value: {expert_id}")
                         
                         # Parse other JSON fields
                         topics = self.parse_jsonb(resource.get('topics'))
@@ -223,7 +237,7 @@ class ResourceImporter:
                             domains_value,  # Use the PostgreSQL array format
                             psycopg2.extras.Json(topics),
                             resource.get('description'),
-                            resource.get('expert_id'),
+                            expert_id,  # Use parsed integer value
                             resource.get('type'),
                             psycopg2.extras.Json(subtitles),
                             psycopg2.extras.Json(publishers),
