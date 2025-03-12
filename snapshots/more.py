@@ -61,26 +61,11 @@ class ResourceImporter:
             self.connection.close()
             logger.info("Database connection closed.")
 
-    def process_empty_fields(self, field_name, field_value):
-        """Process fields safely, providing appropriate defaults for empty values"""
-        if field_value is None or field_value == '':
-            # Return default empty values based on field type
-            if field_name in ['domains', 'authors']:
-                return []
-            elif field_name in ['topics', 'subtitles', 'publishers', 'identifiers']:
-                return {}
-            else:
-                return None
-        
-        # If the field is not empty, return the original value
-        return field_value
-
-    def process_string(self, value, default_empty_value=None):
-        """Process a string value for database insertion"""
-        if not value or value == '' or value == 'None' or value == 'none':
-            return default_empty_value
-        
-        # Handle tuples formatted as strings (e.g., summary field)
+    def parse_summary(self, value):
+        """Parse summary field which is sometimes stored as a tuple-like string"""
+        if not value:
+            return ""
+            
         if isinstance(value, str) and value.startswith('(') and value.endswith(')'):
             try:
                 # Try parsing as tuple
@@ -96,34 +81,73 @@ class ResourceImporter:
         
         return value
 
-    def process_json_field(self, value, default_empty_value):
-        """Process a JSON field for database insertion"""
-        if value is None or value == '' or value == 'None' or value == 'none':
-            return default_empty_value
+    def parse_postgres_array(self, value):
+        """
+        Parse a string into a PostgreSQL array format
+        For domains column which is of type text[]
+        """
+        if not value or value.strip() in ['', '[]', 'None', 'none']:
+            return None  # Return None for empty arrays to use DEFAULT
         
+        try:
+            # First try to parse as JSON array
+            if value.startswith('[') and value.endswith(']'):
+                try:
+                    # Try to handle JSON-style arrays
+                    cleaned = value.replace("'", '"')
+                    parsed = json.loads(cleaned)
+                    
+                    if not parsed:  # Empty array
+                        return None
+                        
+                    # Convert to PostgreSQL array format
+                    if all(isinstance(item, str) for item in parsed):
+                        # For text[] all elements must be quoted
+                        pg_array = "{" + ",".join(f'"{item}"' for item in parsed) + "}"
+                        return pg_array
+                    else:
+                        # Mixed-type arrays might be problematic, convert all to strings
+                        pg_array = "{" + ",".join(f'"{str(item)}"' for item in parsed) + "}"
+                        return pg_array
+                except json.JSONDecodeError:
+                    # If JSON parsing fails, try ast.literal_eval
+                    parsed = ast.literal_eval(value)
+                    if not parsed:  # Empty array
+                        return None
+                    
+                    # Convert to PostgreSQL array format
+                    pg_array = "{" + ",".join(f'"{str(item)}"' for item in parsed) + "}"
+                    return pg_array
+        except (ValueError, SyntaxError):
+            # If all parsing fails, return NULL for the array
+            return None
+            
+        # If we couldn't parse it as an array, treat as an empty array
+        return None
+
+    def parse_jsonb(self, value):
+        """Parse a string into a JSONB object"""
+        if not value or value.strip() in ['', '{}', 'None', 'none']:
+            return {}
+            
         if value == '[]':
             return []
             
-        if value == '{}':
-            return {}
-        
-        # Try to parse the value as JSON
         try:
+            # Try parsing as JSON first
             if isinstance(value, str):
                 if (value.startswith('{') and value.endswith('}')) or (value.startswith('[') and value.endswith(']')):
                     # Replace single quotes with double quotes for JSON compatibility
                     cleaned_value = value.replace("'", '"')
                     return json.loads(cleaned_value)
             
-            # If direct JSON parsing fails, try ast.literal_eval
+            # If JSON parsing fails, try ast.literal_eval
             return ast.literal_eval(value)
         except (ValueError, SyntaxError, json.JSONDecodeError):
-            # If all parsing methods fail, return the default value
-            if isinstance(default_empty_value, list):
+            # If all parsing methods fail, return empty object
+            if value.startswith('['):
                 return []
-            elif isinstance(default_empty_value, dict):
-                return {}
-            return default_empty_value
+            return {}
 
     def import_resources(self):
         """
@@ -149,11 +173,10 @@ class ResourceImporter:
                     try:
                         resource_id = resource.get('id')
                         
-                        # Add extra debugging for the problematic resource
+                        # Debug problematic resource
                         if resource_id == '2134532010':
                             logger.info(f"Processing problematic resource with ID: {resource_id}")
-                            logger.info(f"Original domains value: '{resource.get('domains')}'")
-                            logger.info(f"Original topics value: '{resource.get('topics')}'")
+                            logger.info(f"Raw domains value: '{resource.get('domains')}'")
                         
                         # Check if resource already exists
                         if self.check_resource_exists(
@@ -163,36 +186,25 @@ class ResourceImporter:
                             self.duplicate_resources += 1
                             continue
                         
-                        # Process string fields
-                        title = self.process_string(resource.get('title'))
-                        abstract = self.process_string(resource.get('abstract'), '')
-                        summary = self.process_string(resource.get('summary'), '')
-                        description = self.process_string(resource.get('description'), '')
-                        expert_id = self.process_string(resource.get('expert_id'))
-                        type_value = self.process_string(resource.get('type'))
-                        collection = self.process_string(resource.get('collection'), '')
-                        date_issue = self.process_string(resource.get('date_issue'), '')
-                        citation = self.process_string(resource.get('citation'), '')
-                        language = self.process_string(resource.get('language'), '')
-                        source = self.process_string(resource.get('source'), '')
-                        pub_year = self.process_string(resource.get('publication_year'), '')
-                        field = self.process_string(resource.get('field'), '')
-                        subfield = self.process_string(resource.get('subfield'), '')
+                        # Parse domains specially as PostgreSQL array
+                        domains_value = self.parse_postgres_array(resource.get('domains'))
                         
-                        # Process JSON fields
-                        domains = self.process_json_field(resource.get('domains'), [])
-                        topics = self.process_json_field(resource.get('topics'), {})
-                        subtitles = self.process_json_field(resource.get('subtitles'), {})
-                        publishers = self.process_json_field(resource.get('publishers'), {})
-                        identifiers = self.process_json_field(resource.get('identifiers'), {})
-                        authors = self.process_json_field(resource.get('authors'), [])
-                        
-                        # Additional logging for problematic resource
+                        # For the problematic resource, log what we're doing with domains
                         if resource_id == '2134532010':
-                            logger.info(f"Processed domains value: {domains}")
-                            logger.info(f"Processed topics value: {topics}")
+                            logger.info(f"Parsed domains value: {domains_value}")
                         
-                        # Execute insert with psycopg2 JSON adapter
+                        # Parse other JSON fields
+                        topics = self.parse_jsonb(resource.get('topics'))
+                        subtitles = self.parse_jsonb(resource.get('subtitles'))
+                        publishers = self.parse_jsonb(resource.get('publishers'))
+                        identifiers = self.parse_jsonb(resource.get('identifiers'))
+                        authors = self.parse_jsonb(resource.get('authors'))
+                        
+                        # Parse summary with special handling
+                        summary = self.parse_summary(resource.get('summary'))
+                        
+                        # Insert into database
+                        # Note that domains is passed directly since parse_postgres_array returns the correct PostgreSQL format
                         self.cursor.execute("""
                             INSERT INTO resources_resource (
                                 id, doi, title, abstract, summary, domains, topics, 
@@ -202,32 +214,31 @@ class ResourceImporter:
                                 field, subfield
                             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
                                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (id) DO NOTHING
                         """, (
                             resource_id, 
                             resource.get('doi'),
-                            title,
-                            abstract,
+                            resource.get('title'),
+                            resource.get('abstract'),
                             summary,
-                            psycopg2.extras.Json(domains),  # Use Json adapter
-                            psycopg2.extras.Json(topics),   # Use Json adapter
-                            description,
-                            expert_id,
-                            type_value,
-                            psycopg2.extras.Json(subtitles),   # Use Json adapter
-                            psycopg2.extras.Json(publishers),  # Use Json adapter
-                            collection,
-                            date_issue,
-                            citation,
-                            language,
-                            psycopg2.extras.Json(identifiers), # Use Json adapter
+                            domains_value,  # Use the PostgreSQL array format
+                            psycopg2.extras.Json(topics),
+                            resource.get('description'),
+                            resource.get('expert_id'),
+                            resource.get('type'),
+                            psycopg2.extras.Json(subtitles),
+                            psycopg2.extras.Json(publishers),
+                            resource.get('collection'),
+                            resource.get('date_issue'),
+                            resource.get('citation'),
+                            resource.get('language'),
+                            psycopg2.extras.Json(identifiers),
                             resource.get('created_at'),
                             resource.get('updated_at'),
-                            source,
-                            psycopg2.extras.Json(authors),    # Use Json adapter
-                            pub_year,
-                            field,
-                            subfield
+                            resource.get('source'),
+                            psycopg2.extras.Json(authors),
+                            resource.get('publication_year'),
+                            resource.get('field'),
+                            resource.get('subfield')
                         ))
                         
                         # Increment inserted resources if insertion was successful
