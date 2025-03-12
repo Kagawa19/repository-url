@@ -68,9 +68,23 @@ class ResourceImporter:
         Returns:
             Parsed value
         """
-        # Handle empty, None, or whitespace values
-        if not value or not isinstance(value, str) or value.strip() in ['', '[]', '{}', 'None', 'none', '{}']:
+        # Handle None values
+        if value is None:
             return None
+            
+        # Handle non-string values
+        if not isinstance(value, str):
+            return value
+            
+        # Handle empty or whitespace values
+        if not value.strip() or value.strip() in ['', 'None', 'none']:
+            return None
+            
+        # Explicit handling for empty arrays and objects
+        if value.strip() == '[]':
+            return []
+        if value.strip() == '{}':
+            return {}
         
         # Handle summary tuple-like strings
         if value.startswith('(') and value.endswith(')'):
@@ -89,12 +103,6 @@ class ResourceImporter:
                 elif inner_content.startswith("'") and inner_content.endswith("'"):
                     return inner_content[1:-1]
                 return None
-        
-        # Explicit handling for empty arrays and objects
-        if value == '[]':
-            return []
-        if value == '{}':
-            return {}
             
         # Try JSON parsing first
         try:
@@ -179,30 +187,63 @@ class ResourceImporter:
                             self.duplicate_resources += 1
                             continue
                         
-                        # Prepare fields with default values if missing
-                        domains = self.safe_parse(resource.get('domains'))
-                        domains = [] if domains is None else domains
+                        # Handle empty fields explicitly
+                        domains_raw = resource.get('domains', '')
+                        domains = [] if not domains_raw or domains_raw == '[]' else self.safe_parse(domains_raw) or []
                         
-                        topics = self.safe_parse(resource.get('topics'))
-                        topics = {} if topics is None else topics
+                        topics_raw = resource.get('topics', '')
+                        topics = {} if not topics_raw or topics_raw == '{}' else self.safe_parse(topics_raw) or {}
                         
-                        subtitles = self.safe_parse(resource.get('subtitles'))
-                        subtitles = {} if subtitles is None else subtitles
+                        subtitles_raw = resource.get('subtitles', '')
+                        subtitles = {} if not subtitles_raw or subtitles_raw == '{}' else self.safe_parse(subtitles_raw) or {}
                         
-                        publishers = self.safe_parse(resource.get('publishers'))
-                        publishers = {} if publishers is None else publishers
+                        publishers_raw = resource.get('publishers', '')
+                        publishers = {} if not publishers_raw or publishers_raw == '{}' else self.safe_parse(publishers_raw) or {}
                         
-                        identifiers = self.safe_parse(resource.get('identifiers'))
-                        identifiers = {} if identifiers is None else identifiers
+                        identifiers_raw = resource.get('identifiers', '')
+                        identifiers = {} if not identifiers_raw or identifiers_raw == '{}' else self.safe_parse(identifiers_raw) or {}
                         
-                        authors = self.safe_parse(resource.get('authors'))
-                        authors = [] if authors is None else authors
+                        authors_raw = resource.get('authors', '')
+                        authors = [] if not authors_raw or authors_raw == '[]' else self.safe_parse(authors_raw) or []
                         
                         # Handle summary with special care
                         summary = resource.get('summary', '')
                         if summary and summary.startswith('(') and summary.endswith(')'):
-                            summary = summary.replace("('", '').replace("',)", '')
+                            # Try to extract the content from the tuple-like string
+                            try:
+                                parsed = ast.literal_eval(summary)
+                                if isinstance(parsed, tuple) and len(parsed) > 0:
+                                    summary = parsed[0]
+                                else:
+                                    summary = summary.replace("('", '').replace("',)", '')
+                            except (ValueError, SyntaxError):
+                                summary = summary.replace("('", '').replace("',)", '')
                         
+                        # Debug logging for problematic resource
+                        if resource.get('id') == '2134532010':
+                            logger.info(f"Processing problematic resource with ID 2134532010")
+                            logger.info(f"Domains before: {resource.get('domains')}, after: {domains}")
+                            logger.info(f"Topics before: {resource.get('topics')}, after: {topics}")
+                            
+                        # Ensure JSON serialization works properly
+                        try:
+                            domains_json = json.dumps(domains)
+                            topics_json = json.dumps(topics)
+                            subtitles_json = json.dumps(subtitles)
+                            publishers_json = json.dumps(publishers)
+                            identifiers_json = json.dumps(identifiers)
+                            authors_json = json.dumps(authors)
+                        except (TypeError, ValueError) as e:
+                            logger.error(f"JSON serialization error: {e}")
+                            logger.error(f"Problematic fields: domains={domains}, topics={topics}")
+                            # Set to default values if serialization fails
+                            domains_json = '[]'
+                            topics_json = '{}'
+                            subtitles_json = '{}'
+                            publishers_json = '{}'
+                            identifiers_json = '{}'
+                            authors_json = '[]'
+                            
                         # Prepare insert values
                         insert_values = (
                             resource.get('id'),  # id
@@ -210,22 +251,22 @@ class ResourceImporter:
                             resource.get('title'),  # title
                             resource.get('abstract', ''),  # abstract
                             summary,  # summary
-                            json.dumps(domains),  # domains
-                            json.dumps(topics),  # topics
+                            domains_json,  # domains
+                            topics_json,  # topics
                             resource.get('description', ''),  # description
                             resource.get('expert_id'),  # expert_id
                             resource.get('type'),  # type
-                            json.dumps(subtitles),  # subtitles
-                            json.dumps(publishers),  # publishers
+                            subtitles_json,  # subtitles
+                            publishers_json,  # publishers
                             resource.get('collection', ''),  # collection
                             resource.get('date_issue', ''),  # date_issue
                             resource.get('citation', ''),  # citation
                             resource.get('language', ''),  # language
-                            json.dumps(identifiers),  # identifiers
+                            identifiers_json,  # identifiers
                             resource.get('created_at'),  # created_at
                             resource.get('updated_at'),  # updated_at
                             resource.get('source', ''),  # source
-                            json.dumps(authors),  # authors
+                            authors_json,  # authors
                             resource.get('publication_year', ''),  # publication_year
                             resource.get('field', ''),  # field
                             resource.get('subfield', '')  # subfield
