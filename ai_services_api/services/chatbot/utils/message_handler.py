@@ -181,6 +181,9 @@ class MessageHandler:
         
         # Rate limit tracking
         rate_limit_encountered = False
+        # Response tracking
+        response_chunks = []
+        has_error_occurred = False
         
         try:
             self.metadata = None
@@ -224,12 +227,12 @@ class MessageHandler:
                     
                     # Provide fallback response
                     yield "I apologize, but our service is experiencing high demand right now. Please try again in a moment."
+                    has_error_occurred = True
                     return
                 else:
                     raise
             
             # Initialize response tracking
-            response_chunks = []
             captured_metadata = None
             
             # Process and format the response stream
@@ -268,6 +271,7 @@ class MessageHandler:
                     else:
                         # Otherwise provide a fallback response
                         yield "I apologize, but our service is experiencing high demand right now. Please try again in a moment."
+                        has_error_occurred = True
                     return
                 else:
                     raise
@@ -330,18 +334,23 @@ class MessageHandler:
             else:
                 error_message = "I encountered an error processing your message. Please try again."
             
-            logger.warning(f"Yielding error message to user: {error_message}")
-            yield error_message
+            # Only yield error message if no successful response has been generated yet
+            if not response_chunks:
+                logger.warning(f"Yielding error message to user: {error_message}")
+                yield error_message
+                has_error_occurred = True
+            else:
+                # If we have some content already, don't add an error message that would confuse the user
+                logger.info("Error occurred but partial response exists; not appending error message")
             
         finally:
             # Update session stats
             if session_id:
-                await self.update_session_stats(session_id, not rate_limit_encountered)
+                await self.update_session_stats(session_id, not (rate_limit_encountered or has_error_occurred))
             
             logger.info("Async message processing concluded")
             total_time = time.time() - start_time
             logger.debug(f"Total method execution time: {total_time:.2f} seconds")
-
     async def _check_response_cache(self, message: str, user_id: str) -> str:
         """Check for cached similar responses during rate limiting."""
         try:

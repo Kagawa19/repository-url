@@ -1,330 +1,50 @@
-airflow-worker-1  | Unable to load the config, contains a configuration error.
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 573, in configure
-airflow-worker-1  |     handler = self.configure_handler(handlers[name])
-airflow-worker-1  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 757, in configure_handler
-airflow-worker-1  |     result = factory(**kwargs)
-airflow-worker-1  |              ^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/utils/log/file_processor_handler.py", line 50, in __init__
-airflow-worker-1  |     Path(self._get_log_directory()).mkdir(parents=True, exist_ok=True)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/pathlib.py", line 1116, in mkdir
-airflow-worker-1  |     os.mkdir(self, mode)
-airflow-worker-1  | PermissionError: [Errno 13] Permission denied: '/opt/airflow/logs/scheduler/2025-02-27'
+airflow-worker-1  | [[34m2025-03-22T05:36:52.842+0000[0m] {[34mconfiguration.py:[0m2049} INFO[0m - Creating new FAB webserver config file in: /opt/airflow/webserver_config.py[0m
+airflow-worker-1  | [2025-03-22 05:37:17 +0000] [53] [INFO] Starting gunicorn 23.0.0
+airflow-worker-1  | [2025-03-22 05:37:17 +0000] [53] [INFO] Listening at: http://[::]:8793 (53)
+airflow-worker-1  | [2025-03-22 05:37:17 +0000] [53] [INFO] Using worker: sync
+airflow-worker-1  | [2025-03-22 05:37:17 +0000] [54] [INFO] Booting worker with pid: 54
+airflow-worker-1  | [2025-03-22 05:37:18 +0000] [55] [INFO] Booting worker with pid: 55
+airflow-worker-1  |  
+airflow-worker-1  |  -------------- celery@6ca6d0c3d2c6 v5.4.0 (opalescent)
+airflow-worker-1  | --- ***** ----- 
+airflow-worker-1  | -- ******* ---- Linux-6.8.0-1021-azure-x86_64-with-glibc2.36 2025-03-22 05:37:27
+airflow-worker-1  | - *** --- * --- 
+airflow-worker-1  | - ** ---------- [config]
+airflow-worker-1  | - ** ---------- .> app:         airflow.providers.celery.executors.celery_executor:0x7f5d8207c310
+airflow-worker-1  | - ** ---------- .> transport:   redis://redis:6379/0
+airflow-worker-1  | - ** ---------- .> results:     postgresql://postgres:**@postgres/aphrc
+airflow-worker-1  | - *** --- * --- .> concurrency: 16 (prefork)
+airflow-worker-1  | -- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+airflow-worker-1  | --- ***** ----- 
+airflow-worker-1  |  -------------- [queues]
+airflow-worker-1  |                 .> default          exchange=default(direct) key=default
+airflow-worker-1  |                 
 airflow-worker-1  | 
-airflow-worker-1  | The above exception was the direct cause of the following exception:
+airflow-worker-1  | [tasks]
+airflow-worker-1  |   . airflow.providers.celery.executors.celery_executor_utils.execute_command
 airflow-worker-1  | 
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/bin/airflow", line 5, in <module>
-airflow-worker-1  |     from airflow.__main__ import main
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/__init__.py", line 68, in <module>
-airflow-worker-1  |     settings.initialize()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/settings.py", line 541, in initialize
-airflow-worker-1  |     LOGGING_CLASS_PATH = configure_logging()
-airflow-worker-1  |                          ^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 74, in configure_logging
-airflow-worker-1  |     raise e
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 69, in configure_logging
-airflow-worker-1  |     dictConfig(logging_config)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 823, in dictConfig
-airflow-worker-1  |     dictConfigClass(config).configure()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 580, in configure
-airflow-worker-1  |     raise ValueError('Unable to configure handler '
-airflow-worker-1  | ValueError: Unable to configure handler 'processor'
-airflow-worker-1  | Unable to load the config, contains a configuration error.
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 573, in configure
-airflow-worker-1  |     handler = self.configure_handler(handlers[name])
-airflow-worker-1  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 757, in configure_handler
-airflow-worker-1  |     result = factory(**kwargs)
-airflow-worker-1  |              ^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/utils/log/file_processor_handler.py", line 50, in __init__
-airflow-worker-1  |     Path(self._get_log_directory()).mkdir(parents=True, exist_ok=True)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/pathlib.py", line 1116, in mkdir
-airflow-worker-1  |     os.mkdir(self, mode)
-airflow-worker-1  | PermissionError: [Errno 13] Permission denied: '/opt/airflow/logs/scheduler/2025-02-27'
+airflow-worker-1  | [2025-03-22 05:37:44,484: WARNING/MainProcess] /usr/local/lib/python3.11/site-packages/celery/worker/consumer/consumer.py:508: CPendingDeprecationWarning: The broker_connection_retry configuration setting will no longer determine
+airflow-worker-1  | whether broker connection retries are made during startup in Celery 6.0 and above.
+airflow-worker-1  | If you wish to retain the existing behavior for retrying connections on startup,
+airflow-worker-1  | you should set broker_connection_retry_on_startup to True.
+airflow-worker-1  |   warnings.warn(
 airflow-worker-1  | 
-airflow-worker-1  | The above exception was the direct cause of the following exception:
+airflow-worker-1  | [2025-03-22 05:37:45,338: INFO/MainProcess] Connected to redis://redis:6379/0
+airflow-worker-1  | [2025-03-22 05:37:45,341: WARNING/MainProcess] /usr/local/lib/python3.11/site-packages/celery/worker/consumer/consumer.py:508: CPendingDeprecationWarning: The broker_connection_retry configuration setting will no longer determine
+airflow-worker-1  | whether broker connection retries are made during startup in Celery 6.0 and above.
+airflow-worker-1  | If you wish to retain the existing behavior for retrying connections on startup,
+airflow-worker-1  | you should set broker_connection_retry_on_startup to True.
+airflow-worker-1  |   warnings.warn(
 airflow-worker-1  | 
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/bin/airflow", line 5, in <module>
-airflow-worker-1  |     from airflow.__main__ import main
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/__init__.py", line 68, in <module>
-airflow-worker-1  |     settings.initialize()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/settings.py", line 541, in initialize
-airflow-worker-1  |     LOGGING_CLASS_PATH = configure_logging()
-airflow-worker-1  |                          ^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 74, in configure_logging
-airflow-worker-1  |     raise e
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 69, in configure_logging
-airflow-worker-1  |     dictConfig(logging_config)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 823, in dictConfig
-airflow-worker-1  |     dictConfigClass(config).configure()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 580, in configure
-airflow-worker-1  |     raise ValueError('Unable to configure handler '
-airflow-worker-1  | ValueError: Unable to configure handler 'processor'
-airflow-worker-1  | Unable to load the config, contains a configuration error.
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 573, in configure
-airflow-worker-1  |     handler = self.configure_handler(handlers[name])
-airflow-worker-1  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 757, in configure_handler
-airflow-worker-1  |     result = factory(**kwargs)
-airflow-worker-1  |              ^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/utils/log/file_processor_handler.py", line 50, in __init__
-airflow-worker-1  |     Path(self._get_log_directory()).mkdir(parents=True, exist_ok=True)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/pathlib.py", line 1116, in mkdir
-airflow-worker-1  |     os.mkdir(self, mode)
-airflow-worker-1  | PermissionError: [Errno 13] Permission denied: '/opt/airflow/logs/scheduler/2025-02-27'
-airflow-worker-1  | 
-airflow-worker-1  | The above exception was the direct cause of the following exception:
-airflow-worker-1  | 
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/bin/airflow", line 5, in <module>
-airflow-worker-1  |     from airflow.__main__ import main
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/__init__.py", line 68, in <module>
-airflow-worker-1  |     settings.initialize()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/settings.py", line 541, in initialize
-airflow-worker-1  |     LOGGING_CLASS_PATH = configure_logging()
-airflow-worker-1  |                          ^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 74, in configure_logging
-airflow-worker-1  |     raise e
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 69, in configure_logging
-airflow-worker-1  |     dictConfig(logging_config)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 823, in dictConfig
-airflow-worker-1  |     dictConfigClass(config).configure()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 580, in configure
-airflow-worker-1  |     raise ValueError('Unable to configure handler '
-airflow-worker-1  | ValueError: Unable to configure handler 'processor'
-airflow-worker-1  | Unable to load the config, contains a configuration error.
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 573, in configure
-airflow-worker-1  |     handler = self.configure_handler(handlers[name])
-airflow-worker-1  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 757, in configure_handler
-airflow-worker-1  |     result = factory(**kwargs)
-airflow-worker-1  |              ^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/utils/log/file_processor_handler.py", line 50, in __init__
-airflow-worker-1  |     Path(self._get_log_directory()).mkdir(parents=True, exist_ok=True)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/pathlib.py", line 1116, in mkdir
-airflow-worker-1  |     os.mkdir(self, mode)
-airflow-worker-1  | PermissionError: [Errno 13] Permission denied: '/opt/airflow/logs/scheduler/2025-02-27'
-airflow-worker-1  | 
-airflow-worker-1  | The above exception was the direct cause of the following exception:
-airflow-worker-1  | 
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/bin/airflow", line 5, in <module>
-airflow-worker-1  |     from airflow.__main__ import main
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/__init__.py", line 68, in <module>
-airflow-worker-1  |     settings.initialize()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/settings.py", line 541, in initialize
-airflow-worker-1  |     LOGGING_CLASS_PATH = configure_logging()
-airflow-worker-1  |                          ^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 74, in configure_logging
-airflow-worker-1  |     raise e
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 69, in configure_logging
-airflow-worker-1  |     dictConfig(logging_config)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 823, in dictConfig
-airflow-worker-1  |     dictConfigClass(config).configure()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 580, in configure
-airflow-worker-1  |     raise ValueError('Unable to configure handler '
-airflow-worker-1  | ValueError: Unable to configure handler 'processor'
-airflow-worker-1  | Unable to load the config, contains a configuration error.
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 573, in configure
-airflow-worker-1  |     handler = self.configure_handler(handlers[name])
-airflow-worker-1  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 757, in configure_handler
-airflow-worker-1  |     result = factory(**kwargs)
-airflow-worker-1  |              ^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/utils/log/file_processor_handler.py", line 50, in __init__
-airflow-worker-1  |     Path(self._get_log_directory()).mkdir(parents=True, exist_ok=True)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/pathlib.py", line 1116, in mkdir
-airflow-worker-1  |     os.mkdir(self, mode)
-airflow-worker-1  | PermissionError: [Errno 13] Permission denied: '/opt/airflow/logs/scheduler/2025-02-27'
-airflow-worker-1  | 
-airflow-worker-1  | The above exception was the direct cause of the following exception:
-airflow-worker-1  | 
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/bin/airflow", line 5, in <module>
-airflow-worker-1  |     from airflow.__main__ import main
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/__init__.py", line 68, in <module>
-airflow-worker-1  |     settings.initialize()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/settings.py", line 541, in initialize
-airflow-worker-1  |     LOGGING_CLASS_PATH = configure_logging()
-airflow-worker-1  |                          ^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 74, in configure_logging
-airflow-worker-1  |     raise e
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 69, in configure_logging
-airflow-worker-1  |     dictConfig(logging_config)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 823, in dictConfig
-airflow-worker-1  |     dictConfigClass(config).configure()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 580, in configure
-airflow-worker-1  |     raise ValueError('Unable to configure handler '
-airflow-worker-1  | ValueError: Unable to configure handler 'processor'
-airflow-worker-1  | Unable to load the config, contains a configuration error.
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 573, in configure
-airflow-worker-1  |     handler = self.configure_handler(handlers[name])
-airflow-worker-1  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 757, in configure_handler
-airflow-worker-1  |     result = factory(**kwargs)
-airflow-worker-1  |              ^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/utils/log/file_processor_handler.py", line 50, in __init__
-airflow-worker-1  |     Path(self._get_log_directory()).mkdir(parents=True, exist_ok=True)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/pathlib.py", line 1116, in mkdir
-airflow-worker-1  |     os.mkdir(self, mode)
-airflow-worker-1  | PermissionError: [Errno 13] Permission denied: '/opt/airflow/logs/scheduler/2025-02-27'
-airflow-worker-1  | 
-airflow-worker-1  | The above exception was the direct cause of the following exception:
-airflow-worker-1  | 
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/bin/airflow", line 5, in <module>
-airflow-worker-1  |     from airflow.__main__ import main
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/__init__.py", line 68, in <module>
-airflow-worker-1  |     settings.initialize()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/settings.py", line 541, in initialize
-airflow-worker-1  |     LOGGING_CLASS_PATH = configure_logging()
-airflow-worker-1  |                          ^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 74, in configure_logging
-airflow-worker-1  |     raise e
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 69, in configure_logging
-airflow-worker-1  |     dictConfig(logging_config)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 823, in dictConfig
-airflow-worker-1  |     dictConfigClass(config).configure()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 580, in configure
-airflow-worker-1  |     raise ValueError('Unable to configure handler '
-airflow-worker-1  | ValueError: Unable to configure handler 'processor'
-airflow-worker-1  | Unable to load the config, contains a configuration error.
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 573, in configure
-airflow-worker-1  |     handler = self.configure_handler(handlers[name])
-airflow-worker-1  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 757, in configure_handler
-airflow-worker-1  |     result = factory(**kwargs)
-airflow-worker-1  |              ^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/utils/log/file_processor_handler.py", line 50, in __init__
-airflow-worker-1  |     Path(self._get_log_directory()).mkdir(parents=True, exist_ok=True)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/pathlib.py", line 1116, in mkdir
-airflow-worker-1  |     os.mkdir(self, mode)
-airflow-worker-1  | PermissionError: [Errno 13] Permission denied: '/opt/airflow/logs/scheduler/2025-02-27'
-airflow-worker-1  | 
-airflow-worker-1  | The above exception was the direct cause of the following exception:
-airflow-worker-1  | 
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/bin/airflow", line 5, in <module>
-airflow-worker-1  |     from airflow.__main__ import main
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/__init__.py", line 68, in <module>
-airflow-worker-1  |     settings.initialize()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/settings.py", line 541, in initialize
-airflow-worker-1  |     LOGGING_CLASS_PATH = configure_logging()
-airflow-worker-1  |                          ^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 74, in configure_logging
-airflow-worker-1  |     raise e
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 69, in configure_logging
-airflow-worker-1  |     dictConfig(logging_config)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 823, in dictConfig
-airflow-worker-1  |     dictConfigClass(config).configure()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 580, in configure
-airflow-worker-1  |     raise ValueError('Unable to configure handler '
-airflow-worker-1  | ValueError: Unable to configure handler 'processor'
-airflow-worker-1  | Unable to load the config, contains a configuration error.
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 573, in configure
-airflow-worker-1  |     handler = self.configure_handler(handlers[name])
-airflow-worker-1  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 757, in configure_handler
-airflow-worker-1  |     result = factory(**kwargs)
-airflow-worker-1  |              ^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/utils/log/file_processor_handler.py", line 50, in __init__
-airflow-worker-1  |     Path(self._get_log_directory()).mkdir(parents=True, exist_ok=True)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/pathlib.py", line 1116, in mkdir
-airflow-worker-1  |     os.mkdir(self, mode)
-airflow-worker-1  | PermissionError: [Errno 13] Permission denied: '/opt/airflow/logs/scheduler/2025-02-27'
-airflow-worker-1  | 
-airflow-worker-1  | The above exception was the direct cause of the following exception:
-airflow-worker-1  | 
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/bin/airflow", line 5, in <module>
-airflow-worker-1  |     from airflow.__main__ import main
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/__init__.py", line 68, in <module>
-airflow-worker-1  |     settings.initialize()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/settings.py", line 541, in initialize
-airflow-worker-1  |     LOGGING_CLASS_PATH = configure_logging()
-airflow-worker-1  |                          ^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 74, in configure_logging
-airflow-worker-1  |     raise e
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 69, in configure_logging
-airflow-worker-1  |     dictConfig(logging_config)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 823, in dictConfig
-airflow-worker-1  |     dictConfigClass(config).configure()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 580, in configure
-airflow-worker-1  |     raise ValueError('Unable to configure handler '
-airflow-worker-1  | ValueError: Unable to configure handler 'processor'
-airflow-worker-1  | Unable to load the config, contains a configuration error.
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 573, in configure
-airflow-worker-1  |     handler = self.configure_handler(handlers[name])
-airflow-worker-1  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 757, in configure_handler
-airflow-worker-1  |     result = factory(**kwargs)
-airflow-worker-1  |              ^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/utils/log/file_processor_handler.py", line 50, in __init__
-airflow-worker-1  |     Path(self._get_log_directory()).mkdir(parents=True, exist_ok=True)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/pathlib.py", line 1116, in mkdir
-airflow-worker-1  |     os.mkdir(self, mode)
-airflow-worker-1  | PermissionError: [Errno 13] Permission denied: '/opt/airflow/logs/scheduler/2025-02-27'
-airflow-worker-1  | 
-airflow-worker-1  | The above exception was the direct cause of the following exception:
-airflow-worker-1  | 
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/bin/airflow", line 5, in <module>
-airflow-worker-1  |     from airflow.__main__ import main
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/__init__.py", line 68, in <module>
-airflow-worker-1  |     settings.initialize()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/settings.py", line 541, in initialize
-airflow-worker-1  |     LOGGING_CLASS_PATH = configure_logging()
-airflow-worker-1  |                          ^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 74, in configure_logging
-airflow-worker-1  |     raise e
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 69, in configure_logging
-airflow-worker-1  |     dictConfig(logging_config)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 823, in dictConfig
-airflow-worker-1  |     dictConfigClass(config).configure()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 580, in configure
-airflow-worker-1  |     raise ValueError('Unable to configure handler '
-airflow-worker-1  | ValueError: Unable to configure handler 'processor'
-airflow-worker-1  | Unable to load the config, contains a configuration error.
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 573, in configure
-airflow-worker-1  |     handler = self.configure_handler(handlers[name])
-airflow-worker-1  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 757, in configure_handler
-airflow-worker-1  |     result = factory(**kwargs)
-airflow-worker-1  |              ^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/utils/log/file_processor_handler.py", line 50, in __init__
-airflow-worker-1  |     Path(self._get_log_directory()).mkdir(parents=True, exist_ok=True)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/pathlib.py", line 1116, in mkdir
-airflow-worker-1  |     os.mkdir(self, mode)
-airflow-worker-1  | PermissionError: [Errno 13] Permission denied: '/opt/airflow/logs/scheduler/2025-02-27'
-airflow-worker-1  | 
-airflow-worker-1  | The above exception was the direct cause of the following exception:
-airflow-worker-1  | 
-airflow-worker-1  | Traceback (most recent call last):
-airflow-worker-1  |   File "/usr/local/bin/airflow", line 5, in <module>
-airflow-worker-1  |     from airflow.__main__ import main
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/__init__.py", line 68, in <module>
-airflow-worker-1  |     settings.initialize()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/settings.py", line 541, in initialize
-airflow-worker-1  |     LOGGING_CLASS_PATH = configure_logging()
-airflow-worker-1  |                          ^^^^^^^^^^^^^^^^^^^
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 74, in configure_logging
-airflow-worker-1  |     raise e
-airflow-worker-1  |   File "/usr/local/lib/python3.11/site-packages/airflow/logging_config.py", line 69, in configure_logging
-airflow-worker-1  |     dictConfig(logging_config)
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 823, in dictConfig
-airflow-worker-1  |     dictConfigClass(config).configure()
-airflow-worker-1  |   File "/usr/local/lib/python3.11/logging/config.py", line 580, in configure
-airflow-worker-1  |     raise ValueError('Unable to configure handler '
-airflow-worker-1  | ValueError: Unable to configure handler 'processor'
+airflow-worker-1  | [2025-03-22 05:37:45,361: INFO/MainProcess] mingle: searching for neighbors
+airflow-worker-1  | [2025-03-22 05:37:46,389: INFO/MainProcess] mingle: all alone
+airflow-worker-1  | [2025-03-22 05:37:46,447: INFO/MainProcess] celery@6ca6d0c3d2c6 ready.
+airflow-worker-1  | [2025-03-22 05:38:29,736: INFO/MainProcess] Task airflow.providers.celery.executors.celery_executor_utils.execute_command[783f4171-41da-4dbb-be4d-fe29358e209b] received
+airflow-worker-1  | [2025-03-22 05:38:30,149: INFO/ForkPoolWorker-15] [783f4171-41da-4dbb-be4d-fe29358e209b] Executing command in Celery: ['airflow', 'tasks', 'run', 'resource_summary_generator_dag', 'generate_resource_summaries', 'scheduled__2025-03-21T00:00:00+00:00', '--local', '--subdir', 'DAGS_FOLDER/summary_dag.py']
+airflow-worker-1  | [2025-03-22 05:38:30,453: INFO/ForkPoolWorker-15] Filling up the DagBag from /opt/airflow/dags/summary_dag.py
+airflow-worker-1  | [2025-03-22 05:38:35,677: INFO/ForkPoolWorker-15] Injected default GEMINI_API_KEY
+airflow-worker-1  | [2025-03-22 05:38:35,680: INFO/ForkPoolWorker-15] GEMINI_API_KEY available: Yes, length: 39
+airflow-worker-1  | [2025-03-22 05:38:35,683: INFO/ForkPoolWorker-15] Key starts with: AIza...
+airflow-worker-1  | [2025-03-22 05:38:35,692: INFO/ForkPoolWorker-15] Environment variables loaded
+airflow-worker-1  | [2025-03-22 05:38:36,468: INFO/ForkPoolWorker-15] Running <TaskInstance: resource_summary_generator_dag.generate_resource_summaries scheduled__2025-03-21T00:00:00+00:00 [queued]> on host 6ca6d0c3d2c6
+airflow-worker-1  | [2025-03-22 05:38:41,927: INFO/ForkPoolWorker-15] Task airflow.providers.celery.executors.celery_executor_utils.execute_command[783f4171-41da-4dbb-be4d-fe29358e209b] succeeded in 12.183420745999967s: None
