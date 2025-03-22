@@ -242,6 +242,7 @@ services:
       - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW__WEBSERVER__SECRET_KEY}
       - AIRFLOW_HOME=/opt/airflow
       - PYTHONPATH=/app
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
@@ -261,6 +262,8 @@ services:
       - aphrc-network
     user: "${UID:-1001}:${GID:-125}"
     restart: always
+    env_file:
+      - .env
 
   airflow-scheduler:
     build:
@@ -282,6 +285,7 @@ services:
       - AIRFLOW__SMTP__SMTP_MAIL_FROM=${AIRFLOW__SMTP__SMTP_USER:-youremail@gmail.com}
       - AIRFLOW__SMTP__SMTP_SSL=False
       - AIRFLOW__SMTP__SMTP_STARTTLS=True
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
@@ -293,6 +297,8 @@ services:
       - aphrc-network
     user: "${UID:-1001}:${GID:-125}"
     restart: always
+    env_file:
+      - .env
 
   airflow-worker:
     build:
@@ -314,6 +320,7 @@ services:
       - AIRFLOW__SMTP__SMTP_MAIL_FROM=${AIRFLOW__SMTP__SMTP_USER:-youremail@gmail.com}
       - AIRFLOW__SMTP__SMTP_SSL=False
       - AIRFLOW__SMTP__SMTP_STARTTLS=True
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
@@ -325,37 +332,8 @@ services:
       - aphrc-network
     user: "${UID:-1001}:${GID:-125}"
     restart: always
-
-  airflow-init:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: >
-      bash -c '
-        airflow db migrate &&
-        airflow users create --username brian --firstname kimutai --lastname kimu --role Admin --email briankimu97@gmail.com --password movie
-      '
-    environment:
-      - AIRFLOW__CORE__EXECUTOR=CeleryExecutor
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-p0stgres}@postgres/${POSTGRES_DB:-aphrc}
-      - AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-p0stgres}@postgres/${POSTGRES_DB:-aphrc}
-      - AIRFLOW__CELERY__BROKER_URL=redis://:@redis:6379/0
-      - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW__CORE__FERNET_KEY}
-      - AIRFLOW__CORE__LOAD_EXAMPLES=false
-      - AIRFLOW__EMAIL__EMAIL_BACKEND=airflow.utils.email.send_email_smtp
-      - AIRFLOW__SMTP__SMTP_HOST=smtp.gmail.com
-      - AIRFLOW__SMTP__SMTP_USER=${AIRFLOW__SMTP__SMTP_USER:-youremail@gmail.com}
-      - AIRFLOW__SMTP__SMTP_PASSWORD=${AIRFLOW__SMTP__SMTP_PASSWORD}
-      - AIRFLOW__SMTP__SMTP_PORT=587
-      - AIRFLOW__SMTP__SMTP_MAIL_FROM=${AIRFLOW__SMTP__SMTP_USER:-youremail@gmail.com}
-      - AIRFLOW__SMTP__SMTP_SSL=False
-      - AIRFLOW__SMTP__SMTP_STARTTLS=True
-    user: "0:0"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - aphrc-network
+    env_file:
+      - .env
 
 networks:
   aphrc-network:

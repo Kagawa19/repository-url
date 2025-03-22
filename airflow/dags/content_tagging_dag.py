@@ -79,9 +79,6 @@ def get_db_cursor(autocommit=False):
         finally:
             cur.close()
 
-# Import necessary processors
-from ai_services_api.services.centralized_repository.ai_summarizer import TextSummarizer
-
 # Simple database wrapper to match original API
 class DatabaseManager:
     """Database manager for consistent API with original."""
@@ -132,16 +129,34 @@ class DatabaseManager:
                 conn.rollback()
                 raise
 
-def classify_publications_task():
+def check_environment():
+    """Check if required environment variables are set."""
+    gemini_api_key = os.getenv('GEMINI_API_KEY')
+    if not gemini_api_key:
+        logger.warning("GEMINI_API_KEY environment variable is not set. Using fallback classification.")
+        logger.warning("For full functionality, ensure GEMINI_API_KEY is set in your environment or .env file")
+        return False
+    return True
+
+def classify_publications_task(**context):
     """
     Perform corpus analysis and classify all publications
     """
     load_environment_variables()
     
+    # Check environment variables first
+    has_api_key = check_environment()
+    
     try:
         # Create database manager and summarizer
         db = DatabaseManager()
+        
+        # Import inside the function to ensure proper environment loading
+        from ai_services_api.services.centralized_repository.ai_summarizer import TextSummarizer
         summarizer = TextSummarizer()
+        
+        # Log API key status
+        logger.info(f"Classification running with Gemini API available: {hasattr(summarizer, 'can_use_gemini') and summarizer.can_use_gemini}")
         
         # Analyze existing publications
         logger.info("Analyzing existing publications for field classification...")
@@ -157,7 +172,6 @@ def classify_publications_task():
         logger.info(f"Discovered field structure: {field_structure}")
         
         # Get publications that need classification
-        # Updated to match your schema - checked fields and subfields column existence
         with get_db_cursor() as (cur, conn):
             try:
                 # First check if fields column exists
@@ -232,6 +246,11 @@ def classify_publications_task():
                 continue
         
         logger.info(f"Classification complete! Classified {total_classified} publications.")
+        
+        # Log API key status for debugging
+        if not has_api_key:
+            logger.warning("Classification completed with fallback mode due to missing GEMINI_API_KEY.")
+            logger.warning("For improved classification accuracy, please set GEMINI_API_KEY in your environment.")
     
     except Exception as e:
         logger.error(f"Error in publication classification: {e}")

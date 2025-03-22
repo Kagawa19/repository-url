@@ -1,0 +1,746 @@
+api-1  | tee: /app/logs/init.log: Permission denied
+api-1  | [Sat Mar 22 09:37:25 UTC 2025] Starting initialization...
+api-1  | [Sat Mar 22 09:37:25 UTC 2025] Waiting for PostgreSQL...
+api-1  | [Sat Mar 22 09:37:25 UTC 2025] PostgreSQL is available
+api-1  | [Sat Mar 22 09:37:25 UTC 2025] Waiting for Redis...
+api-1  | [Sat Mar 22 09:37:25 UTC 2025] Redis is available
+api-1  | [Sat Mar 22 09:37:25 UTC 2025] Waiting for Neo4j...
+api-1  | [Sat Mar 22 09:37:25 UTC 2025] Neo4j is available
+api-1  | [Sat Mar 22 09:37:25 UTC 2025] Running setup with args:  --skip-database --skip-openalex --skip-publications --skip-search --skip-redis --skip-scraping
+api-1  | 2025-03-22 09:37:40 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-03-22 09:37:40 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-03-22 09:38:48 - INFO: Starting system initialization...
+api-1  | 2025-03-22 09:38:48 - INFO: Initializing text summarizer...
+api-1  | 2025-03-22 09:38:48 - INFO: Gemini model setup completed
+api-1  | 2025-03-22 09:38:48 - INFO: TextSummarizer initialized successfully
+api-1  | 2025-03-22 09:38:48 - INFO: Text summarizer initialized successfully.
+api-1  | 2025-03-22 09:38:48 - INFO: Initializing graph...
+api-1  | 2025-03-22 09:38:48 - INFO: Neo4j driver initialized
+api-1  | 2025-03-22 09:38:56 - INFO: Index created: CREATE INDEX expert_id IF NOT EXISTS FOR (e:Expert) ON (e.id)
+api-1  | 2025-03-22 09:38:58 - INFO: Index created: CREATE INDEX expert_name IF NOT EXISTS FOR (e:Expert) ON (e.name)
+api-1  | 2025-03-22 09:38:58 - INFO: Index created: CREATE INDEX expert_orcid IF NOT EXISTS FOR (e:Expert) ON (e.orcid)
+api-1  | 2025-03-22 09:38:58 - INFO: Index created: CREATE INDEX theme_name IF NOT EXISTS FOR (t:Theme) ON (t.name)
+api-1  | 2025-03-22 09:38:59 - INFO: Index created: CREATE INDEX unit_name IF NOT EXISTS FOR (u:Unit) ON (u.name)
+api-1  | 2025-03-22 09:38:59 - INFO: Index created: CREATE INDEX field_name IF NOT EXISTS FOR (f:Field) ON (f.name)
+api-1  | 2025-03-22 09:38:59 - INFO: Index created: CREATE INDEX domain_name IF NOT EXISTS FOR (d:Domain) ON (d.name)
+api-1  | 2025-03-22 09:38:59 - INFO: Index created: CREATE INDEX concept_name IF NOT EXISTS FOR (c:Concept) ON (c.name)
+api-1  | 2025-03-22 09:38:59 - INFO: Index created: CREATE INDEX area_name IF NOT EXISTS FOR (ra:ResearchArea) ON (ra.name)
+api-1  | 2025-03-22 09:38:59 - INFO: Index created: CREATE INDEX method_name IF NOT EXISTS FOR (m:Method) ON (m.name)
+api-1  | 2025-03-22 09:39:00 - INFO: Index created: CREATE INDEX related_name IF NOT EXISTS FOR (r:RelatedArea) ON (r.name)
+api-1  | 2025-03-22 09:39:00 - INFO: Index created: CREATE FULLTEXT INDEX expert_fulltext IF NOT EXISTS 
+api-1  |                FOR (e:Expert) ON EACH [e.name, e.designation]
+api-1  | 2025-03-22 09:39:02 - INFO: Index created: CREATE FULLTEXT INDEX concept_fulltext IF NOT EXISTS 
+api-1  |                FOR (c:Concept) ON EACH [c.name]
+api-1  | 2025-03-22 09:39:02 - INFO: Successfully connected to database: aphrc
+api-1  | 2025-03-22 09:39:03 - INFO: Fetched 108 experts from database
+api-1  | 2025-03-22 09:39:13 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:18 - INFO: Successfully created/updated expert node: Lisa Omondi
+api-1  | 2025-03-22 09:39:19 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:21 - INFO: Successfully created/updated expert node: Beatrice Maina
+api-1  | 2025-03-22 09:39:21 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:22 - INFO: Successfully created/updated expert node: Estelle Sidze
+api-1  | 2025-03-22 09:39:22 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:23 - INFO: Successfully created/updated expert node: Yohannes Wado
+api-1  | 2025-03-22 09:39:23 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:25 - INFO: Successfully created/updated expert node: Ramatou Ouedraogo
+api-1  | 2025-03-22 09:39:25 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:26 - INFO: Successfully created/updated expert node: Patricia Kitsao
+api-1  | 2025-03-22 09:39:26 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:27 - INFO: Successfully created/updated expert node: Lucy Wakiaga
+api-1  | 2025-03-22 09:39:27 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:28 - INFO: Successfully created/updated expert node: Amani Karisa
+api-1  | 2025-03-22 09:39:28 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:29 - INFO: Successfully created/updated expert node: Benta Abuya
+api-1  | 2025-03-22 09:39:30 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:30 - INFO: Successfully created/updated expert node: Samuel Iddi
+api-1  | 2025-03-22 09:39:30 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:31 - INFO: Successfully created/updated expert node: Steve Cygu
+api-1  | 2025-03-22 09:39:32 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:32 - INFO: Successfully created/updated expert node: Mercy Ndwiga
+api-1  | 2025-03-22 09:39:32 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:32 - INFO: Successfully created/updated expert node: Naomi Njenga
+api-1  | 2025-03-22 09:39:33 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:33 - INFO: Successfully created/updated expert node: Rita Karoki
+api-1  | 2025-03-22 09:39:33 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:33 - INFO: Successfully created/updated expert node: Caven Kithinji
+api-1  | 2025-03-22 09:39:34 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:34 - INFO: Successfully created/updated expert node: Juliet Ratemo
+api-1  | 2025-03-22 09:39:34 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:34 - INFO: Successfully created/updated expert node: Isabel Radoli
+api-1  | 2025-03-22 09:39:34 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:35 - INFO: Successfully created/updated expert node: Nicholas Etyang
+api-1  | 2025-03-22 09:39:35 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:35 - INFO: Successfully created/updated expert node: Benard Ondiek
+api-1  | 2025-03-22 09:39:35 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:36 - INFO: Successfully created/updated expert node: Florah Karimi
+api-1  | 2025-03-22 09:39:36 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:36 - INFO: Successfully created/updated expert node: Michelle Mbuthia
+api-1  | 2025-03-22 09:39:37 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:37 - INFO: Successfully created/updated expert node: Abdhalah Ziraba
+api-1  | 2025-03-22 09:39:37 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:37 - INFO: Successfully created/updated expert node: Elizabeth Kemigisha
+api-1  | 2025-03-22 09:39:38 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:38 - INFO: Successfully created/updated expert node: Shukri Mohamed
+api-1  | 2025-03-22 09:39:38 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:38 - INFO: Successfully created/updated expert node: Veronica Ojiambo
+api-1  | 2025-03-22 09:39:39 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:39 - INFO: Successfully created/updated expert node: Calistus Wilunda
+api-1  | 2025-03-22 09:39:39 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:39 - INFO: Successfully created/updated expert node: Milka Wanjohi
+api-1  | 2025-03-22 09:39:40 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:40 - INFO: Successfully created/updated expert node: Jacqueline Kungú
+api-1  | 2025-03-22 09:39:40 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:40 - INFO: Successfully created/updated expert node: Gloria Lang'at
+api-1  | 2025-03-22 09:39:40 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:41 - INFO: Successfully created/updated expert node: Alex Manyasi
+api-1  | 2025-03-22 09:39:41 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:41 - INFO: Successfully created/updated expert node: Christopher Maero
+api-1  | 2025-03-22 09:39:41 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:41 - INFO: Successfully created/updated expert node: Mohammed Duba
+api-1  | 2025-03-22 09:39:42 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:42 - INFO: Successfully created/updated expert node: Issabelah Mutuku
+api-1  | 2025-03-22 09:39:42 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:42 - INFO: Successfully created/updated expert node: Corretta Tira
+api-1  | 2025-03-22 09:39:42 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:42 - INFO: Successfully created/updated expert node: Sheena Kayira
+api-1  | 2025-03-22 09:39:43 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:43 - INFO: Successfully created/updated expert node: Joy Maruti
+api-1  | 2025-03-22 09:39:43 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:43 - INFO: Successfully created/updated expert node: Alice Karanja
+api-1  | 2025-03-22 09:39:43 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:44 - INFO: Successfully created/updated expert node: Dickson Amugsi
+api-1  | 2025-03-22 09:39:45 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:45 - INFO: Successfully created/updated expert node: Kanyiva Muindi
+api-1  | 2025-03-22 09:39:45 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:46 - INFO: Successfully created/updated expert node: Grace Kibunja
+api-1  | 2025-03-22 09:39:46 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:46 - INFO: Successfully created/updated expert node: Jane Mangwana
+api-1  | 2025-03-22 09:39:47 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:47 - INFO: Successfully created/updated expert node: Johnstone Kotut
+api-1  | 2025-03-22 09:39:47 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:47 - INFO: Successfully created/updated expert node: Winnie Chepkemoi
+api-1  | 2025-03-22 09:39:48 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:48 - INFO: Successfully created/updated expert node: Pauline Ochieng
+api-1  | 2025-03-22 09:39:48 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:48 - INFO: Successfully created/updated expert node: Cliff Mokua
+api-1  | 2025-03-22 09:39:48 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:48 - INFO: Successfully created/updated expert node: Bethsheba Getanda
+api-1  | 2025-03-22 09:39:49 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:49 - INFO: Successfully created/updated expert node: Joshua Muthama
+api-1  | 2025-03-22 09:39:49 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:49 - INFO: Successfully created/updated expert node: George Gachanga
+api-1  | 2025-03-22 09:39:49 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:49 - INFO: Successfully created/updated expert node: Phylis Mungai
+api-1  | 2025-03-22 09:39:50 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:50 - INFO: Successfully created/updated expert node: Ivy Nyarango
+api-1  | 2025-03-22 09:39:50 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:50 - INFO: Successfully created/updated expert node: Patrick Kiriri
+api-1  | 2025-03-22 09:39:50 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:50 - INFO: Successfully created/updated expert node: Meshack Johnson
+api-1  | 2025-03-22 09:39:51 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:51 - INFO: Successfully created/updated expert node: Billy Lubuya
+api-1  | 2025-03-22 09:39:51 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:51 - INFO: Successfully created/updated expert node: Annaline Karan
+api-1  | 2025-03-22 09:39:51 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:51 - INFO: Successfully created/updated expert node: Joseph Kanyugo
+api-1  | 2025-03-22 09:39:52 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:52 - INFO: Successfully created/updated expert node: Janet Ayimba
+api-1  | 2025-03-22 09:39:52 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:52 - INFO: Successfully created/updated expert node: Monica Njonge
+api-1  | 2025-03-22 09:39:52 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:52 - INFO: Successfully created/updated expert node: Lillian Osano
+api-1  | 2025-03-22 09:39:53 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:53 - INFO: Successfully created/updated expert node: Diama Diop Dia
+api-1  | 2025-03-22 09:39:53 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:53 - INFO: Successfully created/updated expert node: Sylvia Kimingi
+api-1  | 2025-03-22 09:39:53 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:53 - INFO: Successfully created/updated expert node: Lillian Okoth
+api-1  | 2025-03-22 09:39:54 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:54 - INFO: Successfully created/updated expert node: Adero Godfrey
+api-1  | 2025-03-22 09:39:54 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:54 - INFO: Successfully created/updated expert node: Anne Njeri
+api-1  | 2025-03-22 09:39:55 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:55 - INFO: Successfully created/updated expert node: Sokhna Thiam
+api-1  | 2025-03-22 09:39:55 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:56 - INFO: Successfully created/updated expert node: Eubert Espira
+api-1  | 2025-03-22 09:39:56 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:57 - INFO: Successfully created/updated expert node: Caroline Kabiru
+api-1  | 2025-03-22 09:39:57 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:57 - INFO: Successfully created/updated expert node: Anthony Ajayi
+api-1  | 2025-03-22 09:39:57 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:58 - INFO: Successfully created/updated expert node: Emmy Igonya
+api-1  | 2025-03-22 09:39:58 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:58 - INFO: Successfully created/updated expert node: Kenneth Juma
+api-1  | 2025-03-22 09:39:58 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:59 - INFO: Successfully created/updated expert node: Bonnie Wandera
+api-1  | 2025-03-22 09:39:59 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:39:59 - INFO: Successfully created/updated expert node: Amanuel Abajobir
+api-1  | 2025-03-22 09:39:59 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:00 - INFO: Successfully created/updated expert node: El Hadji Malick Sylla
+api-1  | 2025-03-22 09:40:00 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:00 - INFO: Successfully created/updated expert node: Rodrigue Nda'chi Deffo
+api-1  | 2025-03-22 09:40:01 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:01 - INFO: Successfully created/updated expert node: Moses Ngware
+api-1  | 2025-03-22 09:40:01 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:01 - INFO: Successfully created/updated expert node: Lydia Namatende
+api-1  | 2025-03-22 09:40:02 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:02 - INFO: Successfully created/updated expert node: Margaret Nampijja
+api-1  | 2025-03-22 09:40:02 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:02 - INFO: Successfully created/updated expert node: Silas Onyango
+api-1  | 2025-03-22 09:40:03 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:03 - INFO: Successfully created/updated expert node: Agnes Kiragga
+api-1  | 2025-03-22 09:40:03 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:04 - INFO: Successfully created/updated expert node: Daniel Mwanga
+api-1  | 2025-03-22 09:40:04 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:04 - INFO: Successfully created/updated expert node: Peterrock Muriuki
+api-1  | 2025-03-22 09:40:05 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:05 - INFO: Successfully created/updated expert node: Julius Sindi
+api-1  | 2025-03-22 09:40:05 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:06 - INFO: Successfully created/updated expert node: Alypio Nyandwi
+api-1  | 2025-03-22 09:40:06 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:06 - INFO: Successfully created/updated expert node: Hesborn Wao
+api-1  | 2025-03-22 09:40:07 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:07 - INFO: Successfully created/updated expert node: Marta Vicente-Crespo
+api-1  | 2025-03-22 09:40:07 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:08 - INFO: Successfully created/updated expert node: Caroline Kabaria
+api-1  | 2025-03-22 09:40:08 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:08 - INFO: Successfully created/updated expert node: Patrick Owili
+api-1  | 2025-03-22 09:40:09 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:09 - INFO: Successfully created/updated expert node: Frederick Wekesah
+api-1  | 2025-03-22 09:40:09 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:09 - INFO: Successfully created/updated expert node: Richard Sanya
+api-1  | 2025-03-22 09:40:10 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:10 - INFO: Successfully created/updated expert node: Gershim Asiki
+api-1  | 2025-03-22 09:40:10 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:10 - INFO: Successfully created/updated expert node: Peter Otieno
+api-1  | 2025-03-22 09:40:11 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:11 - INFO: Successfully created/updated expert node: Elizabeth Kimani
+api-1  | 2025-03-22 09:40:11 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:11 - INFO: Successfully created/updated expert node: Bonventure Mwangi
+api-1  | 2025-03-22 09:40:12 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:12 - INFO: Successfully created/updated expert node: David Osogo
+api-1  | 2025-03-22 09:40:12 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:12 - INFO: Successfully created/updated expert node: Antonina Mutoro
+api-1  | 2025-03-22 09:40:12 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:12 - INFO: Successfully created/updated expert node: Blessing Mberu
+api-1  | 2025-03-22 09:40:13 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:13 - INFO: Successfully created/updated expert node: Bernard Sabiti
+api-1  | 2025-03-22 09:40:13 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:13 - INFO: Successfully created/updated expert node: Razak Gyasi
+api-1  | 2025-03-22 09:40:13 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:14 - INFO: Successfully created/updated expert node: Sheillah Simiyu
+api-1  | 2025-03-22 09:40:14 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:14 - INFO: Successfully created/updated expert node: Innocent Tumwebaze
+api-1  | 2025-03-22 09:40:14 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:14 - INFO: Successfully created/updated expert node: Lynette Kamau
+api-1  | 2025-03-22 09:40:15 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:15 - INFO: Successfully created/updated expert node: Evans Simiyu
+api-1  | 2025-03-22 09:40:15 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:15 - INFO: Successfully created/updated expert node: Nancy Kang'ethe
+api-1  | 2025-03-22 09:40:15 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:16 - INFO: Successfully created/updated expert node: Cheikh Faye
+api-1  | 2025-03-22 09:40:16 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:16 - INFO: Successfully created/updated expert node: Assane Diouf
+api-1  | 2025-03-22 09:40:17 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:17 - INFO: Successfully created/updated expert node: Martin Mutua
+api-1  | 2025-03-22 09:40:17 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:18 - INFO: Successfully created/updated expert node: Moustapha Tall
+api-1  | 2025-03-22 09:40:18 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:19 - INFO: Successfully created/updated expert node: Arsene Sandie
+api-1  | 2025-03-22 09:40:19 - ERROR: Rate limit exceeded, using default values
+api-1  | 2025-03-22 09:40:20 - INFO: Successfully created/updated expert node: Rornald Kananura Muhumuza
+api-1  | 2025-03-22 09:40:20 - INFO: Successfully connected to database: aphrc
+api-1  | 2025-03-22 09:40:20 - INFO: Created adaptive relationships based on historical patterns
+api-1  | 2025-03-22 09:40:20 - INFO: Graph initialization complete with adaptive relationships!
+api-1  | 2025-03-22 09:40:20 - INFO: Graph initialization complete!
+api-1  | 2025-03-22 09:40:20 - INFO: Graph initialized successfully.
+api-1  | 2025-03-22 09:40:20 - INFO: Creating search index...
+api-1  | 2025-03-22 09:40:20 - INFO: Use pytorch device_name: cpu
+api-1  | 2025-03-22 09:40:20 - INFO: Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+api-1  | 2025-03-22 09:40:23 - INFO: Search index created successfully.
+api-1  | 2025-03-22 09:40:23 - INFO: Creating Redis index...
+api-1  | 2025-03-22 09:40:23 - INFO: Redis index created successfully.
+api-1  | 2025-03-22 09:40:23 - INFO: Matching experts with resources...
+api-1  | 2025-03-22 09:40:23 - INFO: Starting expert-resource matching process...
+api-1  | 🔍 Starting expert-resource matching process...
+api-1  | 2025-03-22 09:40:23 - INFO: Found 108 experts and 427 resources for matching.
+api-1  | 📊 Found 108 experts and 427 resources for matching.
+api-1  | 2025-03-22 09:40:23,677 - INFO: Found 0 expert-resource matches
+api-1  | 2025-03-22 09:40:23 - INFO: Found 0 expert-resource matches
+api-1  | 2025-03-22 09:40:23 - WARNING: No matches found between experts and resources.
+api-1  | ⚠️ No matches found between experts and resources.
+api-1  | 2025-03-22 09:40:23 - INFO: Expert-resource matching process completed.
+api-1  | 🎉 Expert-resource matching process completed.
+api-1  | 2025-03-22 09:40:23 - INFO: Expert-resource matching completed successfully.
+api-1  | 2025-03-22 09:40:23 - INFO: System initialization completed successfully!
+api-1  | 2025-03-22 09:40:23 - INFO: Database connection closed
+api-1  | WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+api-1  | E0000 00:00:1742636426.973617      21 init.cc:232] grpc_wait_for_shutdown_with_timeout() timed out.
+api-1  | [Sat Mar 22 09:40:27 UTC 2025] Initialization complete
+api-1  | [Sat Mar 22 09:40:27 UTC 2025] Starting application...
+api-1  | INFO:     Will watch for changes in these directories: ['/app']
+api-1  | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+api-1  | INFO:     Started reloader process [1] using StatReload
+api-1  | 2025-03-22 09:40:39 - INFO: GeminiLLMManager initialized successfully
+api-1  | 2025-03-22 09:40:42 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-03-22 09:40:42 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-03-22 09:40:58 - INFO: ML Predictor initialized successfully
+api-1  | INFO:     Started server process [255]
+api-1  | INFO:     Waiting for application startup.
+api-1  | INFO:     Application startup complete.
+api-1  | INFO:     127.0.0.1:50062 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:44322 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:57336 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:52108 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:44732 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:52182 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:46190 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:40020 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:51106 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:36062 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:47082 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:51904 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:50834 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:39426 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:38942 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:35136 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:57830 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:59534 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:36970 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:59948 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:50882 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     172.18.0.1:36252 - "GET / HTTP/1.1" 200 OK
+api-1  | INFO:     172.18.0.1:36252 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+api-1  | INFO:     172.18.0.1:55416 - "GET /docs HTTP/1.1" 200 OK
+api-1  | INFO:     172.18.0.1:55416 - "GET /openapi.json HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:55946 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:37528 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     172.18.0.1:42108 - "GET /chatbot/conversation/chat/health%20publications HTTP/1.1" 400 Bad Request
+api-1  | 2025-03-22 10:00:46 - INFO: Adjusting Redis pool: 5 -> 10 (Load: 59.3%, Usage: 13/5)
+api-1  | 2025-03-22 10:00:46 - INFO: Test endpoint called with query: health publications, User: test_user_123
+api-1  | 2025-03-22 10:00:46 - INFO: Adjusting Redis pool: 5 -> 10 (Load: 69.7%, Usage: 14/5)
+api-1  | 2025-03-22 10:00:46 - INFO: Initialized connection pool for database: aphrc at postgres
+api-1  | 2025-03-22 10:00:46 - INFO: Starting chat request processing
+api-1  | 2025-03-22 10:00:46 - INFO: Performing concurrent cache check and session initialization
+api-1  | 2025-03-22 10:00:46 - INFO: Successfully connected to database: aphrc at postgres
+api-1  | 2025-03-22 10:00:47 - INFO: Created chat session: session_test_user_123_1742637646
+api-1  | 2025-03-22 10:00:47 - INFO: Initiating message stream processing with 30-second timeout
+api-1  | 2025-03-22 10:00:47 - INFO: Starting async message processing
+api-1  | 2025-03-22 10:00:47 - INFO: Starting async response generation for message: health publications
+api-1  | 2025-03-22 10:00:47 - INFO: Creating parallel tasks for intent and quality
+api-1  | 2025-03-22 10:00:47 - INFO: Intent detected: QueryIntent.PUBLICATION (Confidence: 1.0)
+api-1  | 2025-03-22 10:00:47 - INFO: Initializing model streaming
+api-1  | INFO:     127.0.0.1:48640 - "GET /health HTTP/1.1" 200 OK
+api-1  | 2025-03-22 10:00:50 - INFO: Complete response generated. Total length: 926
+api-1  | 2025-03-22 10:00:50 - INFO: Async response generation completed. Total time: 3.05 seconds
+api-1  | 2025-03-22 10:00:50 - INFO: Message processing completed successfully
+api-1  | 2025-03-22 10:00:50 - ERROR: Database error: relation "response_quality_metrics" does not exist
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/db_utils.py", line 108, in get_connection
+api-1  |     yield connection
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 537, in record_interaction
+api-1  |     await conn.execute("""
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 352, in execute
+api-1  |     _, status, _ = await self._execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1864, in _execute
+api-1  |     result, _ = await self.__execute(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1961, in __execute
+api-1  |     result, stmt = await self._do_execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 2012, in _do_execute
+api-1  |     stmt = await self._get_statement(
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 432, in _get_statement
+api-1  |     statement = await self._protocol.prepare(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "asyncpg/protocol/protocol.pyx", line 165, in prepare
+api-1  | asyncpg.exceptions.UndefinedTableError: relation "response_quality_metrics" does not exist
+api-1  | 2025-03-22 10:00:50 - ERROR: Error recording interaction quality metrics: relation "response_quality_metrics" does not exist
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 537, in record_interaction
+api-1  |     await conn.execute("""
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 352, in execute
+api-1  |     _, status, _ = await self._execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1864, in _execute
+api-1  |     result, _ = await self.__execute(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1961, in __execute
+api-1  |     result, stmt = await self._do_execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 2012, in _do_execute
+api-1  |     stmt = await self._get_statement(
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 432, in _get_statement
+api-1  |     statement = await self._protocol.prepare(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "asyncpg/protocol/protocol.pyx", line 165, in prepare
+api-1  | asyncpg.exceptions.UndefinedTableError: relation "response_quality_metrics" does not exist
+api-1  | 2025-03-22 10:00:50 - ERROR: Detailed traceback: Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 537, in record_interaction
+api-1  |     await conn.execute("""
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 352, in execute
+api-1  |     _, status, _ = await self._execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1864, in _execute
+api-1  |     result, _ = await self.__execute(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1961, in __execute
+api-1  |     result, stmt = await self._do_execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 2012, in _do_execute
+api-1  |     stmt = await self._get_statement(
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 432, in _get_statement
+api-1  |     statement = await self._protocol.prepare(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "asyncpg/protocol/protocol.pyx", line 165, in prepare
+api-1  | asyncpg.exceptions.UndefinedTableError: relation "response_quality_metrics" does not exist
+api-1  | 
+api-1  | 2025-03-22 10:00:50 - ERROR: Critical error in message stream processing
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 311, in send_message_async
+api-1  |     await self.record_interaction(session_id, user_id, message, response_data)
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 537, in record_interaction
+api-1  |     await conn.execute("""
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 352, in execute
+api-1  |     _, status, _ = await self._execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1864, in _execute
+api-1  |     result, _ = await self.__execute(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1961, in __execute
+api-1  |     result, stmt = await self._do_execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 2012, in _do_execute
+api-1  |     stmt = await self._get_statement(
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 432, in _get_statement
+api-1  |     statement = await self._protocol.prepare(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "asyncpg/protocol/protocol.pyx", line 165, in prepare
+api-1  | asyncpg.exceptions.UndefinedTableError: relation "response_quality_metrics" does not exist
+api-1  | 2025-03-22 10:00:50 - ERROR: Error details - User ID: test_user_123, Session ID: session_test_user_123_1742637646
+api-1  | 2025-03-22 10:00:50 - ERROR: Error occurred in file: /app/ai_services_api/services/chatbot/utils/message_handler.py, line: 311
+api-1  | 2025-03-22 10:00:50 - WARNING: Yielding error message to user: I encountered an error processing your message. Please try again.
+api-1  | 2025-03-22 10:00:50 - INFO: Updated session stats for session_test_user_123_1742637646
+api-1  | 2025-03-22 10:00:50 - INFO: Async message processing concluded
+api-1  | 2025-03-22 10:00:50 - INFO: Successfully processed chat request
+api-1  | 2025-03-22 10:00:50 - INFO: Performing concurrent cache update and database save
+api-1  | 2025-03-22 10:00:50 - INFO: Chat request processing completed. Total time: 3.17 seconds
+api-1  | 2025-03-22 10:00:50 - INFO: Test chat request processed successfully - Time: 3.34s, User: test_user_123
+api-1  | INFO:     172.18.0.1:53168 - "GET /chatbot/conversation/test/chat/health%20publications?user_id=test_user_123 HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:41772 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:42156 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:41800 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:54304 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:51136 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:48212 - "GET /health HTTP/1.1" 200 OK
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/chatbot/utils/message_handler.py'. Reloading...
+api-1  | INFO:     Shutting down
+api-1  | INFO:     Waiting for application shutdown.
+api-1  | INFO:     Application shutdown complete.
+api-1  | INFO:     Finished server process [255]
+api-1  | Process SpawnProcess-2:
+api-1  | Traceback (most recent call last):
+api-1  |   File "/usr/local/lib/python3.11/multiprocessing/process.py", line 314, in _bootstrap
+api-1  |     self.run()
+api-1  |   File "/usr/local/lib/python3.11/multiprocessing/process.py", line 108, in run
+api-1  |     self._target(*self._args, **self._kwargs)
+api-1  |   File "/usr/local/lib/python3.11/site-packages/uvicorn/_subprocess.py", line 78, in subprocess_started
+api-1  |     target(sockets=sockets)
+api-1  |   File "/usr/local/lib/python3.11/site-packages/uvicorn/server.py", line 62, in run
+api-1  |     return asyncio.run(self.serve(sockets=sockets))
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/asyncio/runners.py", line 190, in run
+api-1  |     return runner.run(main)
+api-1  |            ^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/asyncio/runners.py", line 118, in run
+api-1  |     return self._loop.run_until_complete(task)
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/asyncio/base_events.py", line 654, in run_until_complete
+api-1  |     return future.result()
+api-1  |            ^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/uvicorn/server.py", line 69, in serve
+api-1  |     config.load()
+api-1  |   File "/usr/local/lib/python3.11/site-packages/uvicorn/config.py", line 458, in load
+api-1  |     self.loaded_app = import_from_string(self.app)
+api-1  |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/uvicorn/importer.py", line 21, in import_from_string
+api-1  |     module = importlib.import_module(module_str)
+api-1  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/importlib/__init__.py", line 126, in import_module
+api-1  |     return _bootstrap._gcd_import(name[level:], package, level)
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "<frozen importlib._bootstrap>", line 1204, in _gcd_import
+api-1  |   File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+api-1  |   File "<frozen importlib._bootstrap>", line 1147, in _find_and_load_unlocked
+api-1  |   File "<frozen importlib._bootstrap>", line 690, in _load_unlocked
+api-1  |   File "<frozen importlib._bootstrap_external>", line 940, in exec_module
+api-1  |   File "<frozen importlib._bootstrap>", line 241, in _call_with_frames_removed
+api-1  |   File "/app/ai_services_api/main.py", line 6, in <module>
+api-1  |     from ai_services_api.controllers.chatbot_router import api_router as chatbot_router
+api-1  |   File "/app/ai_services_api/controllers/chatbot_router.py", line 2, in <module>
+api-1  |     from ai_services_api.services.chatbot.app.endpoints import conversation
+api-1  |   File "/app/ai_services_api/services/chatbot/app/endpoints/conversation.py", line 13, in <module>
+api-1  |     from ai_services_api.services.chatbot.utils.message_handler import MessageHandler
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 170
+api-1  |     """
+api-1  |     ^^^
+api-1  | IndentationError: expected an indented block after function definition on line 169
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/chatbot/utils/message_handler.py'. Reloading...
+api-1  | 2025-03-22 10:06:49 - INFO: GeminiLLMManager initialized successfully
+api-1  | 2025-03-22 10:06:49 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-03-22 10:06:49 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-03-22 10:07:04 - INFO: ML Predictor initialized successfully
+api-1  | INFO:     Started server process [470]
+api-1  | INFO:     Waiting for application startup.
+api-1  | INFO:     Application startup complete.
+api-1  | 2025-03-22 10:07:14 - INFO: Test endpoint called with query: list for me all reproductive health publications , User: test_user_123
+api-1  | 2025-03-22 10:07:14 - INFO: Initialized connection pool for database: aphrc at postgres
+api-1  | 2025-03-22 10:07:14 - INFO: Starting chat request processing
+api-1  | 2025-03-22 10:07:14 - INFO: Performing concurrent cache check and session initialization
+api-1  | 2025-03-22 10:07:14 - INFO: Successfully connected to database: aphrc at postgres
+api-1  | 2025-03-22 10:07:14 - INFO: Created chat session: session_test_user_123_1742638034
+api-1  | 2025-03-22 10:07:14 - INFO: Initiating message stream processing with 30-second timeout
+api-1  | 2025-03-22 10:07:14 - INFO: Starting async message processing
+api-1  | 2025-03-22 10:07:14 - INFO: Starting async response generation for message: list for me all reproductive health publications 
+api-1  | 2025-03-22 10:07:14 - INFO: Creating parallel tasks for intent and quality
+api-1  | 2025-03-22 10:07:14 - INFO: Intent detected: QueryIntent.PUBLICATION (Confidence: 1.0)
+api-1  | 2025-03-22 10:07:14 - INFO: Initializing model streaming
+api-1  | 2025-03-22 10:07:16 - INFO: Complete response generated. Total length: 796
+api-1  | 2025-03-22 10:07:16 - INFO: Async response generation completed. Total time: 2.06 seconds
+api-1  | 2025-03-22 10:07:16 - INFO: Message processing completed successfully
+api-1  | 2025-03-22 10:07:16 - ERROR: Database error: relation "response_quality_metrics" does not exist
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/db_utils.py", line 108, in get_connection
+api-1  |     yield connection
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 546, in record_interaction
+api-1  |     await conn.execute("""
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 352, in execute
+api-1  |     _, status, _ = await self._execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1864, in _execute
+api-1  |     result, _ = await self.__execute(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1961, in __execute
+api-1  |     result, stmt = await self._do_execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 2012, in _do_execute
+api-1  |     stmt = await self._get_statement(
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 432, in _get_statement
+api-1  |     statement = await self._protocol.prepare(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "asyncpg/protocol/protocol.pyx", line 165, in prepare
+api-1  | asyncpg.exceptions.UndefinedTableError: relation "response_quality_metrics" does not exist
+api-1  | 2025-03-22 10:07:16 - ERROR: Error recording interaction quality metrics: relation "response_quality_metrics" does not exist
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 546, in record_interaction
+api-1  |     await conn.execute("""
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 352, in execute
+api-1  |     _, status, _ = await self._execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1864, in _execute
+api-1  |     result, _ = await self.__execute(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1961, in __execute
+api-1  |     result, stmt = await self._do_execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 2012, in _do_execute
+api-1  |     stmt = await self._get_statement(
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 432, in _get_statement
+api-1  |     statement = await self._protocol.prepare(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "asyncpg/protocol/protocol.pyx", line 165, in prepare
+api-1  | asyncpg.exceptions.UndefinedTableError: relation "response_quality_metrics" does not exist
+api-1  | 2025-03-22 10:07:16 - ERROR: Detailed traceback: Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 546, in record_interaction
+api-1  |     await conn.execute("""
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 352, in execute
+api-1  |     _, status, _ = await self._execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1864, in _execute
+api-1  |     result, _ = await self.__execute(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1961, in __execute
+api-1  |     result, stmt = await self._do_execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 2012, in _do_execute
+api-1  |     stmt = await self._get_statement(
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 432, in _get_statement
+api-1  |     statement = await self._protocol.prepare(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "asyncpg/protocol/protocol.pyx", line 165, in prepare
+api-1  | asyncpg.exceptions.UndefinedTableError: relation "response_quality_metrics" does not exist
+api-1  | 
+api-1  | 2025-03-22 10:07:16 - ERROR: Critical error in message stream processing
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 315, in send_message_async
+api-1  |     await self.record_interaction(session_id, user_id, message, response_data)
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 546, in record_interaction
+api-1  |     await conn.execute("""
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 352, in execute
+api-1  |     _, status, _ = await self._execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1864, in _execute
+api-1  |     result, _ = await self.__execute(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1961, in __execute
+api-1  |     result, stmt = await self._do_execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 2012, in _do_execute
+api-1  |     stmt = await self._get_statement(
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 432, in _get_statement
+api-1  |     statement = await self._protocol.prepare(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "asyncpg/protocol/protocol.pyx", line 165, in prepare
+api-1  | asyncpg.exceptions.UndefinedTableError: relation "response_quality_metrics" does not exist
+api-1  | 2025-03-22 10:07:16 - ERROR: Error details - User ID: test_user_123, Session ID: session_test_user_123_1742638034
+api-1  | 2025-03-22 10:07:16 - ERROR: Error occurred in file: /app/ai_services_api/services/chatbot/utils/message_handler.py, line: 315
+api-1  | 2025-03-22 10:07:16 - INFO: Error occurred but partial response exists; not appending error message
+api-1  | 2025-03-22 10:07:16 - INFO: Updated session stats for session_test_user_123_1742638034
+api-1  | 2025-03-22 10:07:16 - INFO: Async message processing concluded
+api-1  | 2025-03-22 10:07:16 - INFO: Successfully processed chat request
+api-1  | 2025-03-22 10:07:16 - INFO: Performing concurrent cache update and database save
+api-1  | 2025-03-22 10:07:16 - INFO: Chat request processing completed. Total time: 2.14 seconds
+api-1  | 2025-03-22 10:07:16 - INFO: Test chat request processed successfully - Time: 2.28s, User: test_user_123
+api-1  | INFO:     172.18.0.1:42892 - "GET /chatbot/conversation/test/chat/list%20for%20me%20all%20reproductive%20health%20publications%20?user_id=test_user_123 HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:40864 - "GET /health HTTP/1.1" 200 OK
+api-1  | 2025-03-22 10:07:40 - INFO: Adjusting Redis pool: 5 -> 10 (Load: 68.2%, Usage: 14/5)
+api-1  | 2025-03-22 10:07:40 - INFO: Test endpoint called with query: where can i get the blogs ?, User: test_user_123
+api-1  | 2025-03-22 10:07:40 - INFO: Starting chat request processing
+api-1  | 2025-03-22 10:07:40 - INFO: Performing concurrent cache check and session initialization
+api-1  | 2025-03-22 10:07:40 - INFO: Successfully connected to database: aphrc at postgres
+api-1  | 2025-03-22 10:07:40 - INFO: Created chat session: session_test_user_123_1742638060
+api-1  | 2025-03-22 10:07:40 - INFO: Initiating message stream processing with 30-second timeout
+api-1  | 2025-03-22 10:07:40 - INFO: Starting async message processing
+api-1  | 2025-03-22 10:07:40 - INFO: Starting async response generation for message: where can i get the blogs ?
+api-1  | 2025-03-22 10:07:40 - INFO: Creating parallel tasks for intent and quality
+api-1  | 2025-03-22 10:07:40 - INFO: Intent detected: QueryIntent.NAVIGATION (Confidence: 0.8)
+api-1  | 2025-03-22 10:07:40 - INFO: Initializing model streaming
+api-1  | 2025-03-22 10:07:43 - INFO: Complete response generated. Total length: 379
+api-1  | 2025-03-22 10:07:43 - INFO: Async response generation completed. Total time: 2.27 seconds
+api-1  | 2025-03-22 10:07:43 - INFO: Message processing completed successfully
+api-1  | 2025-03-22 10:07:43 - ERROR: Database error: relation "response_quality_metrics" does not exist
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/db_utils.py", line 108, in get_connection
+api-1  |     yield connection
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 546, in record_interaction
+api-1  |     await conn.execute("""
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 352, in execute
+api-1  |     _, status, _ = await self._execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1864, in _execute
+api-1  |     result, _ = await self.__execute(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1961, in __execute
+api-1  |     result, stmt = await self._do_execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 2012, in _do_execute
+api-1  |     stmt = await self._get_statement(
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 432, in _get_statement
+api-1  |     statement = await self._protocol.prepare(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "asyncpg/protocol/protocol.pyx", line 165, in prepare
+api-1  | asyncpg.exceptions.UndefinedTableError: relation "response_quality_metrics" does not exist
+api-1  | 2025-03-22 10:07:43 - ERROR: Error recording interaction quality metrics: relation "response_quality_metrics" does not exist
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 546, in record_interaction
+api-1  |     await conn.execute("""
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 352, in execute
+api-1  |     _, status, _ = await self._execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1864, in _execute
+api-1  |     result, _ = await self.__execute(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1961, in __execute
+api-1  |     result, stmt = await self._do_execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 2012, in _do_execute
+api-1  |     stmt = await self._get_statement(
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 432, in _get_statement
+api-1  |     statement = await self._protocol.prepare(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "asyncpg/protocol/protocol.pyx", line 165, in prepare
+api-1  | asyncpg.exceptions.UndefinedTableError: relation "response_quality_metrics" does not exist
+api-1  | 2025-03-22 10:07:43 - ERROR: Detailed traceback: Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 546, in record_interaction
+api-1  |     await conn.execute("""
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 352, in execute
+api-1  |     _, status, _ = await self._execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1864, in _execute
+api-1  |     result, _ = await self.__execute(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1961, in __execute
+api-1  |     result, stmt = await self._do_execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 2012, in _do_execute
+api-1  |     stmt = await self._get_statement(
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 432, in _get_statement
+api-1  |     statement = await self._protocol.prepare(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "asyncpg/protocol/protocol.pyx", line 165, in prepare
+api-1  | asyncpg.exceptions.UndefinedTableError: relation "response_quality_metrics" does not exist
+api-1  | 
+api-1  | 2025-03-22 10:07:43 - ERROR: Critical error in message stream processing
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 315, in send_message_async
+api-1  |     await self.record_interaction(session_id, user_id, message, response_data)
+api-1  |   File "/app/ai_services_api/services/chatbot/utils/message_handler.py", line 546, in record_interaction
+api-1  |     await conn.execute("""
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 352, in execute
+api-1  |     _, status, _ = await self._execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1864, in _execute
+api-1  |     result, _ = await self.__execute(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 1961, in __execute
+api-1  |     result, stmt = await self._do_execute(
+api-1  |                    ^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 2012, in _do_execute
+api-1  |     stmt = await self._get_statement(
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.11/site-packages/asyncpg/connection.py", line 432, in _get_statement
+api-1  |     statement = await self._protocol.prepare(
+api-1  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "asyncpg/protocol/protocol.pyx", line 165, in prepare
+api-1  | asyncpg.exceptions.UndefinedTableError: relation "response_quality_metrics" does not exist
+api-1  | 2025-03-22 10:07:43 - ERROR: Error details - User ID: test_user_123, Session ID: session_test_user_123_1742638060
+api-1  | 2025-03-22 10:07:43 - ERROR: Error occurred in file: /app/ai_services_api/services/chatbot/utils/message_handler.py, line: 315
+api-1  | 2025-03-22 10:07:43 - INFO: Error occurred but partial response exists; not appending error message
+api-1  | 2025-03-22 10:07:43 - INFO: Updated session stats for session_test_user_123_1742638060
+api-1  | 2025-03-22 10:07:43 - INFO: Async message processing concluded
+api-1  | 2025-03-22 10:07:43 - INFO: Successfully processed chat request
+api-1  | 2025-03-22 10:07:43 - INFO: Performing concurrent cache update and database save
+api-1  | 2025-03-22 10:07:43 - INFO: Chat request processing completed. Total time: 2.39 seconds
+api-1  | 2025-03-22 10:07:43 - INFO: Test chat request processed successfully - Time: 2.40s, User: test_user_123
+api-1  | INFO:     172.18.0.1:57694 - "GET /chatbot/conversation/test/chat/where%20can%20i%20get%20the%20blogs%20%3F?user_id=test_user_123 HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:54730 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:43242 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:38518 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:42186 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:52052 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:45958 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:49824 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:55332 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:48532 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:46910 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:59980 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:40594 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:40454 - "GET /health HTTP/1.1" 200 OK
