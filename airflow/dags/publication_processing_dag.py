@@ -26,9 +26,32 @@ from ai_services_api.services.centralized_repository.knowhub.knowhub_scraper imp
 from ai_services_api.services.centralized_repository.website.website_scraper import WebsiteScraper
 from ai_services_api.services.centralized_repository.nexus.researchnexus_scraper import ResearchNexusScraper
 
+def get_test_limit():
+    """Get the test limit from environment variables."""
+    # Default to None (no limit) if not in testing mode
+    test_limit = None
+    
+    # Check if we're in testing mode
+    is_testing = os.getenv('AIRFLOW_TESTING_MODE', 'false').lower() == 'true'
+    
+    if is_testing:
+        # Get the test limit from environment variables, default to 10 items
+        try:
+            test_limit = int(os.getenv('AIRFLOW_TEST_ITEM_LIMIT', '10'))
+            logger.info(f"Running in testing mode with item limit: {test_limit}")
+        except ValueError:
+            # If the value is not a valid integer, default to 10
+            test_limit = 10
+            logger.warning(f"Invalid test limit in environment variable, using default: {test_limit}")
+    
+    return test_limit
+
 def process_publications_task():
     """Process publications from all sources."""
     load_environment_variables()
+    
+    # Get the test limit for all sources
+    test_limit = get_test_limit()
     
     try:
         # Initialize processors
@@ -46,27 +69,38 @@ def process_publications_task():
             {
                 'name': 'openalex', 
                 'processor': openalex_processor,
-                'method': openalex_processor.process_publications
+                'method': openalex_processor.process_publications,
+                'supports_limit': True  # Flag to indicate if the source supports limiting
             },
             {
                 'name': 'orcid', 
                 'processor': OrcidProcessor(),
-                'method': OrcidProcessor().process_publications
+                'method': OrcidProcessor().process_publications,
+                'supports_limit': True
             },
             {
                 'name': 'knowhub', 
                 'processor': KnowhubScraper(summarizer=text_summarizer),
-                'method': lambda: KnowhubScraper(text_summarizer).fetch_all_content(limit=2)
+                'method': lambda limit=None: KnowhubScraper(text_summarizer).fetch_all_content(
+                    limit=limit if limit is not None else 2
+                ),
+                'supports_limit': True
             },
             {
                 'name': 'researchnexus', 
                 'processor': ResearchNexusScraper(summarizer=text_summarizer),
-                'method': lambda: ResearchNexusScraper(text_summarizer).fetch_content(limit=2)
+                'method': lambda limit=None: ResearchNexusScraper(text_summarizer).fetch_content(
+                    limit=limit if limit is not None else 2
+                ),
+                'supports_limit': True
             },
             {
                 'name': 'website', 
                 'processor': WebsiteScraper(summarizer=text_summarizer),
-                'method': lambda: WebsiteScraper(text_summarizer).fetch_content(limit=2)
+                'method': lambda limit=None: WebsiteScraper(text_summarizer).fetch_content(
+                    limit=limit if limit is not None else 2
+                ),
+                'supports_limit': True
             }
         ]
         
@@ -77,19 +111,37 @@ def process_publications_task():
                 
                 # Different sources have slightly different processing methods
                 if source_config['name'] in ['knowhub', 'researchnexus', 'website']:
-                    content = source_config['method']()
+                    # Apply test limit if in testing mode and source supports limiting
+                    if test_limit is not None and source_config['supports_limit']:
+                        content = source_config['method'](limit=test_limit)
+                        logger.info(f"Fetching up to {test_limit} items from {source_config['name']} (testing mode)")
+                    else:
+                        content = source_config['method']()
                     
                     # For sources that return multiple content types or items
                     if isinstance(content, dict):
                         for content_type, items in content.items():
-                            for item in items:
+                            # Apply a secondary limit to the number of items processed if in testing mode
+                            items_to_process = items[:test_limit] if test_limit is not None else items
+                            for item in items_to_process:
                                 publication_processor.process_single_work(item, source=source_config['name'])
                     elif isinstance(content, list):
-                        for item in content:
+                        # Apply a secondary limit to the number of items processed if in testing mode
+                        items_to_process = content[:test_limit] if test_limit is not None else content
+                        for item in items_to_process:
                             publication_processor.process_single_work(item, source=source_config['name'])
                 else:
                     # For processors like OpenAlex and ORCID
-                    source_config['method'](publication_processor, source=source_config['name'])
+                    # Pass the test_limit as a keyword argument if in testing mode
+                    if test_limit is not None and source_config['supports_limit']:
+                        source_config['method'](
+                            publication_processor, 
+                            source=source_config['name'],
+                            limit=test_limit
+                        )
+                        logger.info(f"Processing up to {test_limit} items from {source_config['name']} (testing mode)")
+                    else:
+                        source_config['method'](publication_processor, source=source_config['name'])
                 
                 logger.info(f"Completed processing publications from {source_config['name']} source")
             

@@ -4,6 +4,7 @@ from airflow.utils.dates import days_ago
 from datetime import timedelta
 import logging
 import os
+import asyncio
 
 # Import email notification functions
 from airflow_utils import setup_logging, load_environment_variables, success_email, failure_email
@@ -52,6 +53,12 @@ def load_environment_variables():
     logger.info(f"Web Content Processing Configuration: {config}")
     return config
 
+async def process_content_async(processor):
+    """
+    Run the process_content method asynchronously
+    """
+    return await processor.process_content()
+
 def process_web_content_task():
     """
     Process web content with minimal dependencies and optimized loading
@@ -66,12 +73,12 @@ def process_web_content_task():
     )()
     
     try:
-        # Process content with configured parameters
-        results = WebContentProcessor.process_content(
-            max_workers=config['max_workers'],
-            max_pages=config['max_pages'],
-            batch_size=config['batch_size']
-        )
+        # Create an instance of WebContentProcessor
+        processor = WebContentProcessor()
+        
+        # Process content asynchronously
+        # We need to run the async function in the event loop
+        results = asyncio.run(process_content_async(processor))
         
         # Log processing results with detailed breakdown
         logger.info(f"""Web Content Processing Results:
@@ -94,9 +101,9 @@ def process_web_content_task():
         raise
     finally:
         # Ensure proper cleanup
-        if 'WebContentProcessor' in locals():
+        if 'processor' in locals():
             try:
-                WebContentProcessor.cleanup()
+                processor.cleanup()
             except Exception as cleanup_error:
                 logger.error(f"Error during cleanup: {cleanup_error}")
 
