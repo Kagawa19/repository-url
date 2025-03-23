@@ -45,7 +45,8 @@ run_setup() {
     local setup_args=""
     
     # Build setup arguments from environment variables
-    for flag in DATABASE EXPERTS OPENALEX PUBLICATIONS GRAPH SEARCH REDIS SCRAPING CLASSIFICATION; do
+    # Removed "EXPERTS" from the list of flags
+    for flag in DATABASE OPENALEX PUBLICATIONS GRAPH SEARCH REDIS SCRAPING CLASSIFICATION; do
         skip_var="SKIP_${flag}"  # Construct the dynamic variable name
         if [ "${!skip_var:-false}" = "true" ]; then  # Use indirect expansion
             setup_args="$setup_args --skip-${flag,,}"  # Append to setup_args

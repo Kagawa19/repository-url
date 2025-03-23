@@ -224,7 +224,7 @@ services:
     user: "${UID:-1001}:${GID:-125}"
     restart: unless-stopped
 
-  # New Airflow initialization service
+  # Fixed Airflow initialization service
   airflow-init:
     build:
       context: .
