@@ -65,7 +65,7 @@ app.add_event_handler("shutdown", shutdown_event)
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://10.176.203.79:3001", "http://10.176.203.79", "http://localhost"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
