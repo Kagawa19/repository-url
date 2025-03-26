@@ -50,21 +50,17 @@ class ExpertSearchIndexManager:
             decode_responses=False
         )
 
+        
+        
+
+        # First, the corrected ExpertSearchIndexManager methods with original names:
+
     def create_expert_text(self, expert: Dict[str, Any]) -> str:
         """Create searchable text from expert data."""
-        specialties = expert['specialties']
         text_parts = [
             f"First Name: {expert['first_name']}",
             f"Last Name: {expert['last_name']}",
-            f"Theme: {expert['theme']}",
-            f"Unit: {expert['unit']}",
-            f"Contact: {expert['contact']}",
-            f"Bio: {expert.get('bio', '')}",
-            f"Expertise: {' | '.join(specialties['expertise'])}",
-            f"Domains: {' | '.join(specialties['domains'])}",
-            f"Fields: {' | '.join(specialties['fields'])}",
-            f"Subfields: {' | '.join(specialties['subfields'])}",
-            f"Status: {'Active' if expert['is_active'] else 'Inactive'}"
+            f"Expertise: {' | '.join(expert['knowledge_expertise'])}"
         ]
         return '\n'.join(text_parts)
 
@@ -91,26 +87,15 @@ class ExpertSearchIndexManager:
                             continue
                         return []
                     
-                    # Fetch expert data
+                    # Fetch only the required columns
                     cur.execute("""
                         SELECT 
                             id,
                             first_name,
                             last_name,
-                            designation,
-                            theme,
-                            unit,
-                            contact_details,
-                            knowledge_expertise,
-                            orcid,
-                            domains,
-                            fields,
-                            subfields,
-                            is_active,
-                            bio
+                            knowledge_expertise
                         FROM experts_expert
                         WHERE id IS NOT NULL
-                        AND is_active = true
                     """)
                     rows = cur.fetchall()
                     
@@ -119,22 +104,9 @@ class ExpertSearchIndexManager:
                         try:
                             expert = {
                                 'id': row[0],
-                                'first_name': row[1],  # Keep first_name separate
-                                'last_name': row[2],  
-                                'designation': row[3] or '',
-                                'theme': row[4] or '',
-                                'unit': row[5] or '',
-                                'contact': row[6] or '',
-                                'specialties': {
-                                    'expertise': row[7] if isinstance(row[7], list) else json.loads(row[7]) if row[7] else [],
-                                    'domains': row[9] if row[9] else [],
-                                    'fields': row[10] if row[10] else [],
-                                    'subfields': row[11] if row[11] else []
-                                },
-                                'orcid': row[8],
-                                'is_active': row[12],
-                                'bio': row[13] or '',
-                                'knowledge_expertise': row[7] if isinstance(row[7], list) else json.loads(row[7]) if row[7] else []
+                                'first_name': row[1] or '',
+                                'last_name': row[2] or '',
+                                'knowledge_expertise': row[3] if isinstance(row[3], list) else json.loads(row[3]) if row[3] else []
                             }
                             experts.append(expert)
                         except Exception as e:
@@ -171,14 +143,7 @@ class ExpertSearchIndexManager:
                         'id': metadata['id'],
                         'first_name': metadata['first_name'],
                         'last_name': metadata['last_name'],
-                        'designation': metadata['designation'],
-                        'theme': metadata['theme'],
-                        'unit': metadata['unit'],
-                        'contact': metadata['contact'],
-                        'specialties': metadata['specialties'],
-                        'is_active': metadata['is_active'],
-                        'bio': metadata.get('bio', ''),
-                        'knowledge_expertise': metadata.get('knowledge_expertise', [])
+                        'knowledge_expertise': metadata['knowledge_expertise']
                     })
                 }
             )
@@ -215,12 +180,7 @@ class ExpertSearchIndexManager:
                         'id': expert['id'],
                         'first_name': expert['first_name'],
                         'last_name': expert['last_name'],
-                        'designation': expert['designation'],
-                        'theme': expert['theme'],
-                        'unit': expert['unit'],
-                        'contact': expert['contact'],
-                        'specialties': expert['specialties'],
-                        'is_active': expert['is_active']
+                        'knowledge_expertise': expert['knowledge_expertise']
                     }
                 )
                 
@@ -239,14 +199,14 @@ class ExpertSearchIndexManager:
             logger.error(f"Error creating FAISS index: {e}")
             return False
 
-    def search_experts(self, query: str, k: int = 5, active_only: bool = True) -> List[Dict[str, Any]]:
+    def search_experts(self, query: str, k: int = 5, active_only: bool = False) -> List[Dict[str, Any]]:
         """
         Search for similar experts using the index.
         
         Args:
             query (str): Search query
             k (int): Number of results to return
-            active_only (bool): Whether to return only active experts
+            active_only (bool): Whether to return only active experts (ignored in this simplified version)
             
         Returns:
             List of expert matches with metadata
@@ -260,9 +220,8 @@ class ExpertSearchIndexManager:
             # Generate query embedding
             query_embedding = self.model.encode([query], convert_to_numpy=True)
             
-            # Search index with extra results to account for filtering
-            extra_k = k * 2 if active_only else k
-            distances, indices = index.search(query_embedding.astype(np.float32), extra_k)
+            # Search index
+            distances, indices = index.search(query_embedding.astype(np.float32), k)
             
             # Fetch results from Redis
             results = []
@@ -275,17 +234,8 @@ class ExpertSearchIndexManager:
                 
                 if expert_data:
                     metadata = json.loads(expert_data[b'metadata'].decode())
-                    
-                    # Filter active/inactive experts
-                    if active_only and not metadata.get('is_active', False):
-                        continue
-                        
                     metadata['score'] = float(1 / (1 + distances[0][i]))  # Convert distance to similarity score
                     results.append(metadata)
-                    
-                    # Break if we have enough results after filtering
-                    if len(results) >= k:
-                        break
             
             return results
 
@@ -293,6 +243,222 @@ class ExpertSearchIndexManager:
             logger.error(f"Error searching experts: {e}")
             return []
 
+    def _parse_jsonb(self, data):
+        """Parse JSONB data safely."""
+        if not data:
+            return []
+        try:
+            if isinstance(data, str):
+                return json.loads(data)
+            return data
+        except:
+            return []
+
+    # Add this method to the ExpertSearchIndexManager class, and update the fetch_experts method:
+
+    def fetch_experts(self) -> List[Dict[str, Any]]:
+        """Fetch all experts with retry logic."""
+        max_retries = 3
+        retry_delay = 5
+        
+        for attempt in range(max_retries):
+            try:
+                conn = self.db.get_connection()
+                with conn.cursor() as cur:
+                    # Check if table exists
+                    cur.execute("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_name = 'experts_expert'
+                        );
+                    """)
+                    if not cur.fetchone()[0]:
+                        logger.warning("experts_expert table does not exist")
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+                            continue
+                        return []
+                    
+                    # Fetch only the required columns
+                    cur.execute("""
+                        SELECT 
+                            id,
+                            first_name,
+                            last_name,
+                            knowledge_expertise
+                        FROM experts_expert
+                        WHERE id IS NOT NULL
+                    """)
+                    rows = cur.fetchall()
+                    
+                    experts = []
+                    for row in rows:
+                        try:
+                            expert = {
+                                'id': row[0],
+                                'first_name': row[1] or '',
+                                'last_name': row[2] or '',
+                                'knowledge_expertise': self._parse_jsonb(row[3])
+                            }
+                            experts.append(expert)
+                        except Exception as e:
+                            logger.error(f"Error processing expert data: {e}")
+                    
+                    return experts
+                    
+            except Exception as e:
+                logger.error(f"Attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                else:
+                    logger.error("All retry attempts failed")
+                    return []
+            finally:
+                if 'conn' in locals():
+                    conn.close()
+
+    def _create_text_content(self, expert: Dict[str, Any]) -> str:
+        """Create combined text content for embedding with only required fields."""
+        try:
+            # Ensure we have at least basic information
+            name_parts = []
+            if expert.get('first_name'):
+                name_parts.append(str(expert['first_name']).strip())
+            if expert.get('last_name'):
+                name_parts.append(str(expert['last_name']).strip())
+            
+            # Start with basic identity
+            text_parts = []
+            if name_parts:
+                text_parts.append(f"Name: {' '.join(name_parts)}")
+            else:
+                text_parts.append("Name: Unknown Expert")
+
+            # Handle knowledge expertise
+            expertise = expert.get('knowledge_expertise', {})
+            if expertise and isinstance(expertise, dict):
+                for key, value in expertise.items():
+                    if value:
+                        if isinstance(value, list):
+                            # Clean list values
+                            clean_values = [str(v).strip() for v in value if v is not None]
+                            clean_values = [v for v in clean_values if v]  # Remove empty strings
+                            if clean_values:
+                                text_parts.append(f"{key.title()}: {' | '.join(clean_values)}")
+                        elif isinstance(value, (str, int, float)):
+                            # Handle single values
+                            clean_value = str(value).strip()
+                            if clean_value:
+                                text_parts.append(f"{key.title()}: {clean_value}")
+            elif expertise and isinstance(expertise, list):
+                # Handle case where knowledge_expertise is a list
+                clean_values = [str(v).strip() for v in expertise if v is not None]
+                clean_values = [v for v in clean_values if v]  # Remove empty strings
+                if clean_values:
+                    text_parts.append(f"Expertise: {' | '.join(clean_values)}")
+
+            # Join all parts and ensure we have content
+            final_text = '\n'.join(text_parts)
+            if not final_text.strip():
+                return "Unknown Expert Profile"
+                
+            return final_text
+            
+        except Exception as e:
+            logger.error(f"Error creating text content for expert {expert.get('id', 'Unknown')}: {e}")
+            return "Error Processing Expert Profile"
+
+    def _store_expert_data(self, expert: Dict[str, Any], text_content: str, 
+                        embedding: np.ndarray) -> None:
+        """Store expert data in Redis with only required fields."""
+        base_key = f"expert:{expert['id']}"
+        
+        pipeline = self.redis_text.pipeline()
+        try:
+            # Store text content
+            pipeline.set(f"text:{base_key}", text_content)
+            
+            # Store embedding as binary
+            self.redis_binary.set(
+                f"emb:{base_key}", 
+                embedding.astype(np.float32).tobytes()
+            )
+            
+            # Store only required metadata
+            metadata = {
+                'id': str(expert['id']),  # Ensure id is string
+                'name': f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip(),
+                'first_name': str(expert.get('first_name', '')),
+                'last_name': str(expert.get('last_name', '')),
+                'expertise': json.dumps(expert.get('knowledge_expertise', {}))
+            }
+            pipeline.hset(f"meta:{base_key}", mapping=metadata)
+            
+            pipeline.execute()
+            
+        except Exception as e:
+            pipeline.reset()
+            raise e
+
+    def create_redis_index(self) -> bool:
+        """Create Redis indexes for experts with only required fields."""
+        try:
+            logger.info("Creating Redis indexes for experts...")
+            
+            # Step 1: Process experts
+            experts = self.fetch_experts()
+            
+            if not experts:
+                logger.warning("No experts found to index")
+                return False
+            
+            success_count = 0
+            error_count = 0
+            
+            # Step 2: Index experts
+            logger.info(f"Processing {len(experts)} experts for indexing")
+            for expert in experts:
+                try:
+                    expert_id = expert.get('id', 'Unknown')
+                    logger.info(f"Processing expert {expert_id}")
+                    
+                    # Create text content with additional logging
+                    text_content = self._create_text_content(expert)
+                    if not text_content or text_content.isspace():
+                        logger.warning(f"Empty text content generated for expert {expert_id}")
+                        continue
+
+                    # Log the text content for debugging
+                    logger.debug(f"Text content for expert {expert_id}: {text_content[:100]}...")
+                    
+                    # Generate embedding with explicit error handling
+                    try:
+                        if not isinstance(text_content, str):
+                            text_content = str(text_content)
+                        embedding = self.embedding_model.encode(text_content)
+                        if embedding is None or not isinstance(embedding, np.ndarray):
+                            logger.error(f"Invalid embedding generated for expert {expert_id}")
+                            continue
+                    except Exception as embed_err:
+                        logger.error(f"Embedding generation failed for expert {expert_id}: {embed_err}")
+                        continue
+                    
+                    # Store in Redis
+                    self._store_expert_data(expert, text_content, embedding)
+                    success_count += 1
+                    logger.info(f"Successfully indexed expert {expert_id}")
+                    
+                except Exception as e:
+                    error_count += 1
+                    logger.error(f"Error indexing expert {expert.get('id', 'Unknown')}: {str(e)}")
+                    continue
+            
+            logger.info(f"Indexing complete. Successes: {success_count}, Failures: {error_count}")
+            return success_count > 0
+            
+        except Exception as e:
+            logger.error(f"Fatal error in create_redis_index: {e}")
+            return False
 def initialize_expert_search():
     """Initialize expert search index."""
     try:
