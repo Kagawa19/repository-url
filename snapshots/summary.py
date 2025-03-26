@@ -35,50 +35,40 @@ if not GEMINI_API_KEY:
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-def list_available_models():
-    """
-    List available Gemini models
-    """
-    try:
-        # Convert generator to list for easier manipulation
-        models = list(genai.list_models())
-        logger.info("Available Gemini Models:")
-        for m in models:
-            logger.info(f"- {m.name}")
-        return models
-    except Exception as e:
-        logger.error(f"Error listing models: {e}")
-        return []
-
 def get_best_model():
     """
     Find the best available text generation model
     Prioritize fastest models
     """
-    models = list_available_models()
-    
-    # Priority list of model names to try (fastest first)
-    model_priorities = [
-        'gemini-1.5-flash-latest',  # Fastest model
-        'gemini-1.5-flash',
-        'gemini-1.5-pro-latest',
-        'gemini-1.5-pro'
-    ]
-    
-    for priority_model in model_priorities:
-        for model in models:
-            if priority_model in model.name:
-                logger.info(f"Selected model: {model.name}")
-                return model.name
-    
-    # Fallback
-    if models:
-        fallback_model = models[0].name
-        logger.warning(f"No preferred model found. Using fallback model: {fallback_model}")
-        return fallback_model
-    
-    logger.error("No available models found!")
-    return None
+    try:
+        # Convert generator to list for easier manipulation
+        models = list(genai.list_models())
+        
+        # Priority list of model names to try (fastest first)
+        model_priorities = [
+            'gemini-1.5-flash-latest',  # Fastest model
+            'gemini-1.5-flash',
+            'gemini-1.5-pro-latest',
+            'gemini-1.5-pro'
+        ]
+        
+        for priority_model in model_priorities:
+            for model in models:
+                if priority_model in model.name:
+                    logger.info(f"Selected model: {model.name}")
+                    return model.name
+        
+        # Fallback
+        if models:
+            fallback_model = models[0].name
+            logger.warning(f"No preferred model found. Using fallback model: {fallback_model}")
+            return fallback_model
+        
+        logger.error("No available models found!")
+        return None
+    except Exception as e:
+        logger.error(f"Error getting best model: {e}")
+        return None
 
 def generate_summary(text, model_name, max_length=300):
     """
@@ -102,7 +92,8 @@ def generate_summary(text, model_name, max_length=300):
         # Craft a prompt that encourages concise summarization
         prompt = f"""Provide a concise, informative summary of the following text. 
         The summary should be clear, capture the key points, and be no more than {max_length} words. 
-        If the text is very short or lacks substantial content, create a brief descriptive summary:
+        If the text is very short or lacks substantial content, create a brief descriptive summary.
+        Ensure the summary is meaningful and provides value:
 
         TEXT: {text}
         
@@ -121,30 +112,31 @@ def generate_summary(text, model_name, max_length=300):
         logger.error(f"Error generating summary with {model_name}: {e}")
         return ""
 
-def fetch_resources_without_summary(batch_size=100):
+def fetch_problematic_resources(batch_size=100):
     """
-    Fetch resources that don't have a summary
+    Fetch resources with problematic summaries
     
     Args:
         batch_size (int): Number of resources to fetch in one batch
     
     Returns:
-        list: List of resources without summaries
+        list: List of resources with problematic summaries
     """
     conn = psycopg2.connect(**DB_PARAMS)
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Fetch resources without a summary
+            # Fetch resources with the specific error message
             cur.execute("""
                 SELECT id, title, abstract, description, type
                 FROM resources_resource
-                WHERE summary IS NULL OR summary = ''
+                WHERE summary = 'Failed to generate content due to technical issues'
+                   OR summary LIKE '%Failed to generate content%'
                 LIMIT %s
             """, (batch_size,))
             
             return cur.fetchall()
     except Exception as e:
-        logger.error(f"Error fetching resources: {e}")
+        logger.error(f"Error fetching problematic resources: {e}")
         return []
     finally:
         conn.close()
@@ -172,7 +164,7 @@ def update_resource_summary(resource_id, summary):
     finally:
         conn.close()
 
-def process_resource(resource, model_name):
+def process_problematic_resource(resource, model_name):
     """
     Process a single resource to generate and update its summary
     
@@ -195,15 +187,19 @@ def process_resource(resource, model_name):
     # Generate summary
     summary = generate_summary(text_source, model_name)
     
+    # Ensure we have a meaningful summary
+    if not summary:
+        # Fallback summary if generation fails
+        summary = f"Summary for {resource['title']} could not be generated."
+    
     # Update database
-    if summary:
-        update_resource_summary(resource['id'], summary)
+    update_resource_summary(resource['id'], summary)
     
     return (resource['id'], summary)
 
 def main():
     """
-    Main function to generate summaries for resources without summaries
+    Main function to regenerate summaries for problematic resources
     """
     try:
         # Get the best available model
@@ -213,23 +209,23 @@ def main():
             return
         
         while True:
-            # Fetch resources without summaries
-            resources = fetch_resources_without_summary()
+            # Fetch problematic resources
+            resources = fetch_problematic_resources()
             
-            # Break if no more resources
+            # Break if no more problematic resources
             if not resources:
-                logger.info("No more resources without summaries.")
+                logger.info("No more problematic resources.")
                 break
             
-            logger.info(f"Processing {len(resources)} resources")
+            logger.info(f"Processing {len(resources)} problematic resources")
             
             # Use concurrent processing to speed up summary generation
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                 # Use tqdm for progress tracking
                 list(tqdm(
-                    executor.map(lambda r: process_resource(r, model_name), resources), 
+                    executor.map(lambda r: process_problematic_resource(r, model_name), resources), 
                     total=len(resources), 
-                    desc="Generating Summaries"
+                    desc="Regenerating Summaries"
                 ))
             
             # Short pause to prevent overwhelming the API
