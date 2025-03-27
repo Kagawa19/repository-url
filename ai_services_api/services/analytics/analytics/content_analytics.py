@@ -114,6 +114,7 @@ def get_content_metrics(
         resources_exist = check_table_exists(conn, 'resources_resource')
         experts_exist = check_table_exists(conn, 'experts_expert')
         messages_exist = check_table_exists(conn, 'expert_messages')
+        domains_metadata_exists = check_table_exists(conn, 'domains_metadata')
         
         # Prepare date filtering conditions
         date_condition = ""
@@ -219,6 +220,102 @@ def get_content_metrics(
                 if source_data:
                     source_df = pd.DataFrame(source_data, columns=['source', 'count'])
                     metrics['source_distribution'] = source_df
+                
+                # Get domain distribution from resources
+                if 'domains' in resource_columns:
+                    try:
+                        domain_query = f"""
+                            SELECT 
+                                d.domain,
+                                COUNT(*) as resource_count
+                            FROM resources_resource e, 
+                                UNNEST(e.domains) d(domain)
+                            WHERE 1=1 {date_condition}
+                            GROUP BY d.domain
+                            ORDER BY resource_count DESC
+                            LIMIT 15
+                        """
+                        
+                        cursor.execute(domain_query, tuple(date_params))
+                        
+                        domain_data = cursor.fetchall()
+                        if domain_data:
+                            domain_df = pd.DataFrame(domain_data, columns=['domain', 'resource_count'])
+                            # Add to metrics dictionary
+                            metrics['resource_domain_distribution'] = domain_df
+                    except Exception as e:
+                        logger.error(f"Error getting resource domain distribution: {e}")
+                
+                # Get topics distribution from resources
+                if 'topics' in resource_columns:
+                    try:
+                        # Count publications by topic
+                        topics_query = f"""
+                            SELECT 
+                                jsonb_array_elements_text(topics) AS topic,
+                                COUNT(*) AS count
+                            FROM resources_resource
+                            WHERE topics IS NOT NULL AND topics != '[]'::jsonb {date_condition}
+                            GROUP BY topic
+                            ORDER BY count DESC
+                            LIMIT 15
+                        """
+                        
+                        cursor.execute(topics_query, tuple(date_params))
+                        
+                        topics_data = cursor.fetchall()
+                        if topics_data:
+                            topics_df = pd.DataFrame(topics_data, columns=['topic', 'count'])
+                            # Add to metrics dictionary
+                            metrics['resource_topics_distribution'] = topics_df
+                    except Exception as e:
+                        logger.error(f"Error getting resource topics distribution: {e}")
+        
+        # Get domains_metadata table statistics
+        if domains_metadata_exists:
+            try:
+                # Get all domains and their publication counts
+                domain_query = """
+                    SELECT 
+                        domain_name,
+                        publication_count,
+                        last_updated,
+                        jsonb_array_length(topics) as topic_count
+                    FROM domains_metadata
+                    ORDER BY publication_count DESC
+                    LIMIT 20
+                """
+                
+                cursor.execute(domain_query)
+                
+                domain_data = cursor.fetchall()
+                if domain_data:
+                    domain_df = pd.DataFrame(domain_data, columns=['domain_name', 'publication_count', 'last_updated', 'topic_count'])
+                    # Add to metrics dictionary
+                    metrics['domain_metadata'] = domain_df
+                
+                # Get topic distribution across all domains
+                topic_query = """
+                    SELECT 
+                        t.topic,
+                        COUNT(*) as domain_count,
+                        SUM(d.publication_count) as publication_count
+                    FROM domains_metadata d,
+                        jsonb_array_elements_text(d.topics) t(topic)
+                    GROUP BY t.topic
+                    ORDER BY publication_count DESC
+                    LIMIT 30
+                """
+                
+                cursor.execute(topic_query)
+                
+                topic_data = cursor.fetchall()
+                if topic_data:
+                    topic_df = pd.DataFrame(topic_data, columns=['topic', 'domain_count', 'publication_count'])
+                    # Add to metrics dictionary
+                    metrics['topic_metadata'] = topic_df
+            except Exception as e:
+                logger.error(f"Error getting domains_metadata statistics: {e}")
         
         # Get expert metrics if experts_expert table exists
         if experts_exist:
@@ -399,8 +496,10 @@ def display_content_analytics(
     has_resource_data = 'resource_metrics' in metrics and not metrics['resource_metrics'].empty
     has_expert_data = 'expert_metrics' in metrics and not metrics['expert_metrics'].empty
     has_message_data = 'message_metrics' in metrics and not metrics['message_metrics'].empty
+    has_domain_metadata = 'domain_metadata' in metrics and not metrics['domain_metadata'].empty
+    has_topic_metadata = 'topic_metadata' in metrics and not metrics['topic_metadata'].empty
     
-    if not (has_resource_data or has_expert_data or has_message_data):
+    if not (has_resource_data or has_expert_data or has_message_data or has_domain_metadata):
         st.warning("No content data available for the selected period.")
         return
     
@@ -458,21 +557,18 @@ def display_content_analytics(
             unsafe_allow_html=True
         )
     
-    # Drafts KPI
+    # Domains KPI
     with col4:
-        draft_count = 0
-        draft_percentage = 0
-        if has_message_data and 'draft_count' in metrics['message_metrics'].columns:
-            draft_count = metrics['message_metrics']['draft_count'].iloc[0]
-            total = metrics['message_metrics']['total_messages'].iloc[0]
-            draft_percentage = (draft_count / total * 100) if total > 0 else 0
+        total_domains = 0
+        if has_domain_metadata:
+            total_domains = len(metrics['domain_metadata'])
         
         st.markdown(
             f"""
             <div style="background-color:#f0f2f6;padding:20px;border-radius:10px;text-align:center;margin:5px;">
-                <h4 style="margin:0;padding:0;color:#31333F;">Draft Messages</h4>
-                <h2 style="margin:0;padding:10px 0;color:#d62728;font-size:28px;">{draft_percentage:.1f}%</h2>
-                <p style="margin:0;color:#666;font-size:14px;">{draft_count:,} Draft Messages</p>
+                <h4 style="margin:0;padding:0;color:#31333F;">Knowledge Domains</h4>
+                <h2 style="margin:0;padding:10px 0;color:#9467bd;font-size:28px;">{total_domains:,}</h2>
+                <p style="margin:0;color:#666;font-size:14px;">Classification Domains</p>
             </div>
             """,
             unsafe_allow_html=True
@@ -481,7 +577,7 @@ def display_content_analytics(
     st.markdown("---")
     
     # Create tabs for different visualizations
-    tab1, tab2, tab3 = st.tabs(["Resources", "Experts", "Messages"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Resources", "Experts", "Messages", "Domains & Topics"])
     
     with tab1:
         st.header("Resource Analytics")
@@ -566,6 +662,50 @@ def display_content_analytics(
                 )
                 
                 st.plotly_chart(year_fig, use_container_width=True)
+            
+            # Resource domains distribution if available
+            if 'resource_domain_distribution' in metrics and not metrics['resource_domain_distribution'].empty:
+                st.subheader("Resource Domains Distribution")
+                
+                domain_fig = px.bar(
+                    metrics['resource_domain_distribution'],
+                    x='domain',
+                    y='resource_count',
+                    title='Resources by Domain',
+                    color='resource_count',
+                    color_continuous_scale='Blues'
+                )
+                
+                domain_fig.update_layout(
+                    xaxis_title="Domain",
+                    yaxis_title="Number of Resources",
+                    title_font=dict(size=18),
+                    margin=dict(t=50, b=0, l=0, r=0)
+                )
+                
+                st.plotly_chart(domain_fig, use_container_width=True)
+            
+            # Resource topics distribution if available
+            if 'resource_topics_distribution' in metrics and not metrics['resource_topics_distribution'].empty:
+                st.subheader("Resource Topics Distribution")
+                
+                topics_fig = px.bar(
+                    metrics['resource_topics_distribution'],
+                    x='topic',
+                    y='count',
+                    title='Resources by Topic',
+                    color='count',
+                    color_continuous_scale='Blues'
+                )
+                
+                topics_fig.update_layout(
+                    xaxis_title="Topic",
+                    yaxis_title="Number of Resources",
+                    title_font=dict(size=18),
+                    margin=dict(t=50, b=0, l=0, r=0)
+                )
+                
+                st.plotly_chart(topics_fig, use_container_width=True)
         else:
             st.info("No resource data available for the selected period.")
     
@@ -745,10 +885,145 @@ def display_content_analytics(
         else:
             st.info("No message data available for the selected period.")
     
+    # New tab for Domains & Topics
+    with tab4:
+        st.header("Domains & Topics Analytics")
+        
+        if has_domain_metadata:
+            st.subheader("Domain Analytics")
+            
+            # Domain visualization
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Top domains by publication count
+                domain_pub_fig = px.bar(
+                    metrics['domain_metadata'],
+                    x='domain_name',
+                    y='publication_count',
+                    title='Top Domains by Publication Count',
+                    color='publication_count',
+                    color_continuous_scale='Purples'
+                )
+                
+                domain_pub_fig.update_layout(
+                    xaxis_title="Domain",
+                    yaxis_title="Publication Count",
+                    title_font=dict(size=18),
+                    margin=dict(t=50, b=0, l=0, r=0)
+                )
+                
+                st.plotly_chart(domain_pub_fig, use_container_width=True)
+            
+            with col2:
+                # Domains by topic count
+                domain_topic_fig = px.bar(
+                    metrics['domain_metadata'],
+                    x='domain_name',
+                    y='topic_count',
+                    title='Domains by Number of Topics',
+                    color='topic_count',
+                    color_continuous_scale='Purples'
+                )
+                
+                domain_topic_fig.update_layout(
+                    xaxis_title="Domain",
+                    yaxis_title="Number of Topics",
+                    title_font=dict(size=18),
+                    margin=dict(t=50, b=0, l=0, r=0)
+                )
+                
+                st.plotly_chart(domain_topic_fig, use_container_width=True)
+            
+            # Recent domains update time
+            metrics['domain_metadata']['days_since_update'] = (pd.Timestamp.now() - pd.to_datetime(metrics['domain_metadata']['last_updated'])).dt.days
+            
+            update_fig = px.scatter(
+                metrics['domain_metadata'],
+                x='publication_count',
+                y='days_since_update',
+                size='topic_count',
+                color='days_since_update',
+                hover_name='domain_name',
+                title='Domain Freshness (Days Since Last Update)',
+                color_continuous_scale='Purples_r'  # Reversed scale - darker is fresher
+            )
+            
+            update_fig.update_layout(
+                xaxis_title="Publication Count",
+                yaxis_title="Days Since Last Update",
+                title_font=dict(size=18),
+                margin=dict(t=50, b=0, l=0, r=0)
+            )
+            
+            st.plotly_chart(update_fig, use_container_width=True)
+            
+            # Topic analysis section
+            if has_topic_metadata:
+                st.subheader("Topic Analytics")
+                
+                # Top topics by publication count
+                topic_pub_fig = px.bar(
+                    metrics['topic_metadata'].head(15),
+                    x='topic',
+                    y='publication_count',
+                    title='Top 15 Topics by Publication Count',
+                    color='publication_count',
+                    color_continuous_scale='Purples'
+                )
+                
+                topic_pub_fig.update_layout(
+                    xaxis_title="Topic",
+                    yaxis_title="Publication Count",
+                    title_font=dict(size=18),
+                    margin=dict(t=50, b=0, l=0, r=0)
+                )
+                
+                st.plotly_chart(topic_pub_fig, use_container_width=True)
+                
+                # Topics by domain span
+                topic_domain_fig = px.scatter(
+                    metrics['topic_metadata'].head(30),
+                    x='publication_count',
+                    y='domain_count',
+                    size='publication_count',
+                    color='domain_count',
+                    hover_name='topic',
+                    title='Topic Spread Across Domains',
+                    color_continuous_scale='Purples'
+                )
+                
+                topic_domain_fig.update_layout(
+                    xaxis_title="Publication Count",
+                    yaxis_title="Number of Domains",
+                    title_font=dict(size=18),
+                    margin=dict(t=50, b=0, l=0, r=0)
+                )
+                
+                st.plotly_chart(topic_domain_fig, use_container_width=True)
+                
+                # Topic tree map
+                topic_tree_fig = px.treemap(
+                    metrics['topic_metadata'].head(20),
+                    path=['topic'],
+                    values='publication_count',
+                    color='domain_count',
+                    title='Topic Hierarchy by Publication Count',
+                    color_continuous_scale='Purples'
+                )
+                
+                topic_tree_fig.update_layout(
+                    title_font=dict(size=18),
+                    margin=dict(t=50, b=0, l=0, r=0)
+                )
+                
+                st.plotly_chart(topic_tree_fig, use_container_width=True)
+        else:
+            st.info("No domain and topic metadata available. Please ensure the domains_metadata table exists.")
+    
     # Add detailed metrics tables in an expander
-    # Remove the duplicated metrics_tab2 block
     with st.expander("View Detailed Metrics"):
-        metrics_tab1, metrics_tab2, metrics_tab3 = st.tabs(["Resource Metrics", "Expert Metrics", "Message Metrics"])
+        metrics_tab1, metrics_tab2, metrics_tab3, metrics_tab4 = st.tabs(["Resource Metrics", "Expert Metrics", "Message Metrics", "Domain Metrics"])
         
         with metrics_tab1:
             if has_resource_data:
@@ -758,6 +1033,16 @@ def display_content_analytics(
                 if 'source_distribution' in metrics and not metrics['source_distribution'].empty:
                     st.subheader("Source Distribution")
                     st.dataframe(metrics['source_distribution'], use_container_width=True)
+                
+                # Show resource domains distribution if available
+                if 'resource_domain_distribution' in metrics and not metrics['resource_domain_distribution'].empty:
+                    st.subheader("Resource Domains Distribution")
+                    st.dataframe(metrics['resource_domain_distribution'], use_container_width=True)
+                
+                # Show resource topics distribution if available
+                if 'resource_topics_distribution' in metrics and not metrics['resource_topics_distribution'].empty:
+                    st.subheader("Resource Topics Distribution")
+                    st.dataframe(metrics['resource_topics_distribution'], use_container_width=True)
                 
                 # Add download button with a unique key
                 csv = metrics['resource_metrics'].to_csv(index=False)
@@ -810,3 +1095,34 @@ def display_content_analytics(
                 )
             else:
                 st.info("No message metrics available.")
+        
+        with metrics_tab4:
+            if has_domain_metadata:
+                st.subheader("Domain Metadata")
+                st.dataframe(metrics['domain_metadata'], use_container_width=True)
+                
+                if has_topic_metadata:
+                    st.subheader("Topic Metadata")
+                    st.dataframe(metrics['topic_metadata'], use_container_width=True)
+                
+                # Add download buttons with unique keys
+                domain_csv = metrics['domain_metadata'].to_csv(index=False)
+                st.download_button(
+                    label="Download Domain Metadata CSV",
+                    data=domain_csv,
+                    file_name="domain_metadata.csv",
+                    mime="text/csv",
+                    key="domain_metadata_download"
+                )
+                
+                if has_topic_metadata:
+                    topic_csv = metrics['topic_metadata'].to_csv(index=False)
+                    st.download_button(
+                        label="Download Topic Metadata CSV",
+                        data=topic_csv,
+                        file_name="topic_metadata.csv",
+                        mime="text/csv",
+                        key="topic_metadata_download"
+                    )
+            else:
+                st.info("No domain metadata available.")
