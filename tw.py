@@ -92,7 +92,8 @@ def generate_summary(text, model_name, max_length=300):
         # Craft a prompt that encourages concise summarization
         prompt = f"""Provide a concise, informative summary of the following text. 
         The summary should be clear, capture the key points, and be no more than {max_length} words. 
-        If the text is very short or lacks substantial content, create a brief descriptive summary:
+        If the text is very short or lacks substantial content, create a brief descriptive summary.
+        Ensure the summary is meaningful and provides value:
 
         TEXT: {text}
         
@@ -113,46 +114,35 @@ def generate_summary(text, model_name, max_length=300):
 
 def fetch_resources_without_summary(batch_size=100):
     """
-    Fetch resources that don't have a summary
+    Fetch resources that don't have a valid summary
     
     Args:
         batch_size (int): Number of resources to fetch in one batch
     
     Returns:
-        list: List of resources without summaries
+        list: List of resources without valid summaries
     """
     conn = psycopg2.connect(**DB_PARAMS)
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # More verbose query with explicit parameter handling
-            query = """
+            # Fetch resources with NULL, empty, or problematic summaries
+            cur.execute("""
                 SELECT id, title, abstract, description, type
                 FROM resources_resource
                 WHERE summary IS NULL 
-                   OR trim(summary) = '' 
+                   OR summary = '' 
                    OR summary = 'Failed to generate content due to technical issues'
                    OR summary LIKE '%Failed to generate content%'
                 LIMIT %s
-            """
-            logger.info(f"Executing query with batch size: {batch_size}")
+            """, (batch_size,))
             
-            # Explicitly create a tuple
-            params = (batch_size,)
-            cur.execute(query, params)
-            
-            # Fetch results
-            results = cur.fetchall()
-            logger.info(f"Found {len(results)} resources without summaries")
-            
-            return results
+            return cur.fetchall()
     except Exception as e:
-        # Catch-all for any other unexpected errors
-        logger.error(f"Unexpected error fetching resources: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error fetching resources: {e}")
         return []
     finally:
         conn.close()
+
 def update_resource_summary(resource_id, summary):
     """
     Update a resource with its generated summary
@@ -199,9 +189,13 @@ def process_resource(resource, model_name):
     # Generate summary
     summary = generate_summary(text_source, model_name)
     
+    # Ensure we have a meaningful summary
+    if not summary:
+        # Fallback summary if generation fails
+        summary = f"Summary for {resource['title']} could not be generated."
+    
     # Update database
-    if summary:
-        update_resource_summary(resource['id'], summary)
+    update_resource_summary(resource['id'], summary)
     
     return (resource['id'], summary)
 

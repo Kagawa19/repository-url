@@ -6,10 +6,9 @@ import redis
 import json
 import time
 import logging
+import hashlib
 from pathlib import Path
-from sentence_transformers import SentenceTransformer
 from typing import List, Dict, Any, Optional
-from src.utils.db_utils import DatabaseConnector
 
 # Set up logging
 logging.basicConfig(
@@ -19,13 +18,126 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class OfflineEmbedder:
+    """
+    A deterministic embedding generator that works without internet access.
+    Uses feature hashing to create consistent embeddings from text.
+    """
+    
+    def __init__(self, embedding_dim=384):
+        """
+        Initialize the offline embedder.
+        
+        Args:
+            embedding_dim (int): Dimension of the embeddings to generate
+        """
+        self.embedding_dim = embedding_dim
+        logger.info(f"Initialized OfflineEmbedder with dimension {embedding_dim}")
+    
+    def encode(self, texts, convert_to_numpy=True, show_progress_bar=False):
+        """
+        Generate embeddings using text hashing for consistency.
+        
+        Args:
+            texts: Text or list of texts to encode
+            convert_to_numpy (bool): Always returns numpy array
+            show_progress_bar (bool): Ignored, for API compatibility
+            
+        Returns:
+            numpy.ndarray: Array of embeddings
+        """
+        if not isinstance(texts, list):
+            texts = [texts]
+        
+        logger.info(f"Encoding {len(texts)} texts")
+        embeddings = np.zeros((len(texts), self.embedding_dim), dtype=np.float32)
+        
+        for i, text in enumerate(texts):
+            # Generate embedding from text hash
+            embeddings[i] = self._text_to_embedding(text)
+        
+        # Normalize embeddings to unit length
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms[norms == 0] = 1  # Avoid division by zero
+        embeddings = embeddings / norms
+        
+        return embeddings
+    
+    def _text_to_embedding(self, text):
+        """
+        Convert text to an embedding vector using feature hashing.
+        
+        Args:
+            text (str): Text to convert
+            
+        Returns:
+            numpy.ndarray: Embedding vector
+        """
+        # Create a deterministic seed from the text
+        text_bytes = text.encode('utf-8')
+        hash_obj = hashlib.sha256(text_bytes)
+        seed = int(hash_obj.hexdigest(), 16) % (2**32)
+        
+        # Use numpy's random with the seed for deterministic output
+        np.random.seed(seed)
+        
+        # Generate random values based on text features
+        embedding = np.zeros(self.embedding_dim, dtype=np.float32)
+        
+        # Split text into words and process each word
+        words = text.lower().split()
+        for word in words:
+            word_hash = int(hashlib.md5(word.encode('utf-8')).hexdigest(), 16)
+            word_seed = word_hash % (2**32)
+            np.random.seed(word_seed)
+            
+            # Generate a sparse word vector and add it to the embedding
+            word_vec = np.zeros(self.embedding_dim, dtype=np.float32)
+            
+            # Make it sparse - only activate ~5% of dimensions for each word
+            active_dims = np.random.choice(
+                self.embedding_dim, 
+                size=max(1, int(self.embedding_dim * 0.05)), 
+                replace=False
+            )
+            
+            # Set values for active dimensions
+            for dim in active_dims:
+                # Value between -1 and 1
+                word_vec[dim] = (np.random.random() * 2) - 1
+            
+            # Add the word vector to the overall embedding
+            embedding += word_vec
+        
+        # Add some noise to make embeddings more diverse
+        np.random.seed(seed)
+        noise = np.random.normal(0, 0.01, self.embedding_dim)
+        embedding += noise
+        
+        return embedding
+
 class ExpertSearchIndexManager:
     def __init__(self):
-        """Initialize ExpertSearchIndexManager."""
+        """Initialize ExpertSearchIndexManager with offline embedder."""
         self.setup_paths()
         self.setup_redis()
-        self.model = SentenceTransformer(os.getenv('EMBEDDING_MODEL', 'all-MiniLM-L6-v2'))
-        self.db = DatabaseConnector()
+        
+        # Use offline embedder that doesn't require internet access
+        logger.info("Initializing offline embedding model")
+        self.model = OfflineEmbedder(embedding_dim=384)
+        
+        # Import DatabaseConnector within method to avoid circular imports
+        try:
+            from src.utils.db_utils import DatabaseConnector
+            self.db = DatabaseConnector()
+        except ImportError:
+            logger.warning("Could not import DatabaseConnector, trying alternative import path")
+            try:
+                from ai_services_api.services.search.core.database import DatabaseConnector
+                self.db = DatabaseConnector()
+            except ImportError:
+                logger.error("Failed to import DatabaseConnector")
+                raise
 
     def setup_paths(self):
         """Setup paths for storing models and mappings."""
@@ -37,31 +149,51 @@ class ExpertSearchIndexManager:
 
     def setup_redis(self):
         """Setup Redis connections."""
-        self.redis_client = redis.Redis(
-            host=os.getenv('REDIS_HOST', 'localhost'),
-            port=int(os.getenv('REDIS_PORT', 6379)),
-            db=int(os.getenv('REDIS_EMBEDDINGS_DB', 1)),
-            decode_responses=True
-        )
-        self.redis_binary = redis.Redis(
-            host=os.getenv('REDIS_HOST', 'localhost'),
-            port=int(os.getenv('REDIS_PORT', 6379)),
-            db=int(os.getenv('REDIS_EMBEDDINGS_DB', 1)),
-            decode_responses=False
-        )
-
-        
-        
-
-        # First, the corrected ExpertSearchIndexManager methods with original names:
+        try:
+            self.redis_client = redis.Redis(
+                host=os.getenv('REDIS_HOST', 'localhost'),
+                port=int(os.getenv('REDIS_PORT', 6379)),
+                db=int(os.getenv('REDIS_EMBEDDINGS_DB', 1)),
+                decode_responses=True
+            )
+            self.redis_binary = redis.Redis(
+                host=os.getenv('REDIS_HOST', 'localhost'),
+                port=int(os.getenv('REDIS_PORT', 6379)),
+                db=int(os.getenv('REDIS_EMBEDDINGS_DB', 1)),
+                decode_responses=False
+            )
+        except Exception as e:
+            logger.error(f"Error setting up Redis: {e}")
+            raise
 
     def create_expert_text(self, expert: Dict[str, Any]) -> str:
-        """Create searchable text from expert data."""
+        """
+        Create searchable text from expert data, focusing only on knowledge expertise.
+        
+        Args:
+            expert (Dict[str, Any]): Expert data dictionary
+            
+        Returns:
+            str: Searchable text representation of the expert
+        """
+        # Start with basic identity for minimal context
         text_parts = [
             f"First Name: {expert['first_name']}",
-            f"Last Name: {expert['last_name']}",
-            f"Expertise: {' | '.join(expert['knowledge_expertise'])}"
+            f"Last Name: {expert['last_name']}"
         ]
+        
+        # Focus primarily on knowledge expertise with repetition for emphasis
+        if expert.get('knowledge_expertise') and isinstance(expert['knowledge_expertise'], list):
+            expertise = expert['knowledge_expertise']
+            if expertise:
+                # Add expertise in different formats for better semantic matching
+                text_parts.append(f"Knowledge Expertise: {' | '.join(expertise)}")
+                text_parts.append(f"Expert in: {' | '.join(expertise)}")
+                text_parts.append(f"Specializes in: {' | '.join(expertise)}")
+                # Repeat each expertise area individually for stronger emphasis
+                for area in expertise:
+                    text_parts.append(f"Expertise Area: {area}")
+        
         return '\n'.join(text_parts)
 
     def fetch_experts(self) -> List[Dict[str, Any]]:
@@ -106,7 +238,7 @@ class ExpertSearchIndexManager:
                                 'id': row[0],
                                 'first_name': row[1] or '',
                                 'last_name': row[2] or '',
-                                'knowledge_expertise': row[3] if isinstance(row[3], list) else json.loads(row[3]) if row[3] else []
+                                'knowledge_expertise': self._parse_jsonb(row[3])
                             }
                             experts.append(expert)
                         except Exception as e:
@@ -135,6 +267,13 @@ class ExpertSearchIndexManager:
                 if value is None:
                     metadata[k] = ''
             
+            # Ensure knowledge_expertise is always serialized as a list
+            if 'knowledge_expertise' in metadata and not isinstance(metadata['knowledge_expertise'], list):
+                if metadata['knowledge_expertise']:
+                    metadata['knowledge_expertise'] = [metadata['knowledge_expertise']]
+                else:
+                    metadata['knowledge_expertise'] = []
+            
             pipeline.hset(
                 f"expert:{key}",
                 mapping={
@@ -160,17 +299,24 @@ class ExpertSearchIndexManager:
                 logger.warning("No expert data available to create index")
                 return False
 
+            logger.info(f"Fetched {len(experts)} experts for indexing")
+
             # Prepare text for embeddings
             texts = [self.create_expert_text(expert) for expert in experts]
+            logger.info(f"Created text representations for {len(texts)} experts")
 
             # Generate embeddings
+            logger.info("Generating embeddings...")
             embeddings = self.model.encode(texts, convert_to_numpy=True, show_progress_bar=True)
+            logger.info(f"Generated embeddings with shape {embeddings.shape}")
             
-            # Create and populate FAISS index
+            # Create FAISS index
             dimension = embeddings.shape[1]
+            logger.info(f"Creating FAISS index with dimension {dimension}")
             index = faiss.IndexFlatL2(dimension)
             
             # Store embeddings and metadata
+            logger.info("Storing embeddings and metadata in Redis...")
             for i, (expert, embedding) in enumerate(zip(experts, embeddings)):
                 # Store in Redis
                 self.store_in_redis(
@@ -186,9 +332,16 @@ class ExpertSearchIndexManager:
                 
                 # Add to FAISS index
                 index.add(embedding.reshape(1, -1).astype(np.float32))
+                
+                # Log progress
+                if (i+1) % 10 == 0 or i == len(experts) - 1:
+                    logger.info(f"Stored {i+1}/{len(experts)} experts")
 
             # Save FAISS index and mapping
+            logger.info(f"Saving FAISS index to {str(self.index_path)}")
             faiss.write_index(index, str(self.index_path))
+            
+            logger.info(f"Saving ID mapping to {str(self.mapping_path)}")
             with open(self.mapping_path, 'wb') as f:
                 pickle.dump({i: expert['id'] for i, expert in enumerate(experts)}, f)
 
@@ -199,14 +352,15 @@ class ExpertSearchIndexManager:
             logger.error(f"Error creating FAISS index: {e}")
             return False
 
-    def search_experts(self, query: str, k: int = 5, active_only: bool = False) -> List[Dict[str, Any]]:
+    def search_experts(self, query: str, k: int = 5, active_only: bool = False, min_score: float = 0.1) -> List[Dict[str, Any]]:
         """
-        Search for similar experts using the index.
+        Search for similar experts using the index with improved filtering.
         
         Args:
             query (str): Search query
             k (int): Number of results to return
-            active_only (bool): Whether to return only active experts (ignored in this simplified version)
+            active_only (bool): Whether to return only active experts
+            min_score (float): Minimum similarity score threshold
             
         Returns:
             List of expert matches with metadata
@@ -220,10 +374,11 @@ class ExpertSearchIndexManager:
             # Generate query embedding
             query_embedding = self.model.encode([query], convert_to_numpy=True)
             
-            # Search index
-            distances, indices = index.search(query_embedding.astype(np.float32), k)
+            # Search index - get more candidates for filtering
+            max_candidates = min(k * 3, index.ntotal)
+            distances, indices = index.search(query_embedding.astype(np.float32), max_candidates)
             
-            # Fetch results from Redis
+            # Fetch and filter results
             results = []
             for i, idx in enumerate(indices[0]):
                 if idx < 0:  # FAISS may return -1 for not enough matches
@@ -233,15 +388,69 @@ class ExpertSearchIndexManager:
                 expert_data = self.redis_binary.hgetall(f"expert:{expert_id}")
                 
                 if expert_data:
-                    metadata = json.loads(expert_data[b'metadata'].decode())
-                    metadata['score'] = float(1 / (1 + distances[0][i]))  # Convert distance to similarity score
-                    results.append(metadata)
+                    try:
+                        metadata = json.loads(expert_data[b'metadata'].decode())
+                        
+                        # For L2 distance, lower is better, so convert to similarity score
+                        distance = float(distances[0][i])
+                        score = float(1.0 / (1.0 + distance))
+                        
+                        # Always include the result but boost scores for expertise matches
+                        metadata['score'] = score
+                        
+                        # Expertise relevance boost: check if query terms appear in expertise
+                        if self._has_expertise_match(query, metadata.get('knowledge_expertise', [])):
+                            # Boost score for direct expertise matches
+                            metadata['score'] = min(1.0, score * 1.5)
+                        
+                        results.append(metadata)
+                    except Exception as e:
+                        logger.error(f"Error processing expert {expert_id}: {e}")
             
-            return results
+            # Sort by score (highest first) and return top-k
+            sorted_results = sorted(results, key=lambda x: x.get('score', 0), reverse=True)
+            return sorted_results[:k]
 
         except Exception as e:
             logger.error(f"Error searching experts: {e}")
             return []
+
+    def _has_expertise_match(self, query: str, expertise_list: List[str]) -> bool:
+        """
+        Check if query terms match any expertise areas with a more lenient approach.
+        
+        Args:
+            query (str): Search query
+            expertise_list (List[str]): List of expertise areas
+            
+        Returns:
+            bool: True if there's a match, False otherwise
+        """
+        if not expertise_list:
+            return False
+            
+        # Normalize query for comparison
+        query_lower = query.lower()
+        query_terms = set(term.lower() for term in query.split())
+        
+        for expertise in expertise_list:
+            if not expertise:
+                continue
+                
+            expertise_lower = expertise.lower()
+            
+            # Check for direct substring match first (most reliable)
+            if query_lower in expertise_lower or expertise_lower in query_lower:
+                return True
+                
+            # Also check for individual term matches
+            expertise_terms = set(term.lower() for term in expertise.split())
+            
+            # Check for any overlap between query terms and expertise terms
+            if query_terms.intersection(expertise_terms):
+                return True
+                
+        return False
 
     def _parse_jsonb(self, data):
         """Parse JSONB data safely."""
