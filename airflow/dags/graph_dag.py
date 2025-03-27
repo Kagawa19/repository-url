@@ -71,9 +71,6 @@ def get_db_cursor(autocommit=False):
         finally:
             cur.close()
 
-# Lazy import for graph initializer to reduce initial load time
-
-
 # Load environment variables
 def load_environment_variables():
     """Load environment variables needed for processing."""
@@ -114,24 +111,16 @@ def initialize_graph_task():
             """)
             experts_table_exists = cur.fetchone()[0]
             
-            cur.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'resources_resource'
-                )
-            """)
-            resources_table_exists = cur.fetchone()[0]
-            
-            if not experts_table_exists or not resources_table_exists:
-                logger.error("Required database tables do not exist")
-                raise Exception("Required database tables not found")
-                
             # Check if there are experts to process
-            cur.execute("SELECT COUNT(*) FROM experts_expert")
-            expert_count = cur.fetchone()[0]
-            
-            if expert_count == 0:
-                logger.warning("No experts found in database. Graph initialization may be incomplete.")
+            if experts_table_exists:
+                cur.execute("SELECT COUNT(*) FROM experts_expert")
+                expert_count = cur.fetchone()[0]
+                
+                if expert_count == 0:
+                    logger.warning("No experts found in database. Graph initialization may be incomplete.")
+            else:
+                logger.error("Required 'experts_expert' table does not exist")
+                raise Exception("Required 'experts_expert' table not found")
         
         # Proceed with graph initialization
         logger.info("Starting graph database initialization...")
@@ -146,9 +135,9 @@ def initialize_graph_task():
             logger.error("Graph initialization failed")
             raise Exception("Graph initialization failed")
         
-        # Skip verification since the method doesn't exist
-        # Instead, just log that initialization completed
         logger.info("Graph initialization complete!")
+        
+        return "Graph initialization completed successfully"
         
     except ImportError as e:
         logger.error(f"Failed to import required module: {e}")
@@ -187,5 +176,5 @@ dag = DAG(
 initialize_graph_task_operator = PythonOperator(
     task_id='initialize_graph_database',
     python_callable=initialize_graph_task,
-    dag=dag
+    dag=dag,
 )

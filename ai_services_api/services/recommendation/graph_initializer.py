@@ -15,8 +15,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configure Gemini
-genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
-model = genai.GenerativeModel('gemini-1.5-pro-latest')
+try:
+    gemini_api_key = os.getenv('GEMINI_API_KEY')
+    if gemini_api_key:
+        genai.configure(api_key=gemini_api_key)
+        model = genai.GenerativeModel('gemini-1.5-pro-latest')
+    else:
+        model = None
+except ImportError:
+    model = None
 
 # Configure logging
 logging.basicConfig(
@@ -149,33 +156,43 @@ class GraphDatabaseInitializer:
             cur = conn.cursor()
             
             # Get experts who appear together in search results
-            cur.execute("""
-                SELECT 
-                    e1.expert_id as expert1_id,
-                    e2.expert_id as expert2_id,
-                    COUNT(*) as co_occurrence,
-                    AVG(e1.similarity_score + e2.similarity_score) / 2 as avg_similarity
-                FROM expert_search_matches e1
-                JOIN expert_search_matches e2 
-                    ON e1.search_id = e2.search_id 
-                    AND e1.expert_id < e2.expert_id
-                GROUP BY e1.expert_id, e2.expert_id
-                HAVING COUNT(*) > 1
-            """)
-            search_patterns = cur.fetchall()
+            try:
+                cur.execute("""
+                    SELECT 
+                        e1.expert_id as expert1_id,
+                        e2.expert_id as expert2_id,
+                        COUNT(*) as co_occurrence,
+                        AVG(e1.similarity_score + e2.similarity_score) / 2 as avg_similarity
+                    FROM expert_search_matches e1
+                    JOIN expert_search_matches e2 
+                        ON e1.search_id = e2.search_id 
+                        AND e1.expert_id < e2.expert_id
+                    GROUP BY e1.expert_id, e2.expert_id
+                    HAVING COUNT(*) > 1
+                """)
+                search_patterns = cur.fetchall()
+                logger.info(f"Fetched {len(search_patterns)} search co-occurrence patterns")
+            except Exception as e:
+                logger.warning(f"Could not fetch search patterns: {e}")
+                search_patterns = []
             
             # Get direct communication patterns
-            cur.execute("""
-                SELECT 
-                    sender_id,
-                    receiver_id,
-                    COUNT(*) as message_count,
-                    MAX(created_at) as last_interaction
-                FROM expert_messages
-                GROUP BY sender_id, receiver_id
-                HAVING COUNT(*) > 0
-            """)
-            message_patterns = cur.fetchall()
+            try:
+                cur.execute("""
+                    SELECT 
+                        sender_id,
+                        receiver_id,
+                        COUNT(*) as message_count,
+                        MAX(created_at) as last_interaction
+                    FROM expert_messages
+                    GROUP BY sender_id, receiver_id
+                    HAVING COUNT(*) > 0
+                """)
+                message_patterns = cur.fetchall()
+                logger.info(f"Fetched {len(message_patterns)} message interaction patterns")
+            except Exception as e:
+                logger.warning(f"Could not fetch message patterns: {e}")
+                message_patterns = []
             
             return search_patterns, message_patterns
             
@@ -238,59 +255,71 @@ class GraphDatabaseInitializer:
                     'related': []
                 }
 
-            prompt = f"""Return only a raw JSON object with these keys for this expertise list: {expertise_list}
-            {{
-                "standardized_concepts": [],
-                "research_areas": [],
-                "methods": [],
-                "related_areas": []
-            }}
-            Return the JSON object only, no markdown formatting, no code fences, no additional text."""
-            
-            try:
-                response = model.generate_content(prompt)
-                    
-                if not response.text or not response.text.strip():
-                    logger.error("Received empty response from Gemini")
-                    return {
-                        'concepts': expertise_list,
-                        'areas': [],
-                        'methods': [],
-                        'related': []
-                    }
-
-                cleaned_response = (response.text
-                                .replace('```json', '')
-                                .replace('```JSON', '')
-                                .replace('```', '')
-                                .strip())
+            # If Gemini is available, try AI-enhanced processing
+            if model:
+                prompt = f"""Return only a raw JSON object with these keys for this expertise list: {expertise_list}
+                {{
+                    "standardized_concepts": [],
+                    "research_areas": [],
+                    "methods": [],
+                    "related_areas": []
+                }}
+                Return the JSON object only, no markdown formatting, no code fences, no additional text."""
                 
-                parsed = json.loads(cleaned_response)
-                return {
-                    'concepts': parsed.get('standardized_concepts', expertise_list),
-                    'areas': parsed.get('research_areas', []),
-                    'methods': parsed.get('methods', []),
-                    'related': parsed.get('related_areas', [])
-                }
-            except json.JSONDecodeError as e:
-                logger.error(f"Invalid JSON response from Gemini: {response.text}")
-                return {
-                    'concepts': expertise_list,
-                    'areas': [],
-                    'methods': [],
-                    'related': []
-                }
-            except Exception as e:
-                if '429' in str(e):
-                    logger.error("Rate limit exceeded, using default values")
+                try:
+                    response = model.generate_content(prompt)
+                        
+                    if not response.text or not response.text.strip():
+                        logger.warning("Received empty response from Gemini, using direct mapping")
+                        return {
+                            'concepts': expertise_list,
+                            'areas': [],
+                            'methods': [],
+                            'related': []
+                        }
+
+                    cleaned_response = (response.text
+                                    .replace('```json', '')
+                                    .replace('```JSON', '')
+                                    .replace('```', '')
+                                    .strip())
+                    
+                    parsed = json.loads(cleaned_response)
+                    return {
+                        'concepts': parsed.get('standardized_concepts', expertise_list),
+                        'areas': parsed.get('research_areas', []),
+                        'methods': parsed.get('methods', []),
+                        'related': parsed.get('related_areas', [])
+                    }
+                except Exception as e:
+                    logger.warning(f"Error in Gemini API call: {e}, falling back to direct mapping")
+            
+            # Fallback to simple heuristic method if AI is unavailable
+            logger.info("Using heuristic expertise mapping")
+            
+            # Simple heuristic categorization
+            methods = []
+            areas = []
+            related = []
+            
+            method_keywords = ["method", "analysis", "technique", "approach", "framework", "assessment", "evaluation"]
+            
+            for expertise in expertise_list:
+                lower_exp = expertise.lower()
+                
+                # Check if it might be a method
+                if any(keyword in lower_exp for keyword in method_keywords):
+                    methods.append(expertise)
+                # Otherwise consider it a research area
                 else:
-                    logger.error(f"Error in Gemini API call: {e}")
-                return {
-                    'concepts': expertise_list,
-                    'areas': [],
-                    'methods': [],
-                    'related': []
-                }
+                    areas.append(expertise)
+            
+            return {
+                'concepts': expertise_list,
+                'areas': areas,
+                'methods': methods,
+                'related': related
+            }
 
         except Exception as e:
             logger.error(f"Error in expertise processing: {e}")
@@ -306,7 +335,7 @@ class GraphDatabaseInitializer:
         try:
             # Unpack expert data
             (expert_id, first_name, last_name, knowledge_expertise, designation, 
-             domains, fields, theme, unit, orcid, is_active) = expert_data
+            domains, fields, theme, unit, orcid, is_active) = expert_data
             
             expert_name = f"{first_name} {last_name}"
 
@@ -330,13 +359,12 @@ class GraphDatabaseInitializer:
                 "is_active": is_active
             })
 
-            # Process expertise semantically
-            semantic_data = self._process_expertise(knowledge_expertise)
+            # Process expertise if available
+            if knowledge_expertise:
+                semantic_data = self._process_expertise(knowledge_expertise)
+                self._create_semantic_relationships(session, str(expert_id), semantic_data)
 
-            # Create semantic relationships
-            self._create_semantic_relationships(session, str(expert_id), semantic_data)
-
-            # Create field relationships
+            # Create field relationships if available
             if fields:
                 for field in fields:
                     session.run("""
@@ -349,7 +377,7 @@ class GraphDatabaseInitializer:
                         "field": field
                     })
 
-            # Create domain relationships
+            # Create domain relationships if available
             if domains:
                 for domain in domains:
                     session.run("""
@@ -362,7 +390,8 @@ class GraphDatabaseInitializer:
                         "domain": domain
                     })
 
-            # Create organizational relationships
+            # Always create organizational relationships for reliable fallback matching
+            # Theme relationship
             if theme:
                 session.run("""
                     MERGE (t:Theme {name: $theme})
@@ -373,6 +402,7 @@ class GraphDatabaseInitializer:
                     "theme": theme
                 })
 
+            # Unit relationship
             if unit:
                 session.run("""
                     MERGE (u:Unit {name: $unit})
@@ -382,18 +412,22 @@ class GraphDatabaseInitializer:
                     "expert_id": str(expert_id),
                     "unit": unit
                 })
-
+                
             logger.info(f"Successfully created/updated expert node: {expert_name}")
-
+                
         except Exception as e:
             logger.error(f"Error creating expert node for {expert_id}: {e}")
             raise
+
 
     def _create_semantic_relationships(self, session, expert_id: str, semantic_data: Dict[str, List[str]]):
         """Create semantic relationships for an expert"""
         try:
             # Create concept relationships
             for concept in semantic_data['concepts']:
+                if not concept:
+                    continue
+                    
                 session.run("""
                     MERGE (c:Concept {name: $concept})
                     MERGE (e:Expert {id: $expert_id})-[r:HAS_CONCEPT]->(c)
@@ -406,6 +440,9 @@ class GraphDatabaseInitializer:
 
             # Create research area relationships
             for area in semantic_data['areas']:
+                if not area:
+                    continue
+                    
                 session.run("""
                     MERGE (ra:ResearchArea {name: $area})
                     MERGE (e:Expert {id: $expert_id})-[r:RESEARCHES_IN]->(ra)
@@ -418,6 +455,9 @@ class GraphDatabaseInitializer:
 
             # Create method relationships
             for method in semantic_data['methods']:
+                if not method:
+                    continue
+                    
                 session.run("""
                     MERGE (m:Method {name: $method})
                     MERGE (e:Expert {id: $expert_id})-[r:USES_METHOD]->(m)
@@ -430,6 +470,9 @@ class GraphDatabaseInitializer:
 
             # Create related area relationships
             for related in semantic_data['related']:
+                if not related:
+                    continue
+                    
                 session.run("""
                     MERGE (r:RelatedArea {name: $related})
                     MERGE (e:Expert {id: $expert_id})-[r:RELATED_TO]->(r)
@@ -444,7 +487,7 @@ class GraphDatabaseInitializer:
             logger.error(f"Error creating semantic relationships for expert {expert_id}: {e}")
             raise
 
-    async def initialize_graph(self):
+    def initialize_graph(self):
         """Initialize the graph with experts and their relationships"""
         try:
             # Create indexes first
