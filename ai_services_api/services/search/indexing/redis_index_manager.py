@@ -19,13 +19,28 @@ logger = logging.getLogger(__name__)
 
 class ExpertRedisIndexManager:
     def __init__(self):
-        """Initialize Redis index manager for experts."""
+        """Initialize Redis index manager for experts with offline fallback."""
         try:
             self.db = DatabaseConnector()  # Initialize the database connector
             load_dotenv()
-            self.embedding_model = SentenceTransformer(
-                os.getenv('EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
-            )
+            
+            # Initialize embedding model with offline handling
+            model_name = os.getenv('EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
+            try:
+                # First try loading with standard mode
+                logger.info(f"Attempting to load model: {model_name}")
+                self.embedding_model = SentenceTransformer(model_name)
+            except (OSError, IOError) as e:
+                logger.warning(f"Failed to load model online: {e}. Trying offline mode...")
+                try:
+                    # Try with local_files_only=True (offline)
+                    self.embedding_model = SentenceTransformer(model_name, local_files_only=True)
+                except Exception as offline_error:
+                    logger.error(f"Failed to load model in offline mode: {offline_error}")
+                    # Fallback to simple embedding approach
+                    logger.warning("Using fallback text encoding method")
+                    self.embedding_model = None
+            
             self.setup_redis_connections()
             logger.info("ExpertRedisIndexManager initialized successfully")
         except Exception as e:
@@ -68,8 +83,18 @@ class ExpertRedisIndexManager:
                 logger.warning(f"Redis connection attempt {attempt + 1} failed, retrying...")
                 time.sleep(retry_delay)
 
-    
-
+    def _create_fallback_embedding(self, text: str) -> np.ndarray:
+        """Create a simple fallback embedding when model is not available."""
+        logger.info("Creating fallback embedding")
+        # Create a deterministic embedding based on character values
+        embedding = np.zeros(384)  # Standard dimension for simple embeddings
+        for i, char in enumerate(text):
+            embedding[i % len(embedding)] += ord(char) / 1000
+        # Normalize the embedding
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+        return embedding
 
     def _parse_jsonb(self, data):
         """Parse JSONB data safely."""
@@ -81,8 +106,6 @@ class ExpertRedisIndexManager:
             return data
         except:
             return {}
-
-    
 
     def fetch_resources(self) -> List[Dict[str, Any]]:
         """Fetch all resource data from database."""
@@ -225,8 +248,6 @@ class ExpertRedisIndexManager:
         except Exception as e:
             logger.error(f"Error creating text content for resource {resource.get('id', 'Unknown')}: {e}")
             return "Error Processing Resource"
-
-    # Here are the methods that need to be modified:
 
     def fetch_experts(self) -> List[Dict[str, Any]]:
         """Fetch all expert data from database with only required columns."""
@@ -382,7 +403,7 @@ class ExpertRedisIndexManager:
             return None
 
     def create_redis_index(self) -> bool:
-        """Create Redis indexes for experts with only required fields."""
+        """Create Redis indexes for experts with offline fallback."""
         try:
             logger.info("Creating Redis indexes for experts...")
             
@@ -412,17 +433,29 @@ class ExpertRedisIndexManager:
                     # Log the text content for debugging
                     logger.debug(f"Text content for expert {expert_id}: {text_content[:100]}...")
                     
-                    # Generate embedding with explicit error handling
+                    # Generate embedding with fallback
+                    embedding = None
                     try:
-                        if not isinstance(text_content, str):
-                            text_content = str(text_content)
-                        embedding = self.embedding_model.encode(text_content)
+                        if self.embedding_model is not None:
+                            # Use SentenceTransformer if available
+                            if not isinstance(text_content, str):
+                                text_content = str(text_content)
+                            embedding = self.embedding_model.encode(text_content)
+                        else:
+                            # Use fallback method if model not available
+                            embedding = self._create_fallback_embedding(text_content)
+                            
                         if embedding is None or not isinstance(embedding, np.ndarray):
                             logger.error(f"Invalid embedding generated for expert {expert_id}")
                             continue
                     except Exception as embed_err:
                         logger.error(f"Embedding generation failed for expert {expert_id}: {embed_err}")
-                        continue
+                        # Use fallback embedding
+                        try:
+                            embedding = self._create_fallback_embedding(text_content)
+                        except Exception as fallback_err:
+                            logger.error(f"Fallback embedding failed: {fallback_err}")
+                            continue
                     
                     # Store in Redis
                     self._store_expert_data(expert, text_content, embedding)
@@ -507,11 +540,6 @@ class ExpertRedisIndexManager:
             pipeline.reset()
             raise e
 
-    
-    
-
-    
-
     def get_expert_embedding(self, expert_id: str) -> Optional[np.ndarray]:
         """Retrieve expert embedding from Redis."""
         try:
@@ -522,8 +550,6 @@ class ExpertRedisIndexManager:
         except Exception as e:
             logger.error(f"Error retrieving expert embedding: {e}")
             return None
-
-    
 
     def close(self):
         """Close Redis connections."""

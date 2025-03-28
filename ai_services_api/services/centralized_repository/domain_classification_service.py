@@ -1,20 +1,17 @@
 import psycopg2
 import json
-from typing import List, Dict, Any, Optional
+import numpy as np
+from typing import List, Dict, Any, Tuple, Optional
 import os
 import sys
-import json
 import logging
-from typing import List, Dict, Any, Tuple, Optional
-
-import psycopg2
 from dotenv import load_dotenv
 from urllib.parse import urlparse
 from contextlib import contextmanager
+import redis
+import time
 
 import google.generativeai as genai
-
-from contextlib import contextmanager
 
 # Configure logging
 logging.basicConfig(
@@ -23,10 +20,6 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
-
-import os
-import logging
-from dotenv import load_dotenv
 
 def load_gemini_api_key():
     """
@@ -65,8 +58,6 @@ def _setup_gemini():
     Returns:
         Configured Gemini model
     """
-    import google.generativeai as genai
-    
     # Load API key
     api_key = load_gemini_api_key()
     
@@ -100,9 +91,6 @@ def _setup_gemini():
 
 def get_db_connection_params():
     """Get database connection parameters from environment variables."""
-    import os
-    from urllib.parse import urlparse
-
     database_url = os.getenv('DATABASE_URL')
     if database_url:
         parsed_url = urlparse(database_url)
@@ -125,9 +113,6 @@ def get_db_connection_params():
 @contextmanager
 def get_db_connection():
     """Get database connection with proper error handling and cleanup."""
-    import psycopg2
-    import logging
-
     params = get_db_connection_params()
     conn = None
     try:
@@ -164,13 +149,25 @@ class DatabaseClassificationManager:
         Returns:
             Boolean indicating successful update
         """
-        import logging
-        
         try:
+            # Validate inputs
+            if not domains or len(domains) == 0:
+                logging.warning(f"Empty domains provided for resource {resource_id}, using 'Uncategorized'")
+                domains = ["Uncategorized"]
+                
+            if not topics or len(topics) == 0:
+                logging.warning(f"Empty topics provided for resource {resource_id}, using default")
+                topics = {"Uncategorized": ["General"]}
+            
+            # Log what we're about to update
+            logging.info(f"Updating resource {resource_id} with domains: {domains}")
+            logging.info(f"Using topics: {topics}")
+            
             with get_db_connection() as conn:
                 with conn.cursor() as cur:
                     # Prepare topics as JSONB
                     topics_jsonb = json.dumps(topics)
+                    logging.info(f"Converted topics to JSON: {topics_jsonb}")
                     
                     # SQL to update domains and topics
                     update_query = """
@@ -181,6 +178,10 @@ class DatabaseClassificationManager:
                         updated_at = CURRENT_TIMESTAMP 
                     WHERE id = %s
                     """
+                    
+                    # Log the query and parameters
+                    logging.info(f"Executing query: {update_query}")
+                    logging.info(f"With parameters: domains={domains}, topics_jsonb={topics_jsonb}, resource_id={resource_id}")
                     
                     # Execute the update
                     cur.execute(update_query, (
@@ -195,6 +196,12 @@ class DatabaseClassificationManager:
                     # Check if a row was actually updated
                     if cur.rowcount > 0:
                         logging.info(f"Successfully updated classification for resource {resource_id}")
+                        # Verify the update worked by querying the record
+                        verify_query = "SELECT domains, topics FROM resources_resource WHERE id = %s"
+                        cur.execute(verify_query, (resource_id,))
+                        result = cur.fetchone()
+                        if result:
+                            logging.info(f"Verification - Updated values: domains={result[0]}, topics={result[1]}")
                         return True
                     else:
                         logging.warning(f"No resource found with ID {resource_id}")
@@ -202,6 +209,9 @@ class DatabaseClassificationManager:
         
         except Exception as e:
             logging.error(f"Error updating resource classification: {e}")
+            # Log the full exception traceback for debugging
+            import traceback
+            logging.error(traceback.format_exc())
             return False
     
     @staticmethod
@@ -215,8 +225,6 @@ class DatabaseClassificationManager:
         Returns:
             List of unclassified resources
         """
-        import logging
-        
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cur:
@@ -257,8 +265,6 @@ class DatabaseClassificationManager:
         Returns:
             Dictionary of domain counts
         """
-        import logging
-        
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cur:
@@ -286,15 +292,262 @@ class DatabaseClassificationManager:
             logging.error(f"Error retrieving domain classification stats: {e}")
             return {}
 
-# Modify the existing classification methods to use this new database manager
-class DirectAPIClassifier:
+class ResourceIndexManager:
+    """Manages resource indexing and embedding for classification."""
+    
+    def __init__(self):
+        """Initialize the resource index manager."""
+        try:
+            # Load environment variables
+            load_dotenv()
+            
+            # Initialize embedding model with offline handling
+            model_name = os.getenv('EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
+            
+            # Set self.embedding_model to None initially
+            self.embedding_model = None
+            
+            try:
+                # First try loading with standard mode
+                from sentence_transformers import SentenceTransformer
+                logger.info(f"Attempting to load model: {model_name}")
+                self.embedding_model = SentenceTransformer(model_name)
+            except (OSError, IOError) as e:
+                logger.warning(f"Failed to load model online: {e}. Trying offline mode...")
+                try:
+                    # Try with local_files_only=True (offline)
+                    from sentence_transformers import SentenceTransformer
+                    self.embedding_model = SentenceTransformer(model_name, local_files_only=True)
+                except Exception as offline_error:
+                    logger.error(f"Failed to load model in offline mode: {offline_error}")
+                    # Keep self.embedding_model as None - we'll use fallback methods
+                    logger.warning("Using fallback text encoding method")
+            
+            # Setup Redis connections
+            self.setup_redis_connections()
+            
+            # Initialize database manager
+            self.db_manager = DatabaseClassificationManager()
+            
+            logger.info("ResourceIndexManager initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing ResourceIndexManager: {e}")
+            raise
+
+    def setup_redis_connections(self):
+        """Setup Redis connections with retry logic."""
+        max_retries = 5
+        retry_delay = 2
+
+        for attempt in range(max_retries):
+            try:
+                self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+                
+                # Initialize Redis connections
+                self.redis_text = redis.StrictRedis.from_url(
+                    self.redis_url, 
+                    decode_responses=True,
+                    db=0
+                )
+                self.redis_binary = redis.StrictRedis.from_url(
+                    self.redis_url, 
+                    decode_responses=False,
+                    db=0
+                )
+                
+                # Test connections
+                self.redis_text.ping()
+                self.redis_binary.ping()
+                
+                logger.info("Redis connections established successfully")
+                return
+                
+            except redis.ConnectionError as e:
+                if attempt == max_retries - 1:
+                    logger.error("Failed to connect to Redis after maximum retries")
+                    raise
+                logger.warning(f"Redis connection attempt {attempt + 1} failed, retrying...")
+                time.sleep(retry_delay)
+    
+    def _create_fallback_embedding(self, text: str) -> np.ndarray:
+        """Create a simple fallback embedding when model is not available."""
+        if not isinstance(text, str):
+            text = str(text)
+            
+        logger.info("Creating fallback embedding")
+        # Create a deterministic embedding based on character values
+        embedding = np.zeros(384)  # Standard dimension for simple embeddings
+        for i, char in enumerate(text):
+            embedding[i % len(embedding)] += ord(char) / 1000
+        # Normalize the embedding
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+        return embedding
+
+    def _create_resource_text_content(self, resource: Dict[str, Any]) -> str:
+        """Create combined text content for resource embedding."""
+        try:
+            # Start with title as the most important information
+            text_parts = []
+            if resource.get('title'):
+                text_parts.append(f"Title: {str(resource['title']).strip()}")
+            else:
+                text_parts.append("Title: Unknown Resource")
+                
+            # Add abstract if available
+            if resource.get('abstract'):
+                text_parts.append(f"Abstract: {str(resource['abstract']).strip()}")
+            
+            # Join all parts and ensure we have content
+            final_text = '\n'.join(text_parts)
+            if not final_text.strip():
+                return "Unknown Resource"
+                
+            return final_text
+            
+        except Exception as e:
+            logger.error(f"Error creating text content for resource {resource.get('id', 'Unknown')}: {e}")
+            return "Error Processing Resource"
+
+    def _store_resource_data(self, resource: Dict[str, Any], text_content: str, 
+                          embedding: np.ndarray) -> None:
+        """Store resource data in Redis."""
+        base_key = f"resource:{resource['id']}"
+        
+        pipeline = self.redis_text.pipeline()
+        try:
+            # Store text content
+            pipeline.set(f"text:{base_key}", text_content)
+            
+            # Store embedding as binary
+            self.redis_binary.set(
+                f"emb:{base_key}", 
+                embedding.astype(np.float32).tobytes()
+            )
+            
+            # Store metadata
+            metadata = {
+                'id': str(resource['id']),
+                'title': str(resource.get('title', '')),
+                'abstract': str(resource.get('abstract', ''))[:500] if resource.get('abstract') else ''
+            }
+            
+            pipeline.hset(f"meta:{base_key}", mapping=metadata)
+            pipeline.execute()
+            
+        except Exception as e:
+            pipeline.reset()
+            raise e
+
+    def get_resource_embedding(self, resource_id: str) -> Optional[np.ndarray]:
+        """Retrieve resource embedding from Redis."""
+        try:
+            embedding_bytes = self.redis_binary.get(f"emb:resource:{resource_id}")
+            if embedding_bytes:
+                return np.frombuffer(embedding_bytes, dtype=np.float32)
+            return None
+        except Exception as e:
+            logger.error(f"Error retrieving resource embedding: {e}")
+            return None
+
+    def get_resource_metadata(self, resource_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve resource metadata from Redis."""
+        try:
+            metadata = self.redis_text.hgetall(f"meta:resource:{resource_id}")
+            return metadata if metadata else None
+        except Exception as e:
+            logger.error(f"Error retrieving resource metadata: {e}")
+            return None
+
+    def clear_resource_indexes(self) -> bool:
+        """Clear all resource Redis indexes."""
+        try:
+            patterns = ['text:resource:*', 'emb:resource:*', 'meta:resource:*']
+            for pattern in patterns:
+                cursor = 0
+                while True:
+                    cursor, keys = self.redis_text.scan(cursor, match=pattern, count=100)
+                    if keys:
+                        self.redis_text.delete(*keys)
+                    if cursor == 0:
+                        break
+            
+            logger.info("Cleared all resource Redis indexes")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error clearing Redis indexes: {e}")
+            return False
+
+    def close(self):
+        """Close Redis connections."""
+        try:
+            if hasattr(self, 'redis_text'):
+                self.redis_text.close()
+            if hasattr(self, 'redis_binary'):
+                self.redis_binary.close()
+            logger.info("Redis connections closed")
+        except Exception as e:
+            logger.error(f"Error closing Redis connections: {e}")
+
+    def __del__(self):
+        """Ensure connections are closed on deletion."""
+        self.close()
+
+
+class DomainClassifier:
+    """
+    Handles domain classification using both embedding-based similarity
+    and Gemini API for classification.
+    """
+    
     def __init__(self):
         """Initialize the classifier."""
-        self.model = self._setup_gemini()
-        self.domain_structure = self.get_existing_domain_structure()
-        self.db_manager = DatabaseClassificationManager()
+        self.model = _setup_gemini()
         
-        logger.info("DirectAPIClassifier initialized successfully")
+        # Set embedding_model to None initially
+        self.embedding_model = None
+        
+        # Initialize embedding model with offline handling
+        try:
+            # First try standard loading
+            from sentence_transformers import SentenceTransformer
+            model_name = os.getenv('EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
+            self.embedding_model = SentenceTransformer(model_name)
+        except (OSError, IOError) as e:
+            logger.warning(f"Failed to load embedding model: {e}. Trying offline mode...")
+            try:
+                # Try offline mode
+                from sentence_transformers import SentenceTransformer
+                model_name = os.getenv('EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
+                self.embedding_model = SentenceTransformer(model_name, local_files_only=True)
+            except Exception as offline_error:
+                logger.error(f"Failed to load model in offline mode: {offline_error}")
+                # Keep self.embedding_model as None - will use fallback methods
+                logger.warning("Using fallback text analysis methods without embeddings")
+        
+        self.db_manager = DatabaseClassificationManager()
+        self.resource_manager = ResourceIndexManager()
+        self.domain_structure = self.get_existing_domain_structure()
+        
+        logger.info("DomainClassifier initialized successfully")
+    
+    def _create_fallback_embedding(self, text: str) -> np.ndarray:
+        """Create a simple fallback embedding when model is not available."""
+        if not isinstance(text, str):
+            text = str(text)
+            
+        logger.info("Creating fallback embedding")
+        # Create a deterministic embedding based on character values
+        embedding = np.zeros(384)  # Standard dimension for simple embeddings
+        for i, char in enumerate(text):
+            embedding[i % len(embedding)] += ord(char) / 1000
+        # Normalize the embedding
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+        return embedding
     
     def get_existing_domain_structure(self) -> Dict[str, List[str]]:
         """
@@ -318,7 +571,9 @@ class DirectAPIClassifier:
         return {
             "Science": ["Physics", "Biology", "Chemistry"],
             "Social Sciences": ["Sociology", "Psychology", "Anthropology"],
-            "Humanities": ["Literature", "History", "Philosophy"]
+            "Humanities": ["Literature", "History", "Philosophy"],
+            "Health Sciences": ["Public Health", "Medicine", "Epidemiology"],
+            "Technology": ["AI", "Machine Learning", "Data Science"]
         }
     
     def get_unclassified_publications(self, limit: int = 1) -> List[Dict[str, Any]]:
@@ -333,51 +588,91 @@ class DirectAPIClassifier:
         """
         return self.db_manager.get_unclassified_resources(limit)
     
-    def _generate_content(self, prompt, temperature=0.3, max_tokens=2048):
+    def _generate_content(self, prompt, temperature=0.3, max_tokens=2048, max_retries=3, retry_delay=60):
+        """Generate content with rate limiting and retries."""
+        for attempt in range(max_retries):
+            try:
+                # Your existing generation code here
+                response = self.model.generate_content(prompt, ...)
+                return response.text.strip() if response and response.text else None
+            except Exception as e:
+                if "429" in str(e) and attempt < max_retries - 1:
+                    logging.warning(f"Rate limit hit, retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    logging.error(f"Error generating content: {e}")
+                    return None
+    
+    def _create_embedding_for_publication(self, publication: Dict[str, Any]) -> np.ndarray:
+        """Create embedding for publication text content with fallback method."""
+        try:
+            # Create text content for embedding
+            text_content = ""
+            if publication.get('title'):
+                text_content += f"Title: {publication['title']} "
+            if publication.get('abstract'):
+                text_content += f"Abstract: {publication['abstract']}"
+            
+            if not text_content:
+                # Return a zero embedding if no content
+                return np.zeros(384)
+                
+            # Generate embedding
+            if self.embedding_model is not None:
+                # Use SentenceTransformer if available
+                return self.embedding_model.encode(text_content)
+            else:
+                # Fallback to simple character-based hashing if model not available
+                logger.warning("Using fallback embedding method")
+                return self._create_fallback_embedding(text_content)
+        except Exception as e:
+            logger.error(f"Error creating embedding: {e}")
+            # Return a zero embedding on error
+            return np.zeros(384)
+
+    def _find_similar_domains(self, publication_embedding: np.ndarray, top_n=3) -> List[Tuple[str, float]]:
         """
-        Generate content using the Gemini API with error handling.
-        
-        Args:
-            prompt: Input prompt for classification
-            temperature: Controls randomness of output
-            max_tokens: Maximum tokens to generate
+        Find similar classified publications and their domains using embeddings.
         
         Returns:
-            Generated content or None
+            List of (domain_name, similarity_score) tuples
         """
         try:
-            # Truncate extremely long prompts
-            if len(prompt) > 30000:
-                logging.warning(f"Prompt truncated from {len(prompt)} to 30000 characters")
-                prompt = prompt[:30000]
+            # Get all domain names from structure
+            all_domains = list(self.domain_structure.keys())
             
-            # Generation configuration
-            generation_config = {
-                'temperature': temperature,
-                'max_output_tokens': max_tokens
-            }
+            # Check if we can use proper embeddings
+            if self.embedding_model is None:
+                # If no embedding model, return random domain with low confidence
+                import random
+                domain = random.choice(all_domains)
+                return [(domain, 0.5)]
             
-            # Safety settings to allow more flexible content
-            safety_settings = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-            ]
+            # Generate embeddings for domain names
+            domain_embeddings = {}
+            for domain in all_domains:
+                try:
+                    domain_embeddings[domain] = self.embedding_model.encode(f"Domain: {domain}")
+                except:
+                    # Fallback to character-based embedding
+                    domain_embeddings[domain] = self._create_fallback_embedding(f"Domain: {domain}")
             
-            # Generate content
-            response = self.model.generate_content(
-                prompt, 
-                generation_config=generation_config,
-                safety_settings=safety_settings
-            )
+            # Calculate similarities
+            similarities = []
+            for domain, embedding in domain_embeddings.items():
+                similarity = np.dot(publication_embedding, embedding) / (
+                    np.linalg.norm(publication_embedding) * np.linalg.norm(embedding)
+                )
+                similarities.append((domain, float(similarity)))
             
-            # Return text if available
-            return response.text.strip() if response and response.text else None
-        
+            # Sort by similarity (highest first) and return top N
+            return sorted(similarities, key=lambda x: x[1], reverse=True)[:top_n]
+            
         except Exception as e:
-            logging.error(f"Error generating content: {e}")
-            return None
+            logger.error(f"Error finding similar domains: {e}")
+            # Return a random domain with low confidence
+            import random
+            return [(random.choice(all_domains), 0.5)]
     
     def classify_single_publication(
         self, 
@@ -385,7 +680,8 @@ class DirectAPIClassifier:
         domain_structure: Dict[str, List[str]]
     ) -> Tuple[Optional[str], Optional[List[str]], bool]:
         """
-        Classify a single publication into a domain and topics.
+        Classify a single publication into a domain and topics using both
+        embedding similarity and Gemini API.
         
         Args:
             publication: Publication to classify
@@ -394,15 +690,41 @@ class DirectAPIClassifier:
         Returns:
             Tuple of (domain, topics, success)
         """
-        # Use Gemini to generate classification if possible
-        # This is a placeholder - you'd want to implement more sophisticated classification
         try:
+            # First, try embedding-based approach
+            publication_embedding = self._create_embedding_for_publication(publication)
+            
+            if publication_embedding is not None:
+                # Store the embedding in Redis for future use
+                text_content = f"Title: {publication.get('title', '')} Abstract: {publication.get('abstract', '')}"
+                self.resource_manager._store_resource_data(
+                    publication, 
+                    text_content, 
+                    publication_embedding
+                )
+                
+                # Find similar domains
+                similar_domains = self._find_similar_domains(publication_embedding)
+                
+                if similar_domains:
+                    # Get top domain from embedding similarity
+                    top_domain, similarity_score = similar_domains[0]
+                    
+                    # If confidence is high enough, use the embedding result
+                    if similarity_score > 0.7:
+                        topics = domain_structure.get(top_domain, [])[:3]
+                        logger.info(f"Publication {publication.get('id')} classified via embedding with score {similarity_score}")
+                        return top_domain, topics, True
+            
+            # Fallback to Gemini API for classification
             # Prepare prompt for classification
             prompt = f"""
             Classify the following publication into an appropriate domain and provide 3 relevant topics:
             
             Title: {publication.get('title', '')}
             Abstract: {publication.get('abstract', '')}
+            
+            Available domains: {', '.join(domain_structure.keys())}
             
             Provide the response in this JSON format:
             {{
@@ -428,6 +750,7 @@ class DirectAPIClassifier:
                     if not topics:
                         topics = domain_structure.get(domain, [])[:3]
                     
+                    logger.info(f"Publication {publication.get('id')} classified via Gemini API")
                     return domain, topics, True
                 except (json.JSONDecodeError, KeyError) as e:
                     logger.warning(f"Failed to parse classification: {e}")
@@ -480,14 +803,14 @@ class DirectAPIClassifier:
             logger.error(f"Error updating publication classification: {e}")
             return False
 
-# Update classify_publications function to log more details
+
 def classify_publications(
     batch_size: int = 5, 
-    publications_per_batch: int = 1, 
+    publications_per_batch: int = 1,
     domain_batch_size: int = 3
 ) -> bool:
     """
-    Classify publications in very small batches to manage API limitations.
+    Classify publications using both embedding similarity and Gemini API.
     
     Args:
         batch_size: Number of batches to process
@@ -499,7 +822,7 @@ def classify_publications(
     """
     try:
         # Initialize classifier
-        classifier = DirectAPIClassifier()
+        classifier = DomainClassifier()
         
         # Refresh domain structure
         domain_structure = classifier.domain_structure

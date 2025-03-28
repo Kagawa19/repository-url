@@ -4,7 +4,6 @@ from airflow.operators.python_operator import PythonOperator
 import os
 import logging
 import sys
-import importlib
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -61,6 +60,11 @@ def create_redis_index_task():
     Task to create Redis indexes using ExpertRedisIndexManager.
     """
     try:
+        # Set environment variables for offline mode
+        os.environ['TRANSFORMERS_OFFLINE'] = '1'
+        os.environ['HF_DATASETS_OFFLINE'] = '1'
+        os.environ['HF_HUB_OFFLINE'] = '1'
+        
         # Import the Redis index manager directly
         from ai_services_api.services.search.indexing.redis_index_manager import ExpertRedisIndexManager
         
