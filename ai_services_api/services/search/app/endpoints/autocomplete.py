@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import List, Optional
 import httpx
 import logging
@@ -26,6 +26,10 @@ class Config:
     ]
     MAX_SUGGESTIONS = 5
     CACHE_EXPIRY = 3600  # 1 hour cache for suggestions
+
+# Check and log if API key is missing
+if not Config.GEMINI_API_KEY:
+    logger.warning("GEMINI_API_KEY environment variable not set. Autocomplete will use fallback suggestions.")
 
 # Custom exceptions
 class AutocompleteError(Exception):
@@ -82,20 +86,22 @@ async def make_http_request(
         logger.error(f"HTTP Request Error: {e}")
         raise APIProviderError(f"Network error: {e}")
     except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP Status Error: {e}")
+        logger.error(f"HTTP Status Error: {e.response.status_code}: {e.response.text}")
         raise APIProviderError(f"API returned error: {e.response.status_code}")
+    except Exception as e:
+        logger.error(f"Unexpected error during HTTP request: {str(e)}")
+        raise APIProviderError(f"Unexpected error: {str(e)}")
 
-# Cached autocomplete suggestions
-@lru_cache(maxsize=100)
-def _cached_suggestions(query: str) -> List[str]:
+# Define default suggestions function
+def get_default_suggestions(query: str) -> List[str]:
     """
-    Provide cached default suggestions as a fallback.
+    Provide default suggestions as a fallback.
     
     Args:
         query (str): Input query
     
     Returns:
-        List[str]: Cached suggestions
+        List[str]: Default suggestions
     """
     # Default fallback suggestions based on query
     default_map = {
@@ -110,7 +116,13 @@ def _cached_suggestions(query: str) -> List[str]:
         ""
     )
     
-    return default_map[matched_category][:Config.MAX_SUGGESTIONS]
+    return default_map.get(matched_category, [])[:Config.MAX_SUGGESTIONS]
+
+# Cache wrapper for suggestions
+@lru_cache(maxsize=100)
+def cached_suggestions(query: str) -> List[str]:
+    """Cache layer for default suggestions"""
+    return get_default_suggestions(query)
 
 async def get_gemini_autocomplete(query: str) -> List[str]:
     """
@@ -124,11 +136,11 @@ async def get_gemini_autocomplete(query: str) -> List[str]:
     """
     # Validate API key
     if not validate_api_key(Config.GEMINI_API_KEY):
-        logger.warning("Invalid Gemini API key")
-        return _cached_suggestions(query)
+        logger.warning("Invalid or missing Gemini API key")
+        return cached_suggestions(query)
     
-    # Gemini API endpoint
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={Config.GEMINI_API_KEY}"
+    # Gemini API endpoint - using updated model name
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-pro-001:generateContent?key={Config.GEMINI_API_KEY}"
     
     # Payload for Gemini API
     payload = {
@@ -147,26 +159,47 @@ async def get_gemini_autocomplete(query: str) -> List[str]:
         # Make request to Gemini API
         response = await make_http_request(url, json_data=payload)
         
-        # Extract suggestions
-        if (candidates := response.get("candidates")):
-            text_response = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        # Extract suggestions with better error handling
+        candidates = response.get("candidates", [])
+        if not candidates:
+            logger.warning("No candidates in Gemini API response")
+            return cached_suggestions(query)
             
-            # Process suggestions
-            suggestions = [
-                suggestion.strip() 
-                for suggestion in text_response.split("\n") 
-                if suggestion.strip() and suggestion.strip().lower() != query.lower()
-            ]
-            
-            # Return up to MAX_SUGGESTIONS, fallback to cached if empty
-            return suggestions[:Config.MAX_SUGGESTIONS] or _cached_suggestions(query)
+        content = candidates[0].get("content", {})
+        parts = content.get("parts", [])
         
-        # Fallback if no suggestions
-        return _cached_suggestions(query)
+        if not parts:
+            logger.warning("No parts in Gemini API response content")
+            return cached_suggestions(query)
+            
+        text_response = parts[0].get("text", "")
+        
+        if not text_response:
+            logger.warning("Empty text in Gemini API response")
+            return cached_suggestions(query)
+        
+        # Process suggestions
+        suggestions = [
+            suggestion.strip() 
+            for suggestion in text_response.split("\n") 
+            if suggestion.strip() and suggestion.strip().lower() != query.lower()
+        ]
+        
+        # Return up to MAX_SUGGESTIONS, fallback to cached if empty
+        if not suggestions:
+            logger.info("No valid suggestions from Gemini API, using fallback")
+            return cached_suggestions(query)
+            
+        return suggestions[:Config.MAX_SUGGESTIONS]
     
-    except APIProviderError:
-        # Fallback to cached suggestions on API errors
-        return _cached_suggestions(query)
+    except APIProviderError as e:
+        # Log the specific error
+        logger.error(f"Gemini API error: {str(e)}")
+        return cached_suggestions(query)
+    except Exception as e:
+        # Catch all unexpected errors
+        logger.error(f"Unexpected error in get_gemini_autocomplete: {str(e)}")
+        return cached_suggestions(query)
 
 # FastAPI Router
 router = APIRouter()
@@ -191,9 +224,9 @@ async def autocomplete(
         return results
     
     except Exception as e:
-        logger.error(f"Unexpected error in autocomplete: {e}")
-        # Return cached suggestions or empty list as final fallback
-        return _cached_suggestions(q)
+        logger.error(f"Unexpected error in autocomplete endpoint: {str(e)}")
+        # Return cached suggestions as final fallback
+        return cached_suggestions(q)
 
 @router.get("/health")
 async def health_check():

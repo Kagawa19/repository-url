@@ -2,151 +2,179 @@ from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
 from airflow.utils.dates import days_ago
 from datetime import timedelta
-import logging
 import os
-from dotenv import load_dotenv
+import logging
+import psycopg2
+from contextlib import contextmanager
+from urllib.parse import urlparse
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s: %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
 logger = logging.getLogger(__name__)
 
+# Database connection utilities
+def get_db_connection_params():
+    """Get database connection parameters from environment variables."""
+    database_url = os.getenv('DATABASE_URL')
+    if database_url:
+        parsed_url = urlparse(database_url)
+        return {
+            'host': parsed_url.hostname,
+            'port': parsed_url.port,
+            'dbname': parsed_url.path[1:],
+            'user': parsed_url.username,
+            'password': parsed_url.password
+        }
+    
+    # In Docker Compose, always use service name
+    return {
+        'host': os.getenv('POSTGRES_HOST', 'postgres'),  # Always use service name in Docker
+        'port': os.getenv('POSTGRES_PORT', '5432'),
+        'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
+        'user': os.getenv('POSTGRES_USER', 'postgres'),
+        'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres')
+    }
+
+
+@contextmanager
+def get_db_connection(dbname=None):
+    """Get database connection with proper error handling and connection cleanup."""
+    params = get_db_connection_params()
+    if dbname:
+        params['dbname'] = dbname
+    
+    conn = None
+    try:
+        conn = psycopg2.connect(**params)
+        logger.info(f"Connected to database: {params['dbname']} at {params['host']}")
+        yield conn
+    except psycopg2.OperationalError as e:
+        logger.error(f"Database connection error: {e}")
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
+            logger.info("Database connection closed")
+
+@contextmanager
+def get_db_cursor(autocommit=False):
+    """Get database cursor with transaction management."""
+    with get_db_connection() as conn:
+        conn.autocommit = autocommit
+        cur = conn.cursor()
+        try:
+            yield cur, conn
+        except Exception as e:
+            if not autocommit:
+                conn.rollback()
+                logger.error(f"Transaction rolled back due to error: {e}")
+            raise
+        finally:
+            cur.close()
+
+# Load environment variables
 def load_environment_variables():
-    """Load environment variables from .env file."""
-    try:
-        # Try to load from .env file in different potential locations
-        dotenv_paths = [
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"),
-            "/opt/airflow/.env"
-        ]
-        
-        for dotenv_path in dotenv_paths:
-            if os.path.exists(dotenv_path):
-                load_dotenv(dotenv_path)
-                logger.info(f"Loaded environment variables from {dotenv_path}")
-                break
-        else:
-            logger.warning("No .env file found, using system environment variables")
-    except Exception as e:
-        logger.error(f"Error loading environment variables: {e}")
+    """Load environment variables needed for processing."""
+    logger.info("Environment variables loaded successfully")
 
-def check_environment():
-    """Check if required environment variables are set."""
-    gemini_api_key = os.getenv('GEMINI_API_KEY')
-    if not gemini_api_key:
-        logger.warning("GEMINI_API_KEY environment variable is not set.")
-        logger.warning("For full functionality, ensure GEMINI_API_KEY is set in your environment or .env file")
-        return False
-    return True
-
-def classify_publications_task(**context):
-    """
-    Task to classify publications with domains and topics
-    """
-    # Load environment variables
-    load_environment_variables()
-    
-    # Check environment variables first
-    has_api_key = check_environment()
-    if not has_api_key:
-        logger.warning("Running classification without Gemini API key. Results may be less accurate.")
-    
+# Lazy import for graph initializer to reduce initial load time
+def lazy_import(module_path, class_name):
+    """Import a class only when needed."""
     try:
-        # Import the domain classification service
-        # Make sure this file is in the same directory as your DAG or in the PYTHONPATH
-        from domain_classification_service import run_classification_service, print_domain_structure
-        
-        # Run the classification service with batch limits based on environment
-        batch_limit = int(os.getenv('CLASSIFICATION_BATCH_LIMIT', '5'))
-        
-        # Get execution date from context for logging
-        execution_date = context.get('execution_date', 'unknown')
-        logger.info(f"Running classification task on {execution_date} with batch limit {batch_limit}")
-        
-        # Run the classification service
-        run_classification_service(batch_limit=batch_limit)
-        
-        # Print domain structure report
-        logger.info("Domain Structure Report:")
-        domain_report = print_domain_structure()
-        
-        return True
-    except Exception as e:
-        logger.error(f"Error in publication classification task: {e}")
+        module = __import__(module_path, fromlist=[class_name])
+        return getattr(module, class_name)
+    except (ImportError, AttributeError) as e:
+        logger.error(f"Failed to import {class_name} from {module_path}: {e}")
         raise
 
-# Email notification functions
-def success_email(context):
-    """Send email notification on task success."""
-    task_instance = context['task_instance']
-    task_id = task_instance.task_id
-    dag_id = task_instance.dag_id
-    execution_date = context['execution_date']
+def initialize_graph_task():
+    """
+    Initialize graph database with proper connection handling
+    """
+    load_environment_variables()
     
-    logger.info(f"Success: Task {task_id} in DAG {dag_id} succeeded on {execution_date}")
-    # In a real setup, send an actual email here
+    # Import the GraphDatabaseInitializer class
+    try:
+        # Get the class (not an instance yet)
+        GraphDatabaseInitializerClass = lazy_import(
+            'ai_services_api.services.recommendation.graph_initializer', 
+            'GraphDatabaseInitializer'
+        )
+        
+        # Verify database connectivity before proceeding
+        with get_db_cursor() as (cur, conn):
+            # Check if required tables exist
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'experts_expert'
+                )
+            """)
+            experts_table_exists = cur.fetchone()[0]
+            
+            # Check if there are experts to process
+            if experts_table_exists:
+                cur.execute("SELECT COUNT(*) FROM experts_expert")
+                expert_count = cur.fetchone()[0]
+                
+                if expert_count == 0:
+                    logger.warning("No experts found in database. Graph initialization may be incomplete.")
+            else:
+                logger.error("Required 'experts_expert' table does not exist")
+                raise Exception("Required 'experts_expert' table not found")
+        
+        # Proceed with graph initialization
+        logger.info("Starting graph database initialization...")
+        
+        # Create an instance of GraphDatabaseInitializer
+        graph_initializer = GraphDatabaseInitializerClass()
+        
+        # Call initialize_graph on the instance
+        graph_success = graph_initializer.initialize_graph()
+        
+        if not graph_success:
+            logger.error("Graph initialization failed")
+            raise Exception("Graph initialization failed")
+        
+        logger.info("Graph initialization complete!")
+        
+        return "Graph initialization completed successfully"
+        
+    except ImportError as e:
+        logger.error(f"Failed to import required module: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Graph initialization failed: {e}")
+        raise
+    finally:
+        # Only try to close the initializer if it was successfully created
+        if 'graph_initializer' in locals() and graph_initializer is not None:
+            try:
+                graph_initializer.close()
+            except Exception as e:
+                logger.error(f"Error closing graph initializer: {e}")
 
-def failure_email(context):
-    """Send email notification on task failure."""
-    task_instance = context['task_instance']
-    task_id = task_instance.task_id
-    dag_id = task_instance.dag_id
-    execution_date = context['execution_date']
-    exception = context.get('exception')
-    
-    logger.error(f"Failure: Task {task_id} in DAG {dag_id} failed on {execution_date}")
-    logger.error(f"Exception: {exception}")
-    # In a real setup, send an actual email here
-
-# DAG default arguments
+# DAG configuration
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
     'start_date': days_ago(1),
-    'email': ['briankimu97@gmail.com'],  # Replace with your email address
-    'email_on_failure': True,
+    'email_on_failure': False,
     'email_on_retry': False,
-    'email_on_success': True,
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
 }
 
-# Define the DAG
 dag = DAG(
-    'publication_domain_classification',
+    'graph_initialization_dag',
     default_args=default_args,
-    description='Classify publications into domains and topics',
-    # Schedule options:
-    # - '@daily' for daily runs
-    # - '@weekly' for weekly runs
-    # - '0 0 * * *' for once a day at midnight
-    # - '0 */12 * * *' for every 12 hours
-    # - '0 0 * * 1-5' for weekdays at midnight
-    schedule_interval='@daily',  # Run daily to keep up with new publications
+    description='Monthly graph database initialization',
+    schedule_interval='@monthly',
     catchup=False
 )
 
-# Define the classification task
-classify_task = PythonOperator(
-    task_id='classify_publications',
-    python_callable=classify_publications_task,
-    on_success_callback=success_email,
-    on_failure_callback=failure_email,
-    provide_context=True,
-    dag=dag
+# Define task
+initialize_graph_task_operator = PythonOperator(
+    task_id='initialize_graph_database',
+    python_callable=initialize_graph_task,
+    dag=dag,
 )
-
-# Add a task to generate a report (you can expand this in the future)
-# report_task = PythonOperator(
-#     task_id='generate_classification_report',
-#     python_callable=generate_report_task,
-#     provide_context=True,
-#     dag=dag
-# )
-
-# Define task dependencies
-# classify_task >> report_task
