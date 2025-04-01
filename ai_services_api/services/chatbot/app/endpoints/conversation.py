@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi.responses import JSONResponse
 from typing import Optional, Dict
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import json
 from datetime import datetime
 import logging
@@ -27,6 +28,14 @@ message_handler = MessageHandler(llm_manager)
 rate_limiter = DynamicRateLimiter()
 redis_pool = DynamicRedisPool()
 
+# Request and response models
+class ChatRequest(BaseModel):
+    message: str = Field(..., description="The user's chat message", min_length=1)
+
+class ErrorResponse(BaseModel):
+    error: str
+    message: str
+    retry_after: Optional[int] = None
 
 class ChatResponse(BaseModel):
     response: str
@@ -177,14 +186,32 @@ async def process_chat_request(query: str, user_id: str, redis_client) -> ChatRe
             status_code=500, 
             detail=f"Internal server error: {str(critical_error)}"
         )
-@router.get("/chat/{query}")
+
+# Updated POST endpoint for chat
+@router.post("/chat", response_model=ChatResponse, responses={
+    400: {"model": ErrorResponse, "description": "Missing user ID or invalid request"},
+    429: {"model": ErrorResponse, "description": "Rate limit exceeded"},
+    500: {"model": ErrorResponse, "description": "Internal server error"},
+    503: {"model": ErrorResponse, "description": "Service temporarily unavailable"},
+    504: {"model": ErrorResponse, "description": "Request timeout"}
+})
 async def chat_endpoint(
-    query: str,
+    request_data: ChatRequest,
     request: Request,
     user_id: str = Depends(get_user_id),
     redis_client: Redis = Depends(get_redis)
     ):
-    """Chat endpoint with improved rate limiting and error handling."""
+    """
+    Process chat messages sent by users.
+    
+    This endpoint accepts a chat message in the request body and returns the AI's response.
+    Each request must include the X-User-ID header for user identification and rate limiting.
+    
+    Rate limits apply to prevent abuse.
+    """
+    # Extract message from request body
+    query = request_data.message
+    
     # Log request information
     logger.info(f"Chat request received - User: {user_id}, Query length: {len(query)}")
     
@@ -282,9 +309,16 @@ async def chat_endpoint(
                 }
             )
 
-@router.get("/chat/limit/status")
+@router.get("/chat/limit/status", response_model=Dict)
 async def get_rate_limit_status(user_id: str = Depends(get_user_id)):
-    """Get current rate limit status for user."""
+    """
+    Get current rate limit status for the user.
+    
+    Returns information about the user's current rate limit, 
+    remaining requests, and reset time.
+    
+    Requires X-User-ID header for user identification.
+    """
     try:
         current_limit = await rate_limiter.get_user_limit(user_id)
         limit_key = await rate_limiter.get_limit_key(user_id)
@@ -300,128 +334,6 @@ async def get_rate_limit_status(user_id: str = Depends(get_user_id)):
         logger.error(f"Error getting rate limit status: {e}")
         raise HTTPException(status_code=500, detail="Error checking rate limit status")
 
-@router.get("/test/chat/{query}")
-async def test_chat_endpoint(
-        query: str,
-        request: Request,
-        user_id: str = "test_user_123",
-        redis_client: Redis = Depends(get_redis)
-    ):
-        """
-        Test endpoint with same rate limiting and processing.
-        
-        This endpoint mirrors the main chat endpoint but uses a test user ID.
-        Useful for testing and development purposes.
-        """
-        # Log request information
-        logger.info(f"Test endpoint called with query: {query}, User: {user_id}")
-        
-        # Check rate limit with enhanced error handling
-        if not await rate_limiter.check_rate_limit(user_id):
-            remaining_time = await rate_limiter.get_window_remaining(user_id)
-            retry_after = max(1, min(60, remaining_time))  # Cap retry between 1-60 seconds
-            
-            # Log rate limit event
-            logger.warning(f"Rate limit exceeded for test user: {user_id}, retry after {retry_after}s")
-            
-            # Check if there's a global circuit breaker active
-            redis_circuit_key = "global:api_circuit_breaker"
-            circuit_active = await redis_client.get(redis_circuit_key)
-            
-            if circuit_active:
-                # Service-wide circuit breaker is active
-                circuit_ttl = await redis_client.ttl(redis_circuit_key)
-                error_detail = {
-                    "error": "Service temporarily unavailable",
-                    "retry_after": circuit_ttl,
-                    "message": "Our service is experiencing high demand. Please try again shortly.",
-                    "test_mode": True
-                }
-                logger.warning(f"Circuit breaker active, returning 503 response with {circuit_ttl}s retry")
-                return JSONResponse(
-                    status_code=503,
-                    content=error_detail,
-                    headers={"Retry-After": str(circuit_ttl)}
-                )
-            else:
-                # Standard rate limit for this user
-                error_detail = {
-                    "error": "Rate limit exceeded",
-                    "retry_after": retry_after,
-                    "limit": await rate_limiter.get_user_limit(user_id),
-                    "message": "Please wait before making another request",
-                    "test_mode": True
-                }
-                return JSONResponse(
-                    status_code=429,
-                    content=error_detail,
-                    headers={"Retry-After": str(retry_after)}
-                )
-        
-        try:
-            # Process the request
-            start_time = time.time()
-            
-            # Process the chat request with database connection
-            async with DatabaseConnector.get_connection() as conn:
-                response = await process_chat_request(query, user_id, redis_client)
-                
-                # Add test-specific metadata
-                response_dict = response.dict()
-                response_dict["test_mode"] = True
-                response_dict["test_user_id"] = user_id
-                
-                # Log successful processing
-                processing_time = time.time() - start_time
-                logger.info(f"Test chat request processed successfully - Time: {processing_time:.2f}s, User: {user_id}")
-                
-                return response_dict
-            
-        except Exception as e:
-            logger.error(f"Error in test chat endpoint: {e}", exc_info=True)
-            
-            # Check for Google API rate limit errors
-            if any(x in str(e).lower() for x in ["429", "quota", "rate limit", "resource exhausted"]):
-                logger.warning(f"Google API rate limit detected in test endpoint: {str(e)}")
-                
-                # Record the rate limit error to trigger global circuit breaker if needed
-                await rate_limiter._record_api_rate_limit_error(redis_client)
-                
-                # Return appropriate error response
-                return JSONResponse(
-                    status_code=503,
-                    content={
-                        "error": "Service temporarily unavailable",
-                        "message": "Our service is experiencing high demand. Please try again in a moment.",
-                        "retry_after": 30,
-                        "test_mode": True
-                    },
-                    headers={"Retry-After": "30"}
-                )
-                
-            # Check for timeout errors
-            elif any(x in str(e).lower() for x in ["timeout", "deadline exceeded"]):
-                logger.warning(f"Request timeout in test endpoint: {str(e)}")
-                return JSONResponse(
-                    status_code=504,
-                    content={
-                        "error": "Request timeout",
-                        "message": "Your request took too long to process. Please try a shorter query.",
-                        "test_mode": True
-                    }
-                )
-                
-            # Generic error handling
-            else:
-                logger.error(f"Unhandled error in test endpoint: {str(e)}")
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "error": "Internal server error in test endpoint",
-                        "message": str(e),
-                        "test_mode": True
-                    }
-                )
 # Startup and shutdown events
 async def startup_event():
     """Initialize database and Redis connections on startup."""

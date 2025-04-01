@@ -62,13 +62,19 @@ async def shutdown_event():
 # Add shutdown event handler
 app.add_event_handler("shutdown", shutdown_event)
 
-# Configure CORS
+# Configure CORS with specific origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",     # Local development
+        "http://localhost:3001",     # Alternative local port
+        "http://10.176.203.79",      # Server IP
+        "http://10.176.203.79:3001"  # Server IP with port
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["Retry-After"]   # Important for rate limiting
 )
 
 # Include the API routers
@@ -107,8 +113,16 @@ async def read_content():
 
 # Health check endpoint
 @app.get("/health")
-def health_check() -> str:
-    return "Service is healthy!"
+def health_check():
+    """Service health check endpoint."""
+    return {
+        "status": "healthy",
+        "services": {
+            "api": "up",
+            "redis": "up",
+            "llm": "up"
+        }
+    }
 
 if __name__ == "__main__":
     import uvicorn
