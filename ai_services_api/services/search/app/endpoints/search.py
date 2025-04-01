@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Request, Depends
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 from pydantic import BaseModel
 import logging
 from datetime import datetime, timezone
@@ -38,8 +38,8 @@ class ExpertSearchResult(BaseModel):
     unit: str
     contact: str
     is_active: bool
-    score: float = None
-    bio: str = None  
+    score: Optional[float] = None
+    bio: Optional[str] = None  
     knowledge_expertise: List[str] = []
 
 class SearchResponse(BaseModel):
@@ -47,11 +47,13 @@ class SearchResponse(BaseModel):
     experts: List[ExpertSearchResult]
     user_id: str
     session_id: str
+    refinements: Optional[Dict[str, Any]] = None  # New optional field for refinements
 
 class PredictionResponse(BaseModel):
     predictions: List[str]
     confidence_scores: List[float]
     user_id: str
+    refinements: Optional[Dict[str, Any]] = None  # New optional field
 
 async def get_redis():
     logger.debug("Initializing Redis connection")
@@ -179,11 +181,24 @@ async def record_prediction(conn, session_id: str, user_id: str, partial_query: 
         cur.close()
 
 async def process_expert_search(query: str, user_id: str, active_only: bool = True, redis_client: Redis = None) -> SearchResponse:
+    """
+    Process expert search with added refinement suggestions.
+    
+    Args:
+        query (str): Search query
+        user_id (str): User identifier
+        active_only (bool): Filter for active experts only
+        redis_client (Redis, optional): Redis client for caching
+    
+    Returns:
+        SearchResponse: Search results including optional refinements
+    """
     logger.info(f"Processing expert search - Query: {query}, User: {user_id}")
     print(f"Starting expert search process for query: {query}")
     
     conn = None
     try:
+        # Check Redis cache first
         if redis_client:
             cache_key = f"expert_search:{user_id}:{query}:{active_only}"
             cached_response = await redis_client.get(cache_key)
@@ -192,6 +207,7 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
                 print("Retrieved results from cache")
                 return SearchResponse(**json.loads(cached_response))
 
+        # Establish database connection
         conn = get_db_connection()
         session_id = await get_or_create_session(conn, user_id)
         logger.debug(f"Created session: {session_id}")
@@ -205,11 +221,12 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
         logger.info(f"Search completed in {response_time:.2f} seconds with {len(results)} results")
         print(f"Found {len(results)} experts in {response_time:.2f} seconds")
 
+        # Format results
         formatted_results = [
             ExpertSearchResult(
                 id=str(result['id']),
-                first_name=result['first_name'],
-                last_name=result['last_name'],
+                first_name=result.get('first_name', ''),
+                last_name=result.get('last_name', ''),
                 designation=result.get('designation', ''),
                 theme=result.get('theme', ''),
                 unit=result.get('unit', ''),
@@ -221,26 +238,26 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
             ) for result in results
         ]
         
+        # Record search analytics
         await record_search(conn, session_id, user_id, query, results, response_time)
         
-        try:
-            ml_predictor.update(query, user_id=user_id)
-            logger.debug("ML predictor updated successfully")
-        except Exception as e:
-            logger.error(f"ML predictor update failed: {str(e)}", exc_info=True)
-            print(f"ML predictor update error: {str(e)}")
+        # Generate refinement suggestions
+        refinements = search_manager.get_search_refinements(query, results)
         
+        # Prepare response with refinements
         response = SearchResponse(
             total_results=len(formatted_results),
             experts=formatted_results,
             user_id=user_id,
-            session_id=session_id
+            session_id=session_id,
+            refinements=refinements  # Add refinement suggestions
         )
 
+        # Cache the response if Redis client is available
         if redis_client:
             await redis_client.setex(
                 cache_key,
-                3600,
+                3600,  # Cache for 1 hour
                 json.dumps(response.dict())
             )
             logger.debug(f"Cached search results with key: {cache_key}")
@@ -256,12 +273,36 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
             conn.close()
             logger.debug("Database connection closed")
 
+# Existing API endpoints remain the same
+@router.get("/experts/search/{query}")
+async def search_experts(
+    query: str,
+    request: Request,
+    active_only: bool = True,
+    user_id: str = Depends(get_user_id),
+    redis_client: Redis = Depends(get_redis)
+):
+    logger.info(f"Received expert search request - Query: {query}, User: {user_id}")
+    return await process_expert_search(query, user_id, active_only, redis_client)
+
 async def process_query_prediction(partial_query: str, user_id: str, redis_client: Redis = None) -> PredictionResponse:
+    """
+    Enhanced query prediction with refinement suggestions
+    
+    Args:
+        partial_query (str): Partial search query
+        user_id (str): User identifier
+        redis_client (Redis, optional): Redis client for caching
+    
+    Returns:
+        PredictionResponse: Prediction results with optional refinements
+    """
     logger.info(f"Processing query prediction - Partial query: {partial_query}, User: {user_id}")
     print(f"Starting prediction process for partial query: {partial_query}")
     
     conn = None
     try:
+        # Check Redis cache first
         if redis_client:
             cache_key = f"query_prediction:{user_id}:{partial_query}"
             cached_response = await redis_client.get(cache_key)
@@ -270,15 +311,21 @@ async def process_query_prediction(partial_query: str, user_id: str, redis_clien
                 print("Retrieved predictions from cache")
                 return PredictionResponse(**json.loads(cached_response))
 
+        # Establish database connection
         conn = get_db_connection()
         session_id = await get_or_create_session(conn, user_id)
         
+        # Generate predictions
         predictions = ml_predictor.predict(partial_query, user_id=user_id)
         confidence_scores = [1.0 - (i * 0.1) for i in range(len(predictions))]
         
         logger.debug(f"Generated {len(predictions)} predictions")
         print(f"Generated predictions: {predictions}")
         
+        # Generate refinement suggestions
+        refinements = generate_predictive_refinements(partial_query, predictions)
+        
+        # Record prediction
         await record_prediction(
             conn,
             session_id,
@@ -288,16 +335,19 @@ async def process_query_prediction(partial_query: str, user_id: str, redis_clien
             confidence_scores
         )
         
+        # Prepare response with optional refinements
         response = PredictionResponse(
             predictions=predictions,
             confidence_scores=confidence_scores,
-            user_id=user_id
+            user_id=user_id,
+            refinements=refinements
         )
 
+        # Cache the response if Redis client is available
         if redis_client:
             await redis_client.setex(
                 cache_key,
-                1800,
+                1800,  # 30 minutes
                 json.dumps(response.dict())
             )
             logger.debug(f"Cached predictions with key: {cache_key}")
@@ -313,6 +363,75 @@ async def process_query_prediction(partial_query: str, user_id: str, redis_clien
             conn.close()
             logger.debug("Database connection closed")
 
+def generate_predictive_refinements(partial_query: str, predictions: List[str]) -> Dict[str, Any]:
+    """
+    Generate refinement suggestions based on partial query and predictions
+    
+    Args:
+        partial_query (str): Initial partial query
+        predictions (List[str]): Predicted full queries
+    
+    Returns:
+        Dict: Refinement suggestions
+    """
+    try:
+        # Import necessary modules
+        from ai_services_api.services.search.indexing.index_creator import ExpertSearchIndexManager
+        
+        # Initialize search manager
+        search_manager = ExpertSearchIndexManager()
+        
+        # Generate related filters and expertise areas
+        related_filters = []
+        expertise_areas = []
+        
+        # Add a filter for query type
+        related_filters.append({
+            "type": "query_type",
+            "label": "Query Suggestions",
+            "values": predictions[:3]
+        })
+        
+        # Try to extract potential expertise areas from predictions
+        for pred in predictions:
+            # Use existing method to extract expertise
+            pred_expertise = set()
+            words = pred.lower().split()
+            for word in words:
+                # Simple extraction of potential expertise areas
+                if len(word) > 3:  # Avoid very short words
+                    pred_expertise.add(word.capitalize())
+            
+            expertise_areas.extend(list(pred_expertise))
+        
+        # Remove duplicates while preserving order
+        expertise_areas = list(dict.fromkeys(expertise_areas))[:5]
+        
+        # Construct refinements
+        refinements = {
+            "filters": related_filters,
+            "related_queries": predictions,
+            "expertise_areas": expertise_areas
+        }
+        
+        logger.info(f"Generated predictive refinements for query: {partial_query}")
+        return refinements
+    
+    except Exception as e:
+        logger.error(f"Error in predictive refinements: {str(e)}")
+        return {}
+
+# Existing endpoint remains the same
+@router.get("/experts/predict/{partial_query}")
+async def predict_query(
+    partial_query: str,
+    request: Request,
+    user_id: str = Depends(get_user_id),
+    redis_client: Redis = Depends(get_redis)
+):
+    logger.info(f"Received query prediction request - Partial query: {partial_query}, User: {user_id}")
+    return await process_query_prediction(partial_query, user_id, redis_client)
+
 # API Endpoints
 @router.get("/experts/search/{query}")
 async def search_experts(
@@ -325,15 +444,7 @@ async def search_experts(
     logger.info(f"Received expert search request - Query: {query}, User: {user_id}")
     return await process_expert_search(query, user_id, active_only, redis_client)
 
-@router.get("/experts/predict/{partial_query}")
-async def predict_query(
-    partial_query: str,
-    request: Request,
-    user_id: str = Depends(get_user_id),
-    redis_client: Redis = Depends(get_redis)
-):
-    logger.info(f"Received query prediction request - Partial query: {partial_query}, User: {user_id}")
-    return await process_query_prediction(partial_query, user_id, redis_client)
+
 
 @router.get("/test/experts/search/{query}")
 async def test_search_experts(

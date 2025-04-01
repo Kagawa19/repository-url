@@ -10,7 +10,9 @@ def test_predictive_search():
         "machine",
         "data",
         "ai",
-        "learning"
+        "learning",
+        "natural language",  # Add more diverse queries
+        "computer vision"
     ]
     
     # Base URL for predictive search
@@ -45,6 +47,7 @@ def test_predictive_search():
             assert 'predictions' in response_data, f"Response for '{query}' is missing 'predictions' field"
             assert 'confidence_scores' in response_data, f"Response for '{query}' is missing 'confidence_scores' field"
             assert 'user_id' in response_data, f"Response for '{query}' is missing 'user_id' field"
+            assert 'refinements' in response_data, f"Response for '{query}' is missing 'refinements' field"  # Add this line
             
             # Validate predictions and confidence scores
             predictions = response_data['predictions']
@@ -62,6 +65,19 @@ def test_predictive_search():
             for pred, conf in zip(predictions, confidence_scores):
                 print(f"- {pred} (Confidence: {conf:.2f})")
             
+            # Validate refinements
+            refinements = response_data['refinements']
+            assert isinstance(refinements, dict), f"Refinements for '{query}' should be a dictionary"
+            assert 'filters' in refinements, f"Refinements for '{query}' should contain 'filters'"
+            assert 'related_queries' in refinements, f"Refinements for '{query}' should contain 'related_queries'"
+            assert 'expertise_areas' in refinements, f"Refinements for '{query}' should contain 'expertise_areas'"
+            
+            # Print out refinement suggestions
+            print("\nRefinement Suggestions:")
+            print(f"Filters: {refinements['filters']}")
+            print(f"Related Queries: {refinements['related_queries']}")
+            print(f"Expertise Areas: {refinements['expertise_areas']}")
+            
             print("\nValidation Passed ✓")
         
         except requests.exceptions.RequestException as e:
@@ -70,6 +86,9 @@ def test_predictive_search():
             if hasattr(e, 'response'):
                 print("Response content:", e.response.text)
             print(f"Error details: {e}")
+
+...
+
 
 def test_edge_cases():
     """
@@ -106,6 +125,7 @@ def test_edge_cases():
         except requests.exceptions.RequestException as e:
             print(f"Request failed for query '{query}': {e}")
 
+# Run the tests
 # Run the tests
 if __name__ == "__main__":
     print("Starting Predictive Search Testing")

@@ -668,6 +668,140 @@ class ExpertSearchIndexManager:
         except Exception as e:
             logger.error(f"Fatal error in create_redis_index: {e}")
             return False
+        
+    
+    def get_search_refinements(self, query: str, current_results: List[Dict]) -> Dict:
+        """
+        Generate search refinement suggestions based on current query and results.
+        
+        Args:
+            query (str): Original search query
+            current_results (List[Dict]): Current search results
+        
+        Returns:
+            Dict: Refinement suggestions with multiple categories
+        """
+        try:
+            # Import MLPredictor here to avoid potential circular import
+            from ai_services_api.services.search.ml.ml_predictor import MLPredictor
+            
+            # Create ML Predictor instance
+            ml_predictor = MLPredictor()
+            
+            refinements = {
+                "filters": self._suggest_filters(query, current_results),
+                "related_queries": self._suggest_related_queries(query, ml_predictor),
+                "expertise_areas": self._extract_expertise_areas(current_results)
+            }
+            
+            return refinements
+        except Exception as e:
+            logger.error(f"Error generating search refinements: {e}")
+            return {}
+
+    def _suggest_related_queries(self, query: str, ml_predictor) -> List[str]:
+        """Generate related query suggestions."""
+        try:
+            # Use MLPredictor to get related queries
+            related_queries = ml_predictor.predict(query, user_id="system", limit=5)
+            
+            # Enhance suggestions with query variations
+            variations = [
+                f"expert in {query}",
+                f"research about {query}",
+                f"top {query} specialists"
+            ]
+            
+            # Combine and remove duplicates
+            seen = set()
+            unique_suggestions = []
+            for suggestion in list(related_queries) + variations:
+                if suggestion.lower() not in seen and suggestion.lower() != query.lower():
+                    seen.add(suggestion.lower())
+                    unique_suggestions.append(suggestion)
+            
+            return unique_suggestions[:5]
+        
+        except Exception as e:
+            logger.error(f"Error generating related queries: {e}")
+            return []
+
+    def _suggest_filters(self, query: str, results: List[Dict]) -> List[Dict]:
+        """Generate filter suggestions based on current results."""
+        filters = []
+        
+        # Expertise areas filter
+        expertise_areas = set()
+        for result in results:
+            expertise = result.get('knowledge_expertise', [])
+            
+            # Normalize expertise to list
+            if expertise is None:
+                continue
+            
+            if isinstance(expertise, str):
+                expertise = [expertise]
+            elif isinstance(expertise, dict):
+                expertise = list(expertise.keys())
+            
+            # Ensure we only add non-empty strings
+            expertise = [str(e).strip() for e in expertise if e and str(e).strip()]
+            
+            expertise_areas.update(expertise)
+        
+        if expertise_areas:
+            filters.append({
+                "type": "expertise",
+                "label": "Expertise Areas",
+                "values": list(expertise_areas)[:5]
+            })
+        
+        # Unit/Department filter
+        departments = set()
+        for result in results:
+            dept = result.get('unit', '')
+            if dept and isinstance(dept, str) and dept.strip():
+                departments.add(dept.strip())
+        
+        if departments:
+            filters.append({
+                "type": "department",
+                "label": "Departments",
+                "values": list(departments)[:5]
+            })
+        
+        # Additional potential filters
+        filters.append({
+            "type": "active_status",
+            "label": "Availability",
+            "values": ["Active Experts", "All Experts"]
+        })
+        
+        return filters
+
+    def _extract_expertise_areas(self, results: List[Dict]) -> List[str]:
+        """Extract unique expertise areas from results."""
+        expertise_areas = set()
+        
+        for result in results:
+            expertise = result.get('knowledge_expertise', [])
+            
+            # Normalize expertise to list
+            if expertise is None:
+                continue
+            
+            if isinstance(expertise, str):
+                expertise = [expertise]
+            elif isinstance(expertise, dict):
+                expertise = list(expertise.keys())
+            
+            # Ensure we only add non-empty strings
+            expertise = [str(e).strip() for e in expertise if e and str(e).strip()]
+            
+            expertise_areas.update(expertise)
+        
+        # Return top 10 unique expertise areas
+        return list(expertise_areas)[:10]
 def initialize_expert_search():
     """Initialize expert search index."""
     try:
