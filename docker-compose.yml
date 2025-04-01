@@ -232,7 +232,7 @@ services:
     command: >
       bash -c "
         airflow db init &&
-        airflow users create --username ${AIRFLOW_USERNAME:-admin} --password ${AIRFLOW_PASSWORD:-neymar} --firstname ${AIRFLOW_FIRSTNAME:-Admin} --lastname ${AIRFLOW_LASTNAME:-User} --role Admin --email ${AIRFLOW_EMAIL:-briankimu97@gmail.com}
+        airflow users create --username ${AIRFLOW_USERNAME:-admin} --password ${AIRFLOW_PASSWORD:-neymar} --firstname ${AIRFLOW_FIRSTNAME:-Admin} --lastname ${AIRFLOW_LASTNAME:-User} --role Admin --email ${AIRFLOW_EMAIL:-briankimutai97@gmail.com}
       "
     environment:
       - AIRFLOW__CORE__EXECUTOR=CeleryExecutor
