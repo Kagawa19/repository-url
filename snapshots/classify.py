@@ -2,12 +2,13 @@
 import os
 import psycopg2
 import psycopg2.extras
-import numpy as np
 import json
 import logging
 from dotenv import load_dotenv
 import google.generativeai as genai
 import concurrent.futures
+from tqdm import tqdm
+import time
 
 # Load environment variables
 load_dotenv()
@@ -35,251 +36,316 @@ if not GEMINI_API_KEY:
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-class ResourceClassifier:
-    def __init__(self):
-        # Initialize Gemini model
-        self.model = genai.GenerativeModel('gemini-1.5-flash-latest')
+def get_best_model():
+    """
+    Find the best available text generation model
+    Prioritize fastest models
+    """
+    try:
+        # Convert generator to list for easier manipulation
+        models = list(genai.list_models())
         
-        # Classification tracking
-        self.classification_metadata = {
-            'version': '1.0',
-            'total_resources': 0,
-            'last_processed_timestamp': None,
-            'field_distribution': {}
-        }
+        # Priority list of model names to try (fastest first)
+        model_priorities = [
+            'gemini-1.5-flash-latest',  # Fastest model
+            'gemini-1.5-flash',
+            'gemini-1.5-pro-latest',
+            'gemini-1.5-pro'
+        ]
+        
+        for priority_model in model_priorities:
+            for model in models:
+                if priority_model in model.name:
+                    logger.info(f"Selected model: {model.name}")
+                    return model.name
+        
+        # Fallback
+        if models:
+            fallback_model = models[0].name
+            logger.warning(f"No preferred model found. Using fallback model: {fallback_model}")
+            return fallback_model
+        
+        logger.error("No available models found!")
+        return None
+    except Exception as e:
+        logger.error(f"Error getting best model: {e}")
+        return None
 
-    def fetch_resources_for_analysis(self, sample_size=5000):
-        """
-        Fetch a representative sample of resources for classification
+def get_existing_domains():
+    """
+    Retrieve existing domains from the database
+    
+    Returns:
+        list: List of existing domains
+    """
+    conn = psycopg2.connect(**DB_PARAMS)
+    try:
+        with conn.cursor() as cur:
+            query = """
+            SELECT DISTINCT unnest(domains) as domain
+            FROM resources_resource
+            WHERE domains IS NOT NULL
+              AND array_length(domains, 1) > 0
+            """
+            cur.execute(query)
+            domains = [row[0] for row in cur.fetchall()]
+            logger.info(f"Retrieved {len(domains)} existing domains")
+            return domains
+    except Exception as e:
+        logger.error(f"Error retrieving existing domains: {e}")
+        return []
+    finally:
+        conn.close()
+
+def classify_resource(text, model_name, existing_domains):
+    """
+    Classify a resource into domains and topics using Gemini API
+    
+    Args:
+        text (str): Text to classify (title, abstract, etc.)
+        model_name (str): Name of the Gemini model to use
+        existing_domains (list): List of existing domains
+    
+    Returns:
+        tuple: (domains, topics_dict, confidence) - classification result
+    """
+    try:
+        # Ensure text is not too long
+        if len(text) > 5000:
+            text = text[:5000]  # Limit input to prevent token limits
         
-        Args:
-            sample_size (int): Number of resources to sample
+        # Use selected Gemini model
+        model = genai.GenerativeModel(model_name)
         
-        Returns:
-            list: List of resource dictionaries
+        # Format domains for the prompt
+        domains_str = ", ".join(existing_domains) if existing_domains else "No existing domains yet"
+        
+        # Craft a prompt for classification
+        prompt = f"""Analyze the following text and classify it into appropriate domains.
+        
+        TEXT: {text}
+        
+        EXISTING DOMAINS: {domains_str}
+        
+        Your task is to:
+        1. Identify the most relevant domains for this text. You can use existing domains or suggest new ones if necessary.
+        2. For each domain, suggest 2-3 specific topics.
+        3. Provide a confidence score (0-100) for your classification.
+        
+        Format your response as valid JSON:
+        {{
+            "domains": ["Domain1", "Domain2"],
+            "topics": {{
+                "Domain1": ["Topic1", "Topic2", "Topic3"],
+                "Domain2": ["Topic1", "Topic2"]
+            }},
+            "confidence": 85
+        }}
+        
+        Include ONLY the JSON in your response.
         """
-        conn = psycopg2.connect(**DB_PARAMS)
+        
+        # Generate classification
+        response = model.generate_content(prompt)
+        result = response.text.strip()
+        
         try:
-            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                # Fetch a stratified random sample across different resource types
-                cur.execute("""
-                    WITH ranked_resources AS (
-                        SELECT 
-                            *,
-                            ROW_NUMBER() OVER (PARTITION BY type ORDER BY RANDOM()) as rn
-                        FROM resources_resource
-                        WHERE abstract IS NOT NULL AND LENGTH(TRIM(abstract)) > 100
-                    )
-                    SELECT id, title, abstract, type FROM ranked_resources
-                    WHERE rn <= %s
-                """, (sample_size // 6,))
-                
-                return [dict(row) for row in cur.fetchall()]
-        except Exception as e:
-            logger.error(f"Error fetching resources: {e}")
-            return []
-        finally:
-            conn.close()
-
-    def classify_resource_batch(self, resources):
-        """
-        Classify a batch of resources using Gemini
-        
-        Args:
-            resources (list): List of resource dictionaries
-        
-        Returns:
-            list: Classification results
-        """
-        def classify_single_resource(resource):
-            try:
-                # Combine title and abstract for comprehensive classification
-                text = f"Title: {resource.get('title', '')} \nAbstract: {resource.get('abstract', '')}"
-                
-                # Prompt for classification
-                prompt = f"""Carefully analyze the following research resource and classify it into one primary domain and one specific topic. 
-                Provide a JSON response with two keys: 'domain' and 'topic'.
-
-                Available Domains to choose from:
-                1. Social Sciences
-                2. Health Sciences
-                3. Economic Development
-                4. Policy & Governance
-                5. Education
-                6. Environmental Studies
-
-                Text to classify:
-                {text}
-
-                IMPORTANT: 
-                - Choose ONLY ONE domain
-                - Choose ONLY ONE topic
-                - If truly uncertain, return the domain and topic most closely matching the content
-                - Ensure your response is a valid JSON object
-                """
-                
-                # Generate classification
-                response = self.model.generate_content(prompt)
-                
-                # Parse the response
-                try:
-                    classification = json.loads(response.text.strip())
-                    classification['resource_id'] = resource['id']
-                    return classification
-                except json.JSONDecodeError:
-                    logger.warning(f"Failed to parse JSON for resource {resource['id']}")
-                    return None
+            # Extract JSON from response (in case there's additional text)
+            import re
+            json_match = re.search(r'({.*})', result, re.DOTALL)
+            if json_match:
+                result = json_match.group(1)
             
-            except Exception as e:
-                logger.error(f"Error classifying resource {resource.get('id')}: {e}")
-                return None
-        
-        # Use concurrent processing for efficiency
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            # Process resources in batches
-            classifications = list(filter(None, list(executor.map(classify_single_resource, resources))))
-        
-        return classifications
-
-    def update_resource_classifications(self, classifications):
-        """
-        Update resources with their classified domains and topics
-        
-        Args:
-            classifications (list): List of classification results
-        """
-        conn = psycopg2.connect(**DB_PARAMS)
-        try:
-            with conn.cursor() as cur:
-                # Prepare batch update
-                batch_update = [(
-                    classification['domain'], 
-                    json.dumps([classification['topic']]), 
-                    classification['resource_id']
-                ) for classification in classifications]
-                
-                # Batch update domains and topics
-                cur.executemany("""
-                    UPDATE resources_resource
-                    SET domains = ARRAY[%s],
-                        topics = %s,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
-                """, batch_update)
-                
-            conn.commit()
-            logger.info(f"Updated {len(classifications)} resource classifications")
-        
-        except Exception as e:
-            logger.error(f"Error updating resource classifications: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
-
-    def analyze_classification_distribution(self, classifications):
-        """
-        Analyze the distribution of domains and topics
-        
-        Args:
-            classifications (list): List of classification results
-        
-        Returns:
-            dict: Distribution of domains and topics
-        """
-        # Count domain and topic distributions
-        domain_counts = {}
-        topic_counts = {}
-        
-        for classification in classifications:
-            domain = classification.get('domain', 'Unclassified')
-            topic = classification.get('topic', 'Unclassified')
+            # Parse JSON response
+            classification = json.loads(result)
+            domains = classification.get("domains", [])
+            topics_dict = classification.get("topics", {})
+            confidence = classification.get("confidence", 0)
             
-            domain_counts[domain] = domain_counts.get(domain, 0) + 1
-            topic_counts[topic] = topic_counts.get(topic, 0) + 1
-        
-        return {
-            'domain_distribution': domain_counts,
-            'topic_distribution': topic_counts
-        }
-
-    def update_classification_metadata(self, distribution):
-        """
-        Update classification metadata in the database
-        
-        Args:
-            distribution (dict): Classification distribution
-        """
-        conn = psycopg2.connect(**DB_PARAMS)
-        try:
-            with conn.cursor() as cur:
-                # Create metadata table if not exists
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS resource_classification_metadata (
-                        id SERIAL PRIMARY KEY,
-                        total_resources INTEGER,
-                        last_processed_timestamp TIMESTAMP,
-                        classification_version VARCHAR(50),
-                        field_distribution JSONB,
-                        last_trained_model_path VARCHAR(255)
-                    )
-                """)
-                
-                # Insert metadata
-                cur.execute("""
-                    INSERT INTO resource_classification_metadata 
-                    (total_resources, last_processed_timestamp, classification_version, field_distribution)
-                    VALUES (%s, CURRENT_TIMESTAMP, %s, %s)
-                """, (
-                    sum(distribution['domain_distribution'].values()),
-                    '1.0',
-                    json.dumps(distribution)
-                ))
-                
-            conn.commit()
-        except Exception as e:
-            logger.error(f"Error updating classification metadata: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
-
-    def main(self):
-        """
-        Main method to run resource classification
-        """
-        try:
-            # Fetch resources for analysis
-            resources = self.fetch_resources_for_analysis()
+            logger.info(f"Classification result: domains={domains}, confidence={confidence}")
+            return domains, topics_dict, confidence
             
+        except (json.JSONDecodeError, AttributeError) as e:
+            logger.error(f"Failed to parse classification response: {e}")
+            logger.debug(f"Raw response: {result}")
+            return [], {}, 0
+    
+    except Exception as e:
+        logger.error(f"Error classifying resource with {model_name}: {e}")
+        return [], {}, 0
+
+def fetch_resources_without_classification(batch_size=100):
+    """
+    Fetch resources that don't have domain classifications
+    
+    Args:
+        batch_size (int): Number of resources to fetch in one batch
+    
+    Returns:
+        list: List of resources without classifications
+    """
+    conn = psycopg2.connect(**DB_PARAMS)
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            query = """
+                SELECT id, title, abstract, description, type
+                FROM resources_resource
+                WHERE domains IS NULL 
+                   OR array_length(domains, 1) = 0
+                   OR domains = '{}'
+                LIMIT %s
+            """
+            logger.info(f"Executing query with batch size: {batch_size}")
+            
+            params = (batch_size,)
+            cur.execute(query, params)
+            
+            results = cur.fetchall()
+            logger.info(f"Found {len(results)} resources without domain classifications")
+            
+            return results
+    except Exception as e:
+        logger.error(f"Unexpected error fetching resources: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+    finally:
+        conn.close()
+
+def update_resource_classification(resource_id, domains, topics_dict):
+    """
+    Update a resource with its classification
+    
+    Args:
+        resource_id (int): ID of the resource
+        domains (list): List of classified domains
+        topics_dict (dict): Dictionary of topics by domain
+    """
+    conn = psycopg2.connect(**DB_PARAMS)
+    try:
+        with conn.cursor() as cur:
+            # Convert topics dictionary to JSON string
+            topics_json = json.dumps(topics_dict)
+            
+            cur.execute("""
+                UPDATE resources_resource
+                SET domains = %s, topics = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (domains, topics_json, resource_id))
+        conn.commit()
+        logger.info(f"Updated classification for resource {resource_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error updating classification for resource {resource_id}: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def process_resource(resource, model_name, existing_domains):
+    """
+    Process a single resource to classify and update its domains/topics
+    
+    Args:
+        resource (dict): Resource dictionary
+        model_name (str): Name of the Gemini model to use
+        existing_domains (list): List of existing domains
+    
+    Returns:
+        tuple: (resource_id, success)
+    """
+    # Determine the best text source for classification
+    text_source = ""
+    if resource['title']:
+        text_source += f"Title: {resource['title']}\n"
+    
+    if resource['abstract'] and len(resource['abstract']) > 50:
+        text_source += f"Abstract: {resource['abstract']}\n"
+    elif resource['description'] and len(resource['description']) > 50:
+        text_source += f"Description: {resource['description']}\n"
+    
+    if resource['type']:
+        text_source += f"Type: {resource['type']}"
+    
+    # Skip if not enough text to classify
+    if len(text_source.strip()) < 10:
+        logger.warning(f"Resource {resource['id']} has insufficient text for classification")
+        return resource['id'], False
+    
+    # Classify the resource
+    domains, topics_dict, confidence = classify_resource(text_source, model_name, existing_domains)
+    
+    # Only update if we have domains and the confidence is reasonable
+    if domains and confidence >= 50:
+        success = update_resource_classification(resource['id'], domains, topics_dict)
+        return resource['id'], success
+    else:
+        logger.warning(f"Low confidence classification for resource {resource['id']}: {confidence}")
+        return resource['id'], False
+
+def main():
+    """
+    Main function to classify resources without domain classifications
+    """
+    try:
+        # Get the best available model
+        model_name = get_best_model()
+        if not model_name:
+            logger.error("No suitable Gemini model found. Exiting.")
+            return
+        
+        # Get existing domains initially
+        existing_domains = get_existing_domains()
+        domains_refresh_counter = 0
+        
+        while True:
+            # Fetch resources without domain classifications
+            resources = fetch_resources_without_classification()
+            
+            # Break if no more resources
             if not resources:
-                logger.warning("No resources found for classification")
-                return
+                logger.info("No more resources without domain classifications.")
+                break
             
-            # Classify resources in batches
-            classifications = self.classify_resource_batch(resources)
+            logger.info(f"Processing {len(resources)} resources")
             
-            # Update resources with classifications
-            self.update_resource_classifications(classifications)
+            # Use concurrent processing to speed up classification
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                futures = []
+                for resource in resources:
+                    future = executor.submit(
+                        process_resource, 
+                        resource, 
+                        model_name, 
+                        existing_domains
+                    )
+                    futures.append(future)
+                
+                # Process results with progress bar
+                for future in tqdm(
+                    concurrent.futures.as_completed(futures), 
+                    total=len(futures), 
+                    desc="Classifying Resources"
+                ):
+                    resource_id, success = future.result()
+                    
+                    # Increment domains refresh counter for each successful classification
+                    if success:
+                        domains_refresh_counter += 1
             
-            # Analyze classification distribution
-            distribution = self.analyze_classification_distribution(classifications)
+            # Refresh domains list periodically to include new domains
+            if domains_refresh_counter >= 20:
+                logger.info("Refreshing domains list...")
+                existing_domains = get_existing_domains()
+                domains_refresh_counter = 0
             
-            # Log distribution
-            logger.info("Domain Distribution:")
-            for domain, count in distribution['domain_distribution'].items():
-                logger.info(f"{domain}: {count}")
-            
-            logger.info("\nTopic Distribution:")
-            for topic, count in distribution['topic_distribution'].items():
-                logger.info(f"{topic}: {count}")
-            
-            # Update classification metadata
-            self.update_classification_metadata(distribution)
-        
-        except Exception as e:
-            logger.error(f"An error occurred during classification: {e}")
-            import traceback
-            traceback.print_exc()
+            # Short pause to prevent overwhelming the API
+            time.sleep(1)
+    
+    except Exception as e:
+        logger.error(f"An error occurred: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
-    classifier = ResourceClassifier()
-    classifier.main()
+    main()
