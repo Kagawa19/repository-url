@@ -317,30 +317,37 @@ async def process_query_prediction(partial_query: str, user_id: str, redis_clien
         
         # Generate predictions
         predictions = ml_predictor.predict(partial_query, user_id=user_id)
-        confidence_scores = [1.0 - (i * 0.1) for i in range(len(predictions))]
+        
+        # Ensure we have at least one prediction even with empty results
+        if not predictions and partial_query:
+            predictions = [partial_query]
+        
+        # Generate confidence scores (higher for first results)
+        confidence_scores = [max(0.1, 1.0 - (i * 0.1)) for i in range(len(predictions))]
         
         logger.debug(f"Generated {len(predictions)} predictions")
         print(f"Generated predictions: {predictions}")
         
-        # Generate refinement suggestions
+        # Generate refinement suggestions - ENSURE THIS IS CALLED
         refinements = generate_predictive_refinements(partial_query, predictions)
         
         # Record prediction
-        await record_prediction(
-            conn,
-            session_id,
-            user_id,
-            partial_query,
-            predictions,
-            confidence_scores
-        )
+        if conn and predictions:
+            await record_prediction(
+                conn,
+                session_id,
+                user_id,
+                partial_query,
+                predictions,
+                confidence_scores
+            )
         
         # Prepare response with optional refinements
         response = PredictionResponse(
             predictions=predictions,
             confidence_scores=confidence_scores,
             user_id=user_id,
-            refinements=refinements
+            refinements=refinements  # This should now always have content
         )
 
         # Cache the response if Redis client is available
@@ -357,12 +364,22 @@ async def process_query_prediction(partial_query: str, user_id: str, redis_clien
     except Exception as e:
         logger.error(f"Error predicting queries: {str(e)}", exc_info=True)
         print(f"Query prediction failed: {str(e)}")
-        raise HTTPException(status_code=500, detail="Prediction failed")
+        
+        # Return a minimal valid response even on error
+        return PredictionResponse(
+            predictions=[partial_query] if partial_query else [],
+            confidence_scores=[0.5] if partial_query else [],
+            user_id=user_id,
+            refinements={
+                "filters": [],
+                "related_queries": [partial_query] if partial_query else [],
+                "expertise_areas": []
+            }
+        )
     finally:
         if conn:
             conn.close()
             logger.debug("Database connection closed")
-
 def generate_predictive_refinements(partial_query: str, predictions: List[str]) -> Dict[str, Any]:
     """
     Generate refinement suggestions based on partial query and predictions
@@ -383,26 +400,46 @@ def generate_predictive_refinements(partial_query: str, predictions: List[str]) 
         
         # Generate related filters and expertise areas
         related_filters = []
-        expertise_areas = []
         
-        # Add a filter for query type
-        related_filters.append({
-            "type": "query_type",
-            "label": "Query Suggestions",
-            "values": predictions[:3]
-        })
+        # Add a filter for query type if we have predictions
+        if predictions:
+            related_filters.append({
+                "type": "query_type",
+                "label": "Query Suggestions",
+                "values": predictions[:3]
+            })
         
-        # Try to extract potential expertise areas from predictions
-        for pred in predictions:
-            # Use existing method to extract expertise
-            pred_expertise = set()
-            words = pred.lower().split()
+        # Generate semantic variations to enhance related queries
+        semantic_variations = []
+        if partial_query:
+            # Create variations like "expert in X", "research about X"
+            variations = [
+                f"expert in {partial_query}",
+                f"{partial_query} research",
+                f"{partial_query} specialist",
+                f"studies on {partial_query}",
+                f"{partial_query} analysis"
+            ]
+            semantic_variations = [v for v in variations if v not in predictions]
+        
+        # Combine predictions with variations
+        combined_queries = list(predictions)
+        for variation in semantic_variations:
+            if len(combined_queries) < 8:  # Limit to 8 total suggestions
+                combined_queries.append(variation)
+        
+        # Try to extract potential expertise areas from combined queries
+        expertise_areas = set()
+        for query in combined_queries:
+            # Extract words that might be expertise areas
+            words = query.lower().split()
             for word in words:
-                # Simple extraction of potential expertise areas
-                if len(word) > 3:  # Avoid very short words
-                    pred_expertise.add(word.capitalize())
-            
-            expertise_areas.extend(list(pred_expertise))
+                if len(word) > 3 and word != partial_query.lower():
+                    expertise_areas.add(word.capitalize())
+        
+        # Make sure we have some expertise areas even if extraction failed
+        if len(expertise_areas) < 3 and partial_query:
+            expertise_areas.add(partial_query.capitalize())
         
         # Remove duplicates while preserving order
         expertise_areas = list(dict.fromkeys(expertise_areas))[:5]
@@ -410,7 +447,7 @@ def generate_predictive_refinements(partial_query: str, predictions: List[str]) 
         # Construct refinements
         refinements = {
             "filters": related_filters,
-            "related_queries": predictions,
+            "related_queries": combined_queries[:5],
             "expertise_areas": expertise_areas
         }
         
@@ -418,8 +455,13 @@ def generate_predictive_refinements(partial_query: str, predictions: List[str]) 
         return refinements
     
     except Exception as e:
-        logger.error(f"Error in predictive refinements: {str(e)}")
-        return {}
+        logger.error(f"Error in predictive refinements: {e}")
+        # Return a minimal valid structure even on error
+        return {
+            "filters": [],
+            "related_queries": predictions[:5] if predictions else [],
+            "expertise_areas": []
+        }
 
 # Existing endpoint remains the same
 @router.get("/experts/predict/{partial_query}")

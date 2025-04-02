@@ -30,23 +30,22 @@ class SearchTester:
             "Content-Type": "application/json"
         }
         
-    def get_suggestions(self, partial_query: str) -> List[Dict[str, Any]]:
+    def get_suggestions(self, partial_query: str) -> Dict[str, Any]:
         """Get search suggestions for a partial query."""
-        # Fixed endpoint to match your API structure
-        url = f"{self.base_url}/search/search/experts/suggest/{partial_query}"
+        # Updated endpoint to match your API structure
+        url = f"{self.base_url}/search/search/experts/predict/{partial_query}"
         try:
             response = requests.get(url, headers=self.headers)
             
             if response.status_code == 200:
-                data = response.json()
-                return data.get("suggestions", [])
+                return response.json()
             else:
                 logger.error(f"Error getting suggestions: {response.status_code}")
                 logger.error(response.text)
-                return []
+                return {}
         except Exception as e:
             logger.error(f"Exception getting suggestions: {str(e)}")
-            return []
+            return {}
             
     def record_suggestion_click(self, suggestion: str, resulting_query: str, source_type: Optional[str] = None):
         """Record that a suggestion was clicked."""
@@ -92,22 +91,55 @@ class SearchTester:
         except Exception as e:
             logger.error(f"Exception searching experts: {str(e)}")
             return {}
+        
+    def display_refinements(self, refinements: Dict[str, Any]):
+        """Display search refinements."""
+        if not refinements:
+            print("No refinements available.")
+            return
             
-    def display_suggestions(self, suggestions: List[Dict[str, Any]]):
+        # Display related queries
+        related_queries = refinements.get("related_queries", [])
+        if related_queries:
+            print("\nRelated Queries:")
+            for i, query in enumerate(related_queries, 1):
+                print(f"  {i}. {query}")
+        
+        # Display expertise areas
+        expertise_areas = refinements.get("expertise_areas", [])
+        if expertise_areas:
+            print("\nExpertise Areas:")
+            for i, area in enumerate(expertise_areas, 1):
+                print(f"  {i}. {area}")
+        
+        # Display filters
+        filters = refinements.get("filters", [])
+        if filters:
+            print("\nFilters:")
+            for filter_group in filters:
+                label = filter_group.get("label", "Unknown")
+                values = filter_group.get("values", [])
+                print(f"  {label}:")
+                for i, value in enumerate(values, 1):
+                    print(f"    {i}. {value}")
+            
+    def display_suggestions(self, response: Dict[str, Any]):
         """Display suggestions with numbering."""
+        suggestions = response.get("predictions", [])
+        
         if not suggestions:
             print("No suggestions found.")
             return
             
         print("\nSuggestions:")
         for i, suggestion in enumerate(suggestions, 1):
-            display = suggestion.get("display_text") or suggestion.get("text")
-            # Remove HTML tags
-            display = display.replace("<b>", "").replace("</b>", "")
-            source = suggestion.get("type", "unknown")
-            confidence = suggestion.get("confidence", 0.0)
-            
-            print(f"{i}. {display} [{source}] ({confidence:.2f})")
+            confidence = response.get("confidence_scores", [])[i-1] if i <= len(response.get("confidence_scores", [])) else 0.0
+            print(f"{i}. {suggestion} ({confidence:.2f})")
+        
+        # Display refinements if available
+        refinements = response.get("refinements")
+        if refinements:
+            self.display_refinements(refinements)
             
     def display_search_results(self, results: Dict[str, Any]):
         """Display search results."""

@@ -21,6 +21,7 @@ class MLPredictor:
         self.MAX_SUGGESTIONS = 10
         self.MIN_CHARS = 2
 
+    # Add to the MLPredictor class in ml_predictor.py
     def predict(self, partial_query: str, user_id: str, limit: int = 5) -> List[str]:
         """Get search suggestions for partial query"""
         try:
@@ -44,6 +45,27 @@ class MLPredictor:
                 suggestions.extend(
                     [s for s in global_suggestions if s not in suggestions]
                 )
+                
+            # NEW CODE: Always add fallback suggestions if we don't have enough
+            if len(suggestions) < limit:
+                # Generate some basic contextual suggestions 
+                fallback_suggestions = [
+                    f"{partial_query} research",
+                    f"{partial_query} expert",
+                    f"{partial_query} specialist",
+                    f"top {partial_query} researcher",
+                    f"{partial_query} study"
+                ]
+                # Only add suggestions that start with our partial query
+                fallback_suggestions = [s for s in fallback_suggestions 
+                                    if s.lower().startswith(partial_query.lower())]
+                
+                # Add unique fallbacks
+                for suggestion in fallback_suggestions:
+                    if suggestion not in suggestions:
+                        suggestions.append(suggestion)
+                        if len(suggestions) >= limit:
+                            break
 
             return suggestions[:limit]
             
