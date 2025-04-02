@@ -22,7 +22,7 @@ class MLPredictor:
         self.MIN_CHARS = 2
 
     # Add to the MLPredictor class in ml_predictor.py
-    def predict(self, partial_query: str, user_id: str, limit: int = 5) -> List[str]:
+    def predict(self, partial_query: str, user_id: str, limit: int = 1) -> List[str]:
         """Get search suggestions for partial query"""
         try:
             if not partial_query or len(partial_query) < self.MIN_CHARS:
