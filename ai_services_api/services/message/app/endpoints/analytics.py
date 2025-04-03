@@ -1,12 +1,14 @@
-from fastapi import APIRouter, Query, Depends
-from typing import Optional, Dict, Any, List
+import os
+import psycopg2
+import pandas as pd
+from ai_services_api.services.analytics.utils.db_utils import DatabaseConnector
+from fastapi import APIRouter, Query
+from typing import Optional, Dict, Any
 from datetime import datetime, date
 from pydantic import BaseModel
-import pandas as pd
-import logging
-from ai_services_api.services.analytics.utils.db_utils import DatabaseConnector
 
 # Configure logging
+import logging
 logger = logging.getLogger("router")
 
 # Create router for analytics endpoints
@@ -15,6 +17,9 @@ router = APIRouter(prefix="/analytics", tags=["analytics"])
 # Helper function to convert DataFrame to dict
 def dataframe_to_dict(df):
     """Convert DataFrame to dictionary suitable for JSON"""
+    if df is None:
+        return []
+    
     if isinstance(df, pd.DataFrame):
         if df.empty:
             return []
@@ -41,9 +46,12 @@ class AnalyticsResponse(BaseModel):
     data: Dict[str, Any]
     message: Optional[str] = None
 
-# Helper function to apply granularity transformation
+# Apply granularity transformation
 def apply_granularity(df, granularity):
     """Apply weekly or monthly grouping to daily metrics"""
+    if df is None or df.empty:
+        return df
+    
     if 'date' not in df.columns:
         return df
         
@@ -80,10 +88,10 @@ def apply_granularity(df, granularity):
         
     return result_df.reset_index()
 
-# Helper to calculate summary statistics
+# Calculate summary statistics
 def calculate_summary(df):
     """Calculate summary statistics for a metrics DataFrame"""
-    if df.empty:
+    if df is None or df.empty:
         return {}
         
     summary = {}
@@ -111,28 +119,37 @@ def calculate_summary(df):
     
     return summary
 
-# Chat analytics endpoint
+# Database connection utility
+def get_db_connection():
+    """Create and return a database connection"""
+    return psycopg2.connect(
+        host=os.getenv('DB_HOST', 'postgres'),
+        database=os.getenv('DB_NAME', 'aphrc'),
+        user=os.getenv('DB_USER', 'postgres'),
+        password=os.getenv('DB_PASSWORD', 'p0stgres')
+    )
+
 @router.get("/chat", response_model=AnalyticsResponse)
-async def get_chat_analytics(
+def get_chat_analytics(
     start_date: date = Query(..., description="Start date for analytics"),
     end_date: date = Query(..., description="End date for analytics"),
     granularity: str = Query("daily", description="Data granularity: daily, weekly, monthly")
 ):
     try:
+        # Import the metrics function
+        from ai_services_api.services.analytics.analytics.chat_analytics_api import get_chat_and_search_metrics
+        
         # Format dates for query
         start_date_str = start_date.strftime('%Y-%m-%d')
         end_date_str = end_date.strftime('%Y-%m-%d') + ' 23:59:59'
         
         # Get DB connection
-        with DatabaseConnector.get_connection() as conn:
-            # Import your existing analytics functions
-            from ai_services_api.services.analytics.analytics.chat_analytics import get_chat_and_search_metrics
-            
+        with get_db_connection() as conn:
             # Get metrics data
             metrics_df = get_chat_and_search_metrics(conn, start_date_str, end_date_str)
             
             # Apply granularity transformation if needed
-            if granularity in ["weekly", "monthly"] and not metrics_df.empty:
+            if granularity in ["weekly", "monthly"] and metrics_df is not None and not metrics_df.empty:
                 metrics_df = apply_granularity(metrics_df, granularity)
             
             # Convert to dictionary/JSON format

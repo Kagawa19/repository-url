@@ -60,6 +60,8 @@ pendulum = "2.1.2"
 pypdf2 = "^3.0.0"
 pymupdf = "^1.25.3"
 asyncpg = "^0.30.0"
+nest-asyncio = "^1.6.0"
+psycopg2 = "^2.9.10"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.2"

@@ -10,6 +10,10 @@ import logging
 from contextlib import contextmanager
 from urllib.parse import urlparse
 import psycopg2
+import asyncio
+import pandas as pd
+import nest_asyncio
+
 
 # Configure logging
 logging.basicConfig(
@@ -571,6 +575,9 @@ async def get_search_metrics(conn, start_date, end_date):
         return pd.DataFrame()
     finally:
         cursor.close()
+
+
+
 
 def get_chat_and_search_metrics(conn, start_date, end_date):
     """
