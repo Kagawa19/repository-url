@@ -48,19 +48,37 @@ class GoogleAutocompletePredictor:
     def _load_faiss_index(self):
         """Load the FAISS index and expert mapping."""
         try:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            models_dir = os.path.join(current_dir, 'models')
+            # Try multiple possible paths where models might be located
+            possible_paths = [
+                # Path in Docker container (mounted volume)
+                '/app/ai_services_api/services/search/models',
+                # Path in local development
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models'),
+                # Alternative path from environment variable
+                os.getenv('MODEL_PATH', '/app/models/search'),
+                # Absolute path as fallback
+                '/app/models'
+            ]
             
-            # Paths to index and mapping files
-            self.index_path = os.path.join(models_dir, 'expert_faiss_index.idx')
-            self.mapping_path = os.path.join(models_dir, 'expert_mapping.pkl')
+            found_path = None
+            for path in possible_paths:
+                if os.path.exists(os.path.join(path, 'expert_faiss_index.idx')):
+                    found_path = path
+                    break
             
-            if not os.path.exists(self.index_path) or not os.path.exists(self.mapping_path):
-                self.logger.warning("FAISS index files not found, falling back to Gemini-only mode")
+            if not found_path:
+                self.logger.warning("FAISS index files not found in any searched locations")
+                self.logger.warning(f"Searched paths: {possible_paths}")
                 self.index = None
                 self.id_mapping = None
                 return
                 
+            self.logger.info(f"Found models at: {found_path}")
+            
+            # Paths to index and mapping files
+            self.index_path = os.path.join(found_path, 'expert_faiss_index.idx')
+            self.mapping_path = os.path.join(found_path, 'expert_mapping.pkl')
+            
             # Load index and mapping
             self.index = faiss.read_index(self.index_path)
             with open(self.mapping_path, 'rb') as f:
