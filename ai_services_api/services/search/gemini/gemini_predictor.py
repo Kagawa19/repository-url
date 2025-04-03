@@ -30,10 +30,8 @@ class GeminiPredictor:
                 "top_p": 0.95,
                 "top_k": 40,
                 "max_output_tokens": 100,
-            },
-            tools=[{
-                "google_search_retrieval": {}  # Enable Google Search Retrieval
-            }]
+            }
+            # Remove the tools parameter that was causing errors
         )
         
         logger.info("GeminiPredictor initialized successfully")
@@ -41,7 +39,7 @@ class GeminiPredictor:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
     async def predict(self, partial_query: str, limit: int = 5) -> List[Dict[str, Any]]:
         """
-        Get search suggestions for partial query using Gemini API with Google Search.
+        Get search suggestions for partial query using Gemini API.
         
         Args:
             partial_query: The partial query to get suggestions for
@@ -57,73 +55,37 @@ class GeminiPredictor:
         try:
             # Create prompt for Gemini
             prompt = f"""
-            Provide search suggestions for the partial query: "{partial_query}"
+            You are a search suggestion system for an expert search platform.
+            Provide {limit} search suggestions for the partial query: "{partial_query}"
             
-            Return only relevant search suggestions that start with or closely relate to this partial query.
+            Return ONLY a list of search suggestions that complete or expand the partial query.
+            Format your response as a numbered list, one suggestion per line.
             Do not include any explanations or additional text.
             
-            The response should include exactly {limit} suggestions if possible.
+            The suggestions should be relevant to searching for experts, research, or academic topics.
             """
             
-            # Make the API call to Gemini with Google Search grounding
-            response = await self.model.generate_content_async(
-                prompt,
-                generation_config={"response_mime_type": "application/json"}
-            )
+            # Make the API call to Gemini without Google Search grounding
+            response = await self.model.generate_content_async(prompt)
             
             # Extract suggestions from the response
             suggestions = []
             
-            if hasattr(response, "candidates") and response.candidates:
-                # Extract web search queries if available
-                for candidate in response.candidates:
-                    if hasattr(candidate, "content") and candidate.content:
-                        content = candidate.content
+            if hasattr(response, "text"):
+                # Try to extract suggestions from text
+                text = response.text.strip()
+                lines = [line.strip() for line in text.split('\n') if line.strip()]
+                
+                for line in lines[:limit]:
+                    # Remove numbering if present
+                    if '. ' in line and line[0].isdigit():
+                        line = line.split('. ', 1)[1]
                         
-                        # Try to extract from grounding metadata first (preferred)
-                        if hasattr(content, "parts") and content.parts:
-                            for part in content.parts:
-                                if hasattr(part, "text") and part.text:
-                                    try:
-                                        # Parse JSON if possible
-                                        suggestions_data = json.loads(part.text)
-                                        if isinstance(suggestions_data, list):
-                                            suggestions = suggestions_data[:limit]
-                                            break
-                                    except:
-                                        # Not JSON, try to extract manually
-                                        pass
-                        
-                        # Try to extract from web search queries
-                        if hasattr(content, "grounding_metadata") and content.grounding_metadata:
-                            web_queries = content.grounding_metadata.get("web_search_queries", [])
-                            if web_queries:
-                                for query in web_queries[:limit]:
-                                    suggestions.append({
-                                        "text": query,
-                                        "source": "gemini_web_search",
-                                        "score": 1.0
-                                    })
-            
-            # If no suggestions found but we have text, try to parse it
-            if not suggestions and hasattr(response, "text"):
-                try:
-                    # Try to extract suggestions from text
-                    text = response.text.strip()
-                    lines = [line.strip() for line in text.split('\n') if line.strip()]
-                    
-                    for line in lines[:limit]:
-                        # Remove numbering if present
-                        if '. ' in line and line[0].isdigit():
-                            line = line.split('. ', 1)[1]
-                            
-                        suggestions.append({
-                            "text": line,
-                            "source": "gemini_text",
-                            "score": 0.9
-                        })
-                except Exception as e:
-                    logger.error(f"Error parsing Gemini text response: {e}")
+                    suggestions.append({
+                        "text": line,
+                        "source": "gemini",
+                        "score": 0.9
+                    })
             
             # Ensure we have the requested number of suggestions if possible
             # If Gemini couldn't provide enough, create some basic ones based on the query
