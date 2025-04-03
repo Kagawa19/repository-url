@@ -4,14 +4,113 @@ import logging
 import numpy as np
 import faiss
 import pickle
-from typing import List, Dict, Any, Optional
-from dotenv import load_dotenv
-import asyncio
+import redis
+import json
 import time
+import asyncio
+from functools import lru_cache
+from cachetools import TTLCache
+from typing import List, Dict, Any, Optional, Tuple
+from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # Load environment variables
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+class CircuitBreaker:
+    """
+    Implements circuit breaker pattern for external API calls.
+    
+    This prevents unnecessary calls to failing services and allows
+    the system to recover gracefully.
+    """
+    
+    def __init__(self, name, failure_threshold=5, recovery_timeout=30, 
+                 retry_timeout=60):
+        """
+        Initialize circuit breaker.
+        
+        Args:
+            name: Name of the service protected by this circuit breaker
+            failure_threshold: Number of failures before opening the circuit
+            recovery_timeout: Time in seconds to wait before attempting recovery
+            retry_timeout: Time in seconds before resetting failure count
+        """
+        self.name = name
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.retry_timeout = retry_timeout
+        
+        self.failures = 0
+        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+        self.last_failure_time = 0
+        self.last_attempt_time = 0
+    
+    async def execute(self, func, *args, **kwargs):
+        """
+        Execute the function with circuit breaker protection.
+        
+        Args:
+            func: Async function to execute
+            *args, **kwargs: Arguments to pass to the function
+            
+        Returns:
+            Result of the function or None if circuit is open
+        """
+        current_time = time.time()
+        
+        # Check if we should reset failure count
+        if current_time - self.last_failure_time > self.retry_timeout:
+            if self.failures > 0:
+                logger.info(f"Circuit breaker '{self.name}': Resetting failure count")
+                self.failures = 0
+        
+        # Check circuit state
+        if self.state == "OPEN":
+            # Check if recovery timeout has elapsed
+            if current_time - self.last_failure_time > self.recovery_timeout:
+                logger.info(f"Circuit breaker '{self.name}': Transitioning to HALF-OPEN")
+                self.state = "HALF-OPEN"
+            else:
+                logger.warning(f"Circuit breaker '{self.name}': Circuit OPEN, request rejected")
+                return None
+        
+        # Try to execute the function
+        try:
+            self.last_attempt_time = current_time
+            result = await func(*args, **kwargs)
+            
+            # If we got here in HALF-OPEN, close the circuit
+            if self.state == "HALF-OPEN":
+                logger.info(f"Circuit breaker '{self.name}': Closing circuit after successful execution")
+                self.state = "CLOSED"
+                self.failures = 0
+            
+            return result
+            
+        except Exception as e:
+            # Record the failure
+            self.failures += 1
+            self.last_failure_time = current_time
+            
+            # Check if we should open the circuit
+            if self.failures >= self.failure_threshold:
+                if self.state != "OPEN":
+                    logger.warning(
+                        f"Circuit breaker '{self.name}': Opening circuit after {self.failures} failures"
+                    )
+                    self.state = "OPEN"
+            
+            # Re-raise the exception
+            raise e
 
 class GoogleAutocompletePredictor:
     """
@@ -19,12 +118,13 @@ class GoogleAutocompletePredictor:
     Provides a Google-like autocomplete experience with minimal latency.
     """
     
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, redis_config: Dict = None):
         """
         Initialize the Autocomplete predictor with optimizations for speed.
         
         Args:
             api_key: Optional API key. If not provided, will attempt to read from environment.
+            redis_config: Optional Redis configuration for distributed caching.
         """
         # Prioritize passed api_key, then environment variable
         key = api_key or os.getenv('GEMINI_API_KEY')
@@ -38,24 +138,60 @@ class GoogleAutocompletePredictor:
         try:
             # Configure Gemini API
             genai.configure(api_key=key)
-            self.model = genai.GenerativeModel('gemini-2.0-flash')
+            self.model = genai.GenerativeModel('gemini-1.5-flash-latest')
             self.logger = logging.getLogger(__name__)
+            
+            # Set up distributed Redis cache if configured
+            self.redis_client = None
+            if redis_config:
+                self._setup_redis(redis_config)
+            
+            # Local memory cache with TTL (Time To Live)
+            # Using TTLCache instead of manual expiry tracking
+            self.cache_ttl = 3600  # 1 hour cache lifetime
+            self.cache_maxsize = 1000  # Maximum cache entries
+            self.suggestion_cache = TTLCache(maxsize=self.cache_maxsize, ttl=self.cache_ttl)
+            
+            # Create thread pool for CPU-bound tasks
+            self.cpu_executor = ThreadPoolExecutor(max_workers=4)
+            
+            # Create circuit breakers for external API calls
+            self.embedding_circuit = CircuitBreaker("gemini-embedding")
+            self.generation_circuit = CircuitBreaker("gemini-generation")
             
             # Load FAISS index and mapping
             self._load_faiss_index()
             
-            # Initialize cache for suggestions to improve speed
-            self.suggestion_cache = {}
-            self.cache_expiry = 3600  # Cache expiry in seconds (1 hour)
-            self.cache_timestamp = {}
-            
-            # Create a thread pool for parallel processing
-            self.executor = ThreadPoolExecutor(max_workers=4)
+            # Performance metrics
+            self.metrics = {
+                "api_calls": 0,
+                "cache_hits": 0,
+                "fallbacks_used": 0,
+                "avg_latency": 0,
+                "total_requests": 0
+            }
             
             self.logger.info("GoogleAutocompletePredictor initialized successfully")
         except Exception as e:
             self.logger.error(f"Failed to initialize predictor: {e}")
             raise
+    
+    def _setup_redis(self, config: Dict):
+        """Set up Redis connection for distributed caching."""
+        try:
+            self.redis_client = redis.Redis(
+                host=config.get('host', 'localhost'),
+                port=config.get('port', 6379),
+                db=config.get('db', 0),
+                password=config.get('password', None),
+                decode_responses=True
+            )
+            # Test connection
+            self.redis_client.ping()
+            self.logger.info("Successfully connected to Redis for distributed caching")
+        except Exception as e:
+            self.logger.error(f"Failed to connect to Redis: {e}")
+            self.redis_client = None
     
     def _load_faiss_index(self):
         """Load the FAISS index and expert mapping with better error handling."""
@@ -93,6 +229,14 @@ class GoogleAutocompletePredictor:
             
             # Load index and mapping
             self.index = faiss.read_index(self.index_path)
+            
+            # Configure FAISS for parallel search if index is large
+            if self.index.ntotal > 10000:
+                self.logger.info("Large index detected, enabling parallel search")
+                # Create a clone of the index that can be searched in parallel
+                self.index = faiss.IndexIDMap(self.index)
+                faiss.omp_set_num_threads(4)  # Use 4 threads for search
+            
             with open(self.mapping_path, 'rb') as f:
                 self.id_mapping = pickle.load(f)
                 
@@ -106,72 +250,135 @@ class GoogleAutocompletePredictor:
         """Normalize text for comparison and caching."""
         return str(text).lower().strip()
     
-    def _check_cache(self, query: str) -> Optional[List[Dict[str, Any]]]:
-        """Check if suggestions for this query are in cache and not expired."""
+    async def _check_cache(self, query: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Check if suggestions for this query are in cache.
+        Checks both Redis (if available) and local cache.
+        """
         normalized_query = self._normalize_text(query)
         
-        # Check for exact match in cache
-        if normalized_query in self.suggestion_cache:
-            # Check if cache has expired
-            timestamp = self.cache_timestamp.get(normalized_query, 0)
-            if time.time() - timestamp < self.cache_expiry:
-                self.logger.debug(f"Cache hit for query: {normalized_query}")
-                return self.suggestion_cache[normalized_query]
-            else:
-                # Cache expired, remove it
-                del self.suggestion_cache[normalized_query]
-                del self.cache_timestamp[normalized_query]
+        # First check Redis for distributed cache if available
+        if self.redis_client:
+            try:
+                redis_key = f"suggestions:{normalized_query}"
+                cached_data = self.redis_client.get(redis_key)
+                if cached_data:
+                    self.metrics["cache_hits"] += 1
+                    self.logger.debug(f"Redis cache hit for query: {normalized_query}")
+                    return json.loads(cached_data)
+            except Exception as e:
+                self.logger.warning(f"Error checking Redis cache: {e}")
         
-        # Check for prefix matches for partial queries
-        for cached_query in list(self.suggestion_cache.keys()):
-            if normalized_query.startswith(cached_query) and len(normalized_query) - len(cached_query) <= 3:
-                # Close enough prefix match
-                timestamp = self.cache_timestamp.get(cached_query, 0)
-                if time.time() - timestamp < self.cache_expiry:
+        # Then check local cache
+        try:
+            if normalized_query in self.suggestion_cache:
+                self.metrics["cache_hits"] += 1
+                self.logger.debug(f"Local cache hit for query: {normalized_query}")
+                return self.suggestion_cache[normalized_query]
+        except Exception as e:
+            self.logger.warning(f"Error checking local cache: {e}")
+        
+        # Check for prefix matches for partial queries in local cache
+        try:
+            for cached_query in list(self.suggestion_cache.keys()):
+                if normalized_query.startswith(cached_query) and len(normalized_query) - len(cached_query) <= 3:
+                    # Close enough prefix match
+                    self.metrics["cache_hits"] += 1
                     self.logger.debug(f"Prefix cache hit for query: {normalized_query} matched {cached_query}")
                     return self.suggestion_cache[cached_query]
+        except Exception as e:
+            self.logger.warning(f"Error checking prefix matches in cache: {e}")
         
         return None
     
-    def _update_cache(self, query: str, suggestions: List[Dict[str, Any]]):
-        """Update cache with new suggestions."""
+    async def _update_cache(self, query: str, suggestions: List[Dict[str, Any]]):
+        """Update both Redis and local cache with new suggestions."""
         normalized_query = self._normalize_text(query)
-        self.suggestion_cache[normalized_query] = suggestions
-        self.cache_timestamp[normalized_query] = time.time()
         
-        # Cleanup old cache entries
-        current_time = time.time()
-        expired_keys = [k for k, t in self.cache_timestamp.items() if current_time - t > self.cache_expiry]
-        for key in expired_keys:
-            if key in self.suggestion_cache:
-                del self.suggestion_cache[key]
-            if key in self.cache_timestamp:
-                del self.cache_timestamp[key]
+        # Update local cache
+        self.suggestion_cache[normalized_query] = suggestions
+        
+        # Update Redis if available
+        if self.redis_client:
+            try:
+                redis_key = f"suggestions:{normalized_query}"
+                self.redis_client.set(
+                    redis_key, 
+                    json.dumps(suggestions),
+                    ex=self.cache_ttl
+                )
+            except Exception as e:
+                self.logger.warning(f"Error updating Redis cache: {e}")
     
+    @retry(
+        retry=retry_if_exception_type((asyncio.TimeoutError, ConnectionError)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=2)
+    )
     async def _get_gemini_embedding(self, text: str) -> Optional[List[float]]:
-        """Get embedding for text using Gemini API with timeout and retry logic."""
+        """Get embedding for text using Gemini API with circuit breaker protection."""
+        self.metrics["api_calls"] += 1
+        
         try:
-            # Use Gemini to generate embedding
-            for attempt in range(3):  # Retry up to 3 times
-                try:
-                    response = await asyncio.wait_for(
-                        self.model.embed_content_async(text),
-                        timeout=2.0  # 2 second timeout
-                    )
-                    if response and hasattr(response, 'embedding'):
-                        return response.embedding
-                    return None
-                except asyncio.TimeoutError:
-                    self.logger.warning(f"Embedding request timed out, attempt {attempt+1}/3")
-                    if attempt == 2:  # Last attempt
-                        return None
-                    await asyncio.sleep(0.5)  # Small delay before retry
+            # Use circuit breaker to protect against API failures
+            embedding_result = await self.embedding_circuit.execute(
+                self._execute_embedding_request, text
+            )
+            
+            if embedding_result is None:
+                self.logger.warning("Circuit breaker open, using fallback embedding generation")
+                # Use fallback embedding generation
+                return self._generate_fallback_embedding(text)
+            
+            return embedding_result
+            
         except Exception as e:
-            self.logger.error(f"Error getting Gemini embedding: {e}")
-            return None
+            self.logger.error(f"Error getting Gemini embedding after retries: {e}")
+            # Use fallback embedding generation
+            return self._generate_fallback_embedding(text)
+    
+    async def _execute_embedding_request(self, text: str) -> Optional[List[float]]:
+        """Execute the actual embedding API request with timeout."""
+        response = await asyncio.wait_for(
+            self.model.embed_content_async(text),
+            timeout=2.0  # 2 second timeout
+        )
+        
+        if response and hasattr(response, 'embedding'):
+            return response.embedding
+        return None
+    
+    def _generate_fallback_embedding(self, text: str) -> np.ndarray:
+        """
+        Generate a deterministic embedding when API is unavailable.
+        Uses feature hashing to create a consistent vector representation.
+        """
+        # Use CPU executor for this CPU-bound task
+        embedding_dimension = 384  # Match your FAISS index dimension
+        
+        # Use a method similar to feature hashing to generate embeddings
+        import hashlib
+        
+        # Create a seed from the text for deterministic output
+        text_bytes = text.encode('utf-8')
+        hash_obj = hashlib.md5(text_bytes)
+        seed = int(hash_obj.hexdigest(), 16) % (2**32)
+        
+        # Use numpy's random with the seed for deterministic output
+        np.random.seed(seed)
+        
+        # Generate random values based on text hash
+        embedding = np.random.normal(0, 0.1, embedding_dimension).astype(np.float32)
+        
+        # Normalize to unit length (important for FAISS cosine similarity)
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+        
+        return embedding
     
     async def _generate_faiss_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
-        """Generate suggestions from FAISS index only - optimized for speed."""
+        """Generate suggestions from FAISS index with parallel processing."""
         if not self.index or not self.id_mapping:
             return []
             
@@ -181,14 +388,44 @@ class GoogleAutocompletePredictor:
             
             if query_embedding is None:
                 return []
-                
-            # Search the FAISS index efficiently
-            distances, indices = self.index.search(
-                np.array([query_embedding]).astype(np.float32), 
-                min(limit * 2, self.index.ntotal)
+            
+            # Convert to numpy array if needed
+            if not isinstance(query_embedding, np.ndarray):
+                query_embedding = np.array(query_embedding, dtype=np.float32)
+            
+            # Ensure we have a 2D array for FAISS
+            if len(query_embedding.shape) == 1:
+                query_embedding = query_embedding.reshape(1, -1)
+            
+            # Use CPU executor for FAISS search which is CPU-bound
+            # This enables asynchronous execution of the search
+            search_future = asyncio.get_event_loop().run_in_executor(
+                self.cpu_executor,
+                self._execute_faiss_search,
+                query_embedding,
+                limit * 2,  # Get more candidates than needed for filtering
+                partial_query
             )
             
-            # Process results in parallel for speed
+            # Wait for the search to complete
+            suggestions = await search_future
+            
+            return suggestions
+            
+        except Exception as e:
+            self.logger.error(f"Error generating FAISS suggestions: {e}")
+            return []
+    
+    def _execute_faiss_search(self, query_embedding: np.ndarray, k: int, partial_query: str) -> List[Dict[str, Any]]:
+        """Execute FAISS search in a separate thread (CPU-bound operation)."""
+        try:
+            # Search the FAISS index efficiently
+            distances, indices = self.index.search(
+                query_embedding.astype(np.float32), 
+                min(k, self.index.ntotal)
+            )
+            
+            # Process results
             suggestions = []
             seen_texts = set()
             
@@ -199,145 +436,112 @@ class GoogleAutocompletePredictor:
                 expert_id = self.id_mapping.get(idx)
                 if not expert_id:
                     continue
-                    
-                # Create simplified Google-like suggestion
-                suggestion_text = f"{partial_query} {expert_id}".strip()
                 
-                if suggestion_text not in seen_texts:
+                # Create multiple suggestion variants for the same expert
+                base_text = f"{partial_query} {expert_id}".strip()
+                
+                if base_text not in seen_texts:
                     suggestions.append({
-                        "text": suggestion_text,
+                        "text": base_text,
                         "source": "faiss_index",
                         "score": float(1.0 / (1.0 + distances[0][i]))
                     })
-                    seen_texts.add(suggestion_text)
-                    
-                    if len(suggestions) >= limit:
-                        break
-            
-            return suggestions
-        except Exception as e:
-            self.logger.error(f"Error generating FAISS suggestions: {e}")
-            return []
-    
-    async def _generate_simplified_gemini_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
-        """
-        Generate simplified Gemini suggestions with timeout.
-        
-        This is a replacement for the previous lengthy hierarchical suggestions with arrows.
-        Now it generates simple, one-line, Google-like suggestions.
-        """
-        try:
-            # Simple and direct prompt focused on speed
-            prompt = f"""Generate {limit} single-line search suggestions for "{partial_query}" in a research context.
-            
-            IMPORTANT:
-            - Each suggestion must be on its own line
-            - No numbering, no arrows, no bullet points
-            - Keep each suggestion under 10 words
-            - Include relevant research terms
-            - No explanations, just the suggestions
-            - Prioritize common completions
-            
-            Suggestions:"""
-            
-            # Generate with timeout
-            try:
-                response = await asyncio.wait_for(
-                    self.model.generate_content_async(prompt),
-                    timeout=3.0  # 3 second timeout
-                )
-            except asyncio.TimeoutError:
-                self.logger.warning("Gemini suggestion request timed out")
-                return []
-            
-            # Parse simple suggestions
-            suggestions = []
-            if response and hasattr(response, 'text'):
-                # Split into lines and clean
-                lines = [line.strip() for line in response.text.split('\n') if line.strip()]
+                    seen_texts.add(base_text)
                 
-                for i, line in enumerate(lines):
-                    if i >= limit:
-                        break
-                    
-                    # Remove any numbers, bullets or arrows that might have been added
-                    clean_line = line
-                    for prefix in ['•', '-', '→', '*']:
-                        if clean_line.startswith(prefix):
-                            clean_line = clean_line[1:].strip()
-                    
-                    # Remove numbering like "1. ", "2. "
-                    if len(clean_line) > 3 and clean_line[0].isdigit() and clean_line[1:3] in ['. ', ') ']:
-                        clean_line = clean_line[3:].strip()
-                    
+                # Optional: Add a more specific variant if available
+                specific_text = f"{partial_query} {expert_id} research".strip()
+                if specific_text not in seen_texts:
                     suggestions.append({
-                        "text": clean_line,
-                        "source": "gemini_simplified",
-                        "score": 0.85 - (i * 0.03)
+                        "text": specific_text,
+                        "source": "faiss_index",
+                        "score": float(0.95 / (1.0 + distances[0][i]))
                     })
+                    seen_texts.add(specific_text)
                 
+                if len(suggestions) >= k:
+                    break
+            
             return suggestions
         except Exception as e:
-            self.logger.error(f"Simplified Gemini suggestion generation failed: {e}")
+            self.logger.error(f"Error in FAISS search execution: {e}")
             return []
     
-    async def predict(self, partial_query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """
-        Generate search suggestions with Google-like experience.
-        
-        Args:
-            partial_query: The partial query to get suggestions for
-            limit: Maximum number of suggestions to return
-            
-        Returns:
-            List of dictionaries containing suggestion text and metadata
-        """
-        if not partial_query:
-            return []
-        
-        start_time = time.time()
-        normalized_query = self._normalize_text(partial_query)
+    @retry(
+        retry=retry_if_exception_type((asyncio.TimeoutError, ConnectionError)),
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=1.5)
+    )
+    async def _generate_simplified_gemini_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
+        """Generate simplified Gemini suggestions with circuit breaker protection."""
+        self.metrics["api_calls"] += 1
         
         try:
-            # First check cache
-            cached_suggestions = self._check_cache(normalized_query)
-            if cached_suggestions:
-                self.logger.info(f"Returning cached suggestions for '{normalized_query}' ({time.time() - start_time:.3f}s)")
-                return cached_suggestions[:limit]
+            # Use circuit breaker
+            suggestions = await self.generation_circuit.execute(
+                self._execute_gemini_suggestion_request,
+                partial_query,
+                limit
+            )
             
-            # Generate suggestions from FAISS
-            suggestions = await self._generate_faiss_suggestions(normalized_query, limit)
+            if suggestions is None:
+                self.logger.warning("Circuit breaker open, using pattern suggestions instead")
+                return self._generate_pattern_suggestions(partial_query, limit)
             
-            # If we don't have enough from FAISS, try simplified Gemini suggestions
-            if len(suggestions) < limit * 0.7:  # If we have less than 70% of requested suggestions
-                gemini_suggestion_count = min(limit - len(suggestions), 5)  # Get at most 5 from Gemini
-                if gemini_suggestion_count > 0:
-                    gemini_suggestions = await self._generate_simplified_gemini_suggestions(normalized_query, gemini_suggestion_count)
-                    
-                    # Add non-duplicate suggestions
-                    existing_texts = {s["text"] for s in suggestions}
-                    for suggestion in gemini_suggestions:
-                        if suggestion["text"] not in existing_texts:
-                            suggestions.append(suggestion)
-                            existing_texts.add(suggestion["text"])
-            
-            # Fallback to simple pattern completion if we still don't have enough
-            if not suggestions:
-                suggestions = self._generate_pattern_suggestions(normalized_query, limit)
-            
-            # Update cache with new results
-            self._update_cache(normalized_query, suggestions)
-            
-            # Sort by score for best results first
-            suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
-            
-            self.logger.info(f"Generated {len(suggestions)} suggestions for '{normalized_query}' ({time.time() - start_time:.3f}s)")
-            return suggestions[:limit]
+            return suggestions
             
         except Exception as e:
-            self.logger.error(f"Error predicting suggestions: {e}")
-            # Ensure we always return something
-            return self._generate_pattern_suggestions(normalized_query, limit)
+            self.logger.error(f"Error generating Gemini suggestions after retries: {e}")
+            self.metrics["fallbacks_used"] += 1
+            return self._generate_pattern_suggestions(partial_query, limit)
+    
+    async def _execute_gemini_suggestion_request(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
+        """Execute the actual Gemini suggestion request with timeout."""
+        # Simple and direct prompt focused on speed
+        prompt = f"""Generate {limit} single-line search suggestions for "{partial_query}" in a research context.
+        
+        IMPORTANT:
+        - Each suggestion must be on its own line
+        - No numbering, no arrows, no bullet points
+        - Keep each suggestion under 10 words
+        - Include relevant research terms
+        - No explanations, just the suggestions
+        - Prioritize common completions
+        
+        Suggestions:"""
+        
+        # Generate with timeout
+        response = await asyncio.wait_for(
+            self.model.generate_content_async(prompt),
+            timeout=3.0  # 3 second timeout
+        )
+        
+        # Parse simple suggestions
+        suggestions = []
+        if response and hasattr(response, 'text'):
+            # Split into lines and clean
+            lines = [line.strip() for line in response.text.split('\n') if line.strip()]
+            
+            for i, line in enumerate(lines):
+                if i >= limit:
+                    break
+                
+                # Remove any numbers, bullets or arrows that might have been added
+                clean_line = line
+                for prefix in ['•', '-', '→', '*']:
+                    if clean_line.startswith(prefix):
+                        clean_line = clean_line[1:].strip()
+                
+                # Remove numbering like "1. ", "2. "
+                if len(clean_line) > 3 and clean_line[0].isdigit() and clean_line[1:3] in ['. ', ') ']:
+                    clean_line = clean_line[3:].strip()
+                
+                suggestions.append({
+                    "text": clean_line,
+                    "source": "gemini_simplified",
+                    "score": 0.85 - (i * 0.03)
+                })
+            
+        return suggestions
     
     def _generate_pattern_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
         """
@@ -376,6 +580,112 @@ class GoogleAutocompletePredictor:
             })
             
         return suggestions
+    
+    async def predict(self, partial_query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Generate search suggestions with Google-like experience.
+        
+        Args:
+            partial_query: The partial query to get suggestions for
+            limit: Maximum number of suggestions to return
+            
+        Returns:
+            List of dictionaries containing suggestion text and metadata
+        """
+        if not partial_query:
+            return []
+        
+        start_time = time.time()
+        normalized_query = self._normalize_text(partial_query)
+        self.metrics["total_requests"] += 1
+        
+        try:
+            # First check cache
+            cached_suggestions = await self._check_cache(normalized_query)
+            if cached_suggestions:
+                processing_time = time.time() - start_time
+                self._update_latency_metric(processing_time)
+                self.logger.info(f"Returning cached suggestions for '{normalized_query}' ({processing_time:.3f}s)")
+                return cached_suggestions[:limit]
+            
+            # Use asyncio.gather to run multiple async operations concurrently
+            # This improves performance by allowing both operations to run in parallel
+            faiss_future = self._generate_faiss_suggestions(normalized_query, max(limit - 2, 5))
+            gemini_future = self._generate_simplified_gemini_suggestions(normalized_query, 3)
+            
+            # Wait for both operations to complete
+            faiss_suggestions, gemini_suggestions = await asyncio.gather(
+                faiss_future, 
+                gemini_future
+            )
+            
+            # Combine suggestions, prioritizing FAISS results
+            combined_suggestions = []
+            seen_texts = set()
+            
+            # Add FAISS suggestions first (higher priority)
+            for suggestion in faiss_suggestions:
+                if suggestion["text"] not in seen_texts:
+                    combined_suggestions.append(suggestion)
+                    seen_texts.add(suggestion["text"])
+            
+            # Add Gemini suggestions to fill any remaining spots
+            remaining_slots = limit - len(combined_suggestions)
+            for suggestion in gemini_suggestions[:remaining_slots]:
+                if suggestion["text"] not in seen_texts:
+                    combined_suggestions.append(suggestion)
+                    seen_texts.add(suggestion["text"])
+            
+            # Fallback to pattern suggestions if we still don't have enough
+            if not combined_suggestions:
+                self.metrics["fallbacks_used"] += 1
+                combined_suggestions = self._generate_pattern_suggestions(normalized_query, limit)
+            
+            # Update cache with new results
+            await self._update_cache(normalized_query, combined_suggestions)
+            
+            # Sort by score for best results first
+            combined_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+            
+            processing_time = time.time() - start_time
+            self._update_latency_metric(processing_time)
+            self.logger.info(f"Generated {len(combined_suggestions)} suggestions for '{normalized_query}' ({processing_time:.3f}s)")
+            
+            return combined_suggestions[:limit]
+            
+        except Exception as e:
+            processing_time = time.time() - start_time
+            self._update_latency_metric(processing_time)
+            self.logger.error(f"Error predicting suggestions: {e}")
+            
+            # Ensure we always return something
+            self.metrics["fallbacks_used"] += 1
+            return self._generate_pattern_suggestions(normalized_query, limit)
+    
+    def _update_latency_metric(self, processing_time: float):
+        """Update the average latency metric."""
+        # Calculate rolling average
+        old_avg = self.metrics["avg_latency"]
+        total_requests = self.metrics["total_requests"]
+        
+        if total_requests <= 1:
+            self.metrics["avg_latency"] = processing_time
+        else:
+            # Update rolling average
+            self.metrics["avg_latency"] = old_avg + (processing_time - old_avg) / total_requests
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return current performance metrics."""
+        return {
+            "api_calls": self.metrics["api_calls"],
+            "cache_hits": self.metrics["cache_hits"],
+            "fallbacks_used": self.metrics["fallbacks_used"],
+            "avg_latency_ms": round(self.metrics["avg_latency"] * 1000, 2),
+            "total_requests": self.metrics["total_requests"],
+            "cache_size": len(self.suggestion_cache),
+            "embedding_circuit_state": self.embedding_circuit.state,
+            "generation_circuit_state": self.generation_circuit.state
+        }
     
     def generate_confidence_scores(self, suggestions: List[Dict[str, Any]]) -> List[float]:
         """Generate confidence scores for suggestions."""
