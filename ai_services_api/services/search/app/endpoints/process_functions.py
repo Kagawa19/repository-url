@@ -211,16 +211,16 @@ def generate_predictive_refinements(partial_query: str, predictions: List[str]) 
         }
 
 async def get_redis():
-    """Initialize Redis connection with error handling."""
+    """Initialize async Redis connection with error handling."""
     logger.debug("Initializing Redis connection")
     try:
-        # Use the RedisConnectionManager instead of creating new connections
+        # Use the RedisConnectionManager for async Redis
         from ai_services_api.services.search.ml.ml_predictor import RedisConnectionManager
         
         redis_manager = RedisConnectionManager.get_instance()
-        redis_client = redis_manager.get_connection(db=3)  # DB 3 for caching
+        redis_client = await redis_manager.get_connection(db=3)  # DB 3 for caching
         
-        # Test connection
+        # Test connection with async ping
         ping_result = await redis_client.ping()
         if not ping_result:
             logger.warning("Redis connection established but ping failed")
@@ -231,7 +231,6 @@ async def get_redis():
         logger.error(f"Redis connection failed: {e}", exc_info=True)
         # Return None instead of raising - will handle gracefully in processing functions
         return None
-
 async def process_query_prediction(partial_query: str, user_id: str, redis_client: Redis = None) -> PredictionResponse:
     """
     Enhanced query prediction with improved error handling and no fallbacks
@@ -248,6 +247,7 @@ async def process_query_prediction(partial_query: str, user_id: str, redis_clien
     
     conn = None
     session_id = str(uuid.uuid4())[:8]  # Default session ID in case DB connection fails
+    cache_hit = False
     
     try:
         # Handle Redis client being None (connection failure)
@@ -255,7 +255,6 @@ async def process_query_prediction(partial_query: str, user_id: str, redis_clien
             logger.warning("Redis client unavailable, proceeding without caching")
         
         # Try cache if Redis is available
-        cache_hit = False
         if redis_client:
             try:
                 cache_key = f"query_prediction:{user_id}:{partial_query}"
@@ -280,8 +279,9 @@ async def process_query_prediction(partial_query: str, user_id: str, redis_clien
         # Generate predictions - handle potentially empty results
         predictions = []
         try:
-            predictor = MLPredictor()
-            predictions = predictor.predict(partial_query, user_id=user_id)
+            # Use factory function to create and initialize predictor
+            predictor = await create_ml_predictor()
+            predictions = await predictor.predict(partial_query, user_id=user_id)
             logger.debug(f"Generated {len(predictions)} predictions")
         except Exception as pred_error:
             logger.error(f"Prediction generation error: {pred_error}", exc_info=True)
