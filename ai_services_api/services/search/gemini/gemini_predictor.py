@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-class GeminiAutocompletePredictor:
+class GoogleAutocompletePredictor:
     """
     Prediction service for search suggestions using Google's Gemini API.
     """
