@@ -285,7 +285,7 @@ class GoogleAutocompletePredictor:
                     suggestions.append({
                         "text": current_suggestion,
                         "source": "gemini_api",
-                        "score": 1.0 - (len(suggestions) * 0.03
+                        "score": 1.0 - (len(suggestions) * 0.03)
                     })
             
             return suggestions[:limit]
