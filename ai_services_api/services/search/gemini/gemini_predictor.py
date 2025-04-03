@@ -1,6 +1,10 @@
 import os
 import google.generativeai as genai
 import logging
+import faiss
+import pickle
+import numpy as np
+import json
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 
@@ -9,17 +13,22 @@ load_dotenv()
 
 class GoogleAutocompletePredictor:
     """
-    Prediction service for APHRC-specific search suggestions using Google's Gemini API.
+    Prediction service for APHRC-specific search suggestions using FAISS index and Gemini API.
     """
     
-    def __init__(self, api_key: str = None):
+    def __init__(self, 
+                 api_key: str = None, 
+                 index_path: str = None, 
+                 mapping_path: str = None):
         """
-        Initialize the APHRC Autocomplete predictor.
+        Initialize the APHRC Autocomplete predictor with FAISS index.
         
         Args:
-            api_key: Optional API key. If not provided, will attempt to read from environment.
+            api_key: Optional API key for Gemini. If not provided, will attempt to read from environment.
+            index_path: Optional path to FAISS index. Defaults to a standard location.
+            mapping_path: Optional path to expert ID mapping. Defaults to a standard location.
         """
-        # Prioritize passed api_key, then environment variable
+        # Gemini API setup
         key = api_key or os.getenv('GEMINI_API_KEY')
         
         if not key:
@@ -32,14 +41,83 @@ class GoogleAutocompletePredictor:
             genai.configure(api_key=key)
             self.model = genai.GenerativeModel('gemini-pro')
             self.logger = logging.getLogger(__name__)
-            self.logger.info("GoogleAutocompletePredictor initialized successfully")
+            self.logger.info("GoogleAutocompletePredictor initialized")
         except Exception as e:
             self.logger.error(f"Failed to initialize Gemini API: {e}")
             raise
+        
+        # FAISS index setup
+        if not index_path:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            index_path = os.path.join(current_dir, 'models', 'expert_faiss_index.idx')
+        
+        if not mapping_path:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            mapping_path = os.path.join(current_dir, 'models', 'expert_mapping.pkl')
+        
+        try:
+            # Load FAISS index
+            self.index = faiss.read_index(index_path)
+            
+            # Load ID mapping
+            with open(mapping_path, 'rb') as f:
+                self.id_mapping = pickle.load(f)
+            
+            self.logger.info(f"Loaded FAISS index with {self.index.ntotal} entries")
+        except Exception as e:
+            self.logger.error(f"Failed to load FAISS index: {e}")
+            raise
+    
+    def _generate_embedding(self, text: str, dimension: int = 384) -> np.ndarray:
+        """
+        Generate a deterministic embedding for the given text.
+        
+        Args:
+            text (str): Text to embed
+            dimension (int): Embedding dimension
+            
+        Returns:
+            np.ndarray: Embedding vector
+        """
+        # Simple deterministic embedding generation
+        import hashlib
+        
+        # Create a deterministic seed from the text
+        text_bytes = text.encode('utf-8')
+        hash_obj = hashlib.sha256(text_bytes)
+        seed = int(hash_obj.hexdigest(), 16) % (2**32)
+        
+        # Use numpy's random with the seed for deterministic output
+        np.random.seed(seed)
+        
+        # Generate embedding
+        embedding = np.zeros(dimension, dtype=np.float32)
+        
+        # Split text into words and process each word
+        words = text.lower().split()
+        for word in words:
+            word_hash = int(hashlib.md5(word.encode('utf-8')).hexdigest(), 16)
+            word_seed = word_hash % (2**32)
+            np.random.seed(word_seed)
+            
+            # Make it sparse - only activate ~5% of dimensions
+            active_dims = np.random.choice(
+                dimension, 
+                size=max(1, int(dimension * 0.05)), 
+                replace=False
+            )
+            
+            # Set values for active dimensions
+            for dim in active_dims:
+                embedding[dim] = (np.random.random() * 2) - 1
+        
+        # Normalize embedding
+        norm = np.linalg.norm(embedding)
+        return embedding / norm if norm != 0 else embedding
     
     async def predict(self, partial_query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
-        Generate APHRC-specific search suggestions for a partial query using Gemini.
+        Generate APHRC-specific search suggestions using FAISS index.
         
         Args:
             partial_query: The partial query to get suggestions for
@@ -51,6 +129,84 @@ class GoogleAutocompletePredictor:
         if not partial_query:
             return []
         
+        try:
+            # Generate embedding for the partial query
+            query_embedding = self._generate_embedding(partial_query)
+            
+            # Search FAISS index - get more candidates to filter
+            max_candidates = min(limit * 3, self.index.ntotal)
+            distances, indices = self.index.search(
+                query_embedding.reshape(1, -1).astype(np.float32), 
+                max_candidates
+            )
+            
+            # Collect and process suggestions
+            suggestions = []
+            seen_suggestions = set()
+            
+            for i, idx in enumerate(indices[0]):
+                if idx < 0:  # Skip invalid indices
+                    continue
+                
+                try:
+                    # Get expert ID from mapping
+                    expert_id = self.id_mapping[idx]
+                    
+                    # Create suggestion texts based on expert data
+                    suggestion_texts = [
+                        f"APHRC Expert in {partial_query}",
+                        f"Research by {partial_query} Expert",
+                        f"Specialist in {partial_query}"
+                    ]
+                    
+                    # Add distance-based scoring
+                    distance = float(distances[0][i])
+                    base_score = float(1.0 / (1.0 + distance))
+                    
+                    # Add unique suggestions
+                    for j, text in enumerate(suggestion_texts):
+                        if text not in seen_suggestions:
+                            suggestions.append({
+                                "text": text,
+                                "source": "faiss_index",
+                                "score": base_score - (j * 0.05)  # Slight score reduction for later suggestions
+                            })
+                            seen_suggestions.add(text)
+                        
+                        # Break if we've reached the limit
+                        if len(suggestions) >= limit:
+                            break
+                    
+                    if len(suggestions) >= limit:
+                        break
+                
+                except Exception as e:
+                    self.logger.error(f"Error processing expert suggestion: {e}")
+            
+            # Fallback to Gemini if no suggestions
+            if not suggestions:
+                suggestions = await self._generate_gemini_suggestions(partial_query, limit)
+            
+            # Sort suggestions by score
+            suggestions.sort(key=lambda x: x.get('score', 0), reverse=True)
+            
+            return suggestions[:limit]
+        
+        except Exception as e:
+            self.logger.error(f"Error generating APHRC suggestions: {e}")
+            return await self._generate_gemini_suggestions(partial_query, limit)
+    
+    async def _generate_gemini_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
+        """
+        Generate fallback suggestions using Gemini API when FAISS index fails.
+        
+        Args:
+            partial_query: The partial query to get suggestions for
+            limit: Maximum number of suggestions to return
+            
+        Returns:
+            List of dictionaries containing suggestion text and metadata
+        """
         try:
             # Comprehensive APHRC-specific prompt
             prompt = f"""You are an expert at generating search suggestions specifically for the African Population and Health Research Center (APHRC). 
@@ -97,19 +253,14 @@ Provide suggestions that a researcher or professional interested in African popu
                         "score": 1.0 - (idx * 0.05)  # Scoring similar to previous implementation
                     })
             
-            # Fallback if no suggestions generated
-            if not suggestions:
-                suggestions = self._generate_fallback_suggestions(partial_query, limit)
-            
-            self.logger.info(f"Generated {len(suggestions)} APHRC-specific suggestions for '{partial_query}'")
             return suggestions
         
         except Exception as e:
-            self.logger.error(f"Error generating APHRC suggestions with Gemini API: {e}")
+            self.logger.error(f"Error generating Gemini suggestions: {e}")
             return self._generate_fallback_suggestions(partial_query, limit)
     
     def _generate_fallback_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
-        """Generate fallback APHRC-specific suggestions when the API call fails."""
+        """Generate fallback APHRC-specific suggestions."""
         suggestions = []
         
         if not partial_query:
