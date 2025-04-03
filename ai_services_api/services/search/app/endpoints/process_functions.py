@@ -15,7 +15,7 @@ from ai_services_api.services.search.ml.ml_predictor import MLPredictor, RedisCo
 from ai_services_api.services.message.core.database import get_db_connection
 
 # Import response models
-from ai_services_api.services.search.api.models import (
+from ai_services_api.services.search.core.models import (
     ExpertSearchResult,
     SearchResponse,
     PredictionResponse
