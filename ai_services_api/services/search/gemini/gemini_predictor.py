@@ -9,12 +9,12 @@ load_dotenv()
 
 class GoogleAutocompletePredictor:
     """
-    Prediction service for search suggestions using Google's Gemini API.
+    Prediction service for APHRC-specific search suggestions using Google's Gemini API.
     """
     
     def __init__(self, api_key: str = None):
         """
-        Initialize the Gemini Autocomplete predictor.
+        Initialize the APHRC Autocomplete predictor.
         
         Args:
             api_key: Optional API key. If not provided, will attempt to read from environment.
@@ -31,15 +31,15 @@ class GoogleAutocompletePredictor:
         try:
             genai.configure(api_key=key)
             self.model = genai.GenerativeModel('gemini-pro')
-            logger = logging.getLogger(__name__)
-            logger.info("GeminiAutocompletePredictor initialized successfully")
+            self.logger = logging.getLogger(__name__)
+            self.logger.info("GoogleAutocompletePredictor initialized successfully")
         except Exception as e:
-            logging.error(f"Failed to initialize Gemini API: {e}")
+            self.logger.error(f"Failed to initialize Gemini API: {e}")
             raise
     
     async def predict(self, partial_query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
-        Generate search suggestions for a partial query using Gemini.
+        Generate APHRC-specific search suggestions for a partial query using Gemini.
         
         Args:
             partial_query: The partial query to get suggestions for
@@ -52,13 +52,27 @@ class GoogleAutocompletePredictor:
             return []
         
         try:
-            # Prompt to generate search suggestions
-            # Prompt to generate search suggestions related to APHRC
-            prompt = f"""Generate {limit} search query suggestions that are specifically related to the African Population and Health Research Center (APHRC) and expand on or relate to the following partial query:
-            "{partial_query}"
+            # Comprehensive APHRC-specific prompt
+            prompt = f"""You are an expert at generating search suggestions specifically for the African Population and Health Research Center (APHRC). 
 
-            Focus on suggestions that pertain to APHRC's research areas, projects, publications, events, or other relevant aspects of the organization. Each suggestion should be distinct, relevant, and formatted as a numbered list."""
+Create {limit} highly targeted search query suggestions that are exclusively related to APHRC. These suggestions must:
+- Strictly focus on APHRC's work, research, publications, or initiatives
+- Incorporate the partial query: "{partial_query}"
+- Ensure each suggestion is unique and directly relevant to APHRC
+- Include specific research areas, projects, or publications
 
+Examples of APHRC domains include:
+- Population health research
+- Urban health
+- Maternal and child health
+- Education research
+- Demographic and health surveys
+- Policy research in African contexts
+
+Suggestions should follow this format:
+"APHRC [specific research/project/publication domain]"
+
+Provide suggestions that a researcher or professional interested in African population and health research would actually search for."""
             
             # Generate suggestions
             response = self.model.generate_content(prompt)
@@ -70,7 +84,9 @@ class GoogleAutocompletePredictor:
                 raw_suggestions = [
                     line.strip() 
                     for line in response.text.split('\n') 
-                    if line.strip() and not line.strip().startswith('Suggestion')
+                    if line.strip() and 
+                    not line.strip().startswith(('Suggestion', '•', '-')) and 
+                    'APHRC' in line.strip()
                 ]
                 
                 # Format suggestions
@@ -85,42 +101,41 @@ class GoogleAutocompletePredictor:
             if not suggestions:
                 suggestions = self._generate_fallback_suggestions(partial_query, limit)
             
+            self.logger.info(f"Generated {len(suggestions)} APHRC-specific suggestions for '{partial_query}'")
             return suggestions
         
         except Exception as e:
-            logging.error(f"Error generating suggestions with Gemini API: {e}")
+            self.logger.error(f"Error generating APHRC suggestions with Gemini API: {e}")
             return self._generate_fallback_suggestions(partial_query, limit)
     
     def _generate_fallback_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
-        """Generate fallback suggestions when the API call fails."""
+        """Generate fallback APHRC-specific suggestions when the API call fails."""
         suggestions = []
         
         if not partial_query:
             return suggestions
         
-        # Create some basic fallback suggestions based on the query
-        common_extensions = [
-            "",              # Just the query itself
-            " overview",
-            " explained",
-            " guide",
-            " information",
-            " key points",
-            " summary",
-            " details"
+        # APHRC-specific fallback suggestions
+        aphrc_extensions = [
+            " research projects",
+            " population health studies",
+            " urban health research",
+            " maternal health initiatives",
+            " demographic surveys",
+            " policy research",
+            " publications"
         ]
         
-        for i, ext in enumerate(common_extensions):
+        for i, ext in enumerate(aphrc_extensions):
             if len(suggestions) >= limit:
                 break
                 
-            suggestion_text = f"{partial_query}{ext}".strip()
-            if suggestion_text:  # Ensure non-empty suggestion
-                suggestions.append({
-                    "text": suggestion_text,
-                    "source": "fallback",
-                    "score": 0.8 - (i * 0.1)  # Decreasing score for later suggestions
-                })
+            suggestion_text = f"APHRC {partial_query}{ext}".strip()
+            suggestions.append({
+                "text": suggestion_text,
+                "source": "fallback",
+                "score": 0.8 - (i * 0.1)  # Decreasing score for later suggestions
+            })
         
         return suggestions
     
@@ -136,8 +151,3 @@ class GoogleAutocompletePredictor:
         """
         # Use provided scores if available, otherwise assign scores based on position
         return [s.get("score", max(0.1, 1.0 - (i * 0.1))) for i, s in enumerate(suggestions)]
-
-# Example usage
-# from gemini_predictor import GeminiAutocompletePredictor
-# predictor = GeminiAutocompletePredictor()  # Will read from .env
-# suggestions = await predictor.predict('your query')
