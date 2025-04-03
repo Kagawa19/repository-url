@@ -1,30 +1,45 @@
-import requests
-import json
+import os
+import google.generativeai as genai
 import logging
 from typing import List, Dict, Any
-from tenacity import retry, stop_after_attempt, wait_exponential
+from dotenv import load_dotenv
 
-logger = logging.getLogger(__name__)
+# Load environment variables
+load_dotenv()
 
-class GoogleAutocompletePredictor:
-    """Prediction service for search suggestions using Google's Autocomplete API."""
+class GeminiAutocompletePredictor:
+    """
+    Prediction service for search suggestions using Google's Gemini API.
+    """
     
-    def __init__(self):
-        """Initialize the Google Autocomplete predictor."""
-        self.url = "https://suggestqueries.google.com/complete/search"
-        self.headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/70.0.3538.102 Safari/537.36 Edge/18.19582"
+    def __init__(self, api_key: str = None):
+        """
+        Initialize the Gemini Autocomplete predictor.
+        
+        Args:
+            api_key: Optional API key. If not provided, will attempt to read from environment.
+        """
+        # Prioritize passed api_key, then environment variable
+        key = api_key or os.getenv('GEMINI_API_KEY')
+        
+        if not key:
+            raise ValueError(
+                "No Gemini API key provided. "
+                "Please pass the key directly or set GEMINI_API_KEY in your .env file."
             )
-        }
-        logger.info("GoogleAutocompletePredictor initialized successfully")
+        
+        try:
+            genai.configure(api_key=key)
+            self.model = genai.GenerativeModel('gemini-pro')
+            logger = logging.getLogger(__name__)
+            logger.info("GeminiAutocompletePredictor initialized successfully")
+        except Exception as e:
+            logging.error(f"Failed to initialize Gemini API: {e}")
+            raise
     
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=3))
     async def predict(self, partial_query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
-        Get search suggestions for partial query using Google's Autocomplete API.
+        Generate search suggestions for a partial query using Gemini.
         
         Args:
             partial_query: The partial query to get suggestions for
@@ -34,48 +49,46 @@ class GoogleAutocompletePredictor:
             List of dictionaries containing suggestion text and metadata
         """
         if not partial_query:
-            # For empty queries, return empty list
             return []
-            
+        
         try:
-            # Define the parameters for the GET request
-            params = {
-                "client": "firefox",  # Client type; can be 'firefox' or 'chrome'
-                "q": partial_query,   # The search query keyword
-                "hl": "en",           # Language code for the suggestions
-                "gl": "us",           # Country code to influence regional suggestions
-                "ie": "UTF-8",        # Input encoding
-                "oe": "UTF-8",        # Output encoding
-                "num": limit          # Number of suggestions to retrieve
-            }
+            # Prompt to generate search suggestions
+            prompt = f"""Generate {limit} search query suggestions that expand on or relate to the following partial query:
+            "{partial_query}"
             
-            # Send the GET request to Google's Autocomplete API
-            response = requests.get(self.url, params=params, headers=self.headers)
+            Provide suggestions that are natural and might be typed into a search engine. 
+            Each suggestion should be distinct and relevant.
+            Format your response as a numbered list of suggestions."""
             
-            # Check if the request was successful
-            if response.status_code == 200:
-                # Parse the JSON response and extract the suggestions
-                raw_suggestions = json.loads(response.text)[1]
+            # Generate suggestions
+            response = self.model.generate_content(prompt)
+            
+            # Parse the suggestions
+            suggestions = []
+            if response.text:
+                # Split the response into lines and clean up
+                raw_suggestions = [
+                    line.strip() 
+                    for line in response.text.split('\n') 
+                    if line.strip() and not line.strip().startswith('Suggestion')
+                ]
                 
-                # Format the suggestions into dictionaries
-                suggestions = []
-                for idx, suggestion in enumerate(raw_suggestions):
+                # Format suggestions
+                for idx, suggestion in enumerate(raw_suggestions[:limit]):
                     suggestions.append({
                         "text": suggestion,
-                        "source": "google_autocomplete",
-                        "score": 1.0 - (idx * 0.05)  # Higher score for earlier suggestions
+                        "source": "gemini_api",
+                        "score": 1.0 - (idx * 0.05)  # Scoring similar to previous implementation
                     })
-                    
-                logger.info(f"Generated {len(suggestions)} suggestions for '{partial_query}'")
-                return suggestions
-            else:
-                # Handle error response
-                logger.error(f"Google Autocomplete API error: {response.status_code}")
-                return self._generate_fallback_suggestions(partial_query, limit)
-                
+            
+            # Fallback if no suggestions generated
+            if not suggestions:
+                suggestions = self._generate_fallback_suggestions(partial_query, limit)
+            
+            return suggestions
+        
         except Exception as e:
-            logger.error(f"Error getting suggestions from Google Autocomplete: {e}")
-            # Return fallback suggestions on error
+            logging.error(f"Error generating suggestions with Gemini API: {e}")
             return self._generate_fallback_suggestions(partial_query, limit)
     
     def _generate_fallback_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
@@ -84,17 +97,17 @@ class GoogleAutocompletePredictor:
         
         if not partial_query:
             return suggestions
-            
+        
         # Create some basic fallback suggestions based on the query
         common_extensions = [
             "",              # Just the query itself
-            " expert",
-            " research",
-            " meaning",
-            " studies",
-            " specialist",
-            " definition",
-            " examples"
+            " overview",
+            " explained",
+            " guide",
+            " information",
+            " key points",
+            " summary",
+            " details"
         ]
         
         for i, ext in enumerate(common_extensions):
@@ -123,3 +136,8 @@ class GoogleAutocompletePredictor:
         """
         # Use provided scores if available, otherwise assign scores based on position
         return [s.get("score", max(0.1, 1.0 - (i * 0.1))) for i, s in enumerate(suggestions)]
+
+# Example usage
+# from gemini_predictor import GeminiAutocompletePredictor
+# predictor = GeminiAutocompletePredictor()  # Will read from .env
+# suggestions = await predictor.predict('your query')

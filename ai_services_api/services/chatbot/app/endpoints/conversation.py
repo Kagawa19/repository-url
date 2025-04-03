@@ -308,6 +308,134 @@ async def chat_endpoint(
                     "message": "An unexpected error occurred. Please try again."
                 }
             )
+        
+@router.post("/chat/anonymous", response_model=ChatResponse, responses={
+    429: {"model": ErrorResponse, "description": "Rate limit exceeded"},
+    500: {"model": ErrorResponse, "description": "Internal server error"},
+    503: {"model": ErrorResponse, "description": "Service temporarily unavailable"},
+    504: {"model": ErrorResponse, "description": "Request timeout"}
+})
+async def anonymous_chat_endpoint(
+    request_data: ChatRequest,
+    request: Request,
+    redis_client: Redis = Depends(get_redis)
+    ):
+    """
+    Process chat messages without requiring a user ID.
+    
+    This endpoint generates a temporary anonymous user ID for each request.
+    Useful for quick interactions without user registration.
+    
+    Rate limits still apply to prevent abuse.
+    """
+    # Generate a temporary anonymous user ID
+    import uuid
+    user_id = f"anon_{uuid.uuid4().hex}"
+    
+    # Extract message from request body
+    query = request_data.message
+    
+    # Log request information
+    logger.info(f"Anonymous chat request received - Temp User: {user_id}, Query length: {len(query)}")
+    
+    # Check rate limit with enhanced error handling
+    if not await rate_limiter.check_rate_limit(user_id):
+        remaining_time = await rate_limiter.get_window_remaining(user_id)
+        retry_after = max(1, min(60, remaining_time))  # Cap retry between 1-60 seconds
+        
+        # Log rate limit event
+        logger.warning(f"Rate limit exceeded for anonymous user, retry after {retry_after}s")
+        
+        # Check if there's a global circuit breaker active
+        redis_circuit_key = "global:api_circuit_breaker"
+        circuit_active = await redis_client.get(redis_circuit_key)
+        
+        if circuit_active:
+            # Service-wide circuit breaker is active
+            circuit_ttl = await redis_client.ttl(redis_circuit_key)
+            error_detail = {
+                "error": "Service temporarily unavailable",
+                "retry_after": circuit_ttl,
+                "message": "Our service is experiencing high demand. Please try again shortly."
+            }
+            logger.warning(f"Circuit breaker active, returning 503 response with {circuit_ttl}s retry")
+            return JSONResponse(
+                status_code=503,
+                content=error_detail,
+                headers={"Retry-After": str(circuit_ttl)}
+            )
+        else:
+            # Standard rate limit for this temporary user
+            error_detail = {
+                "error": "Rate limit exceeded",
+                "retry_after": retry_after,
+                "limit": await rate_limiter.get_user_limit(user_id),
+                "message": "Please reduce your request frequency"
+            }
+            return JSONResponse(
+                status_code=429,
+                content=error_detail,
+                headers={"Retry-After": str(retry_after)}
+            )
+    
+    try:
+        # Process the request
+        start_time = time.time()
+        response = await process_chat_request(query, user_id, redis_client)
+        processing_time = time.time() - start_time
+        
+        # Log successful processing
+        logger.info(f"Anonymous chat request processed successfully - Time: {processing_time:.2f}s")
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error in anonymous chat endpoint: {e}", exc_info=True)
+        
+        # Check for Google API rate limit errors
+        if any(x in str(e).lower() for x in ["429", "quota", "rate limit", "resource exhausted"]):
+            logger.warning(f"Google API rate limit detected: {str(e)}")
+            
+            # Record the rate limit error to trigger global circuit breaker if needed
+            await rate_limiter._record_api_rate_limit_error(redis_client)
+            
+            # Return appropriate error response
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "Service temporarily unavailable",
+                    "message": "Our service is experiencing high demand. Please try again in a moment.",
+                    "retry_after": 30
+                },
+                headers={"Retry-After": "30"}
+            )
+            
+        # Check for timeout errors
+        elif any(x in str(e).lower() for x in ["timeout", "deadline exceeded"]):
+            logger.warning(f"Request timeout: {str(e)}")
+            return JSONResponse(
+                status_code=504,
+                content={
+                    "error": "Request timeout",
+                    "message": "Your request took too long to process. Please try a shorter query."
+                }
+            )
+            
+        # Generic error handling
+        else:
+            logger.error(f"Unhandled error: {str(e)}")
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": "Internal server error",
+                    "message": "An unexpected error occurred. Please try again."
+                }
+            )
+
+async def shutdown_event():
+    """Cleanup connections on shutdown."""
+    await DatabaseConnector.close()
+    await redis_pool.close()
 
 @router.get("/chat/limit/status", response_model=Dict)
 async def get_rate_limit_status(user_id: str = Depends(get_user_id)):
@@ -340,7 +468,5 @@ async def startup_event():
     await DatabaseConnector.initialize()
     await redis_pool.get_redis()
 
-async def shutdown_event():
-    """Cleanup connections on shutdown."""
-    await DatabaseConnector.close()
-    await redis_pool.close()
+
+
