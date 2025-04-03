@@ -11,7 +11,7 @@ import uuid
 from redis.asyncio import Redis
 
 from ai_services_api.services.search.indexing.index_creator import ExpertSearchIndexManager
-from ai_services_api.services.search.ml.ml_predictor import MLPredictor, RedisConnectionManager
+from ai_services_api.services.search.ml.ml_predictor import MLPredictor, RedisConnectionManager, create_ml_predictor
 from ai_services_api.services.message.core.database import get_db_connection
 
 # Import response models
