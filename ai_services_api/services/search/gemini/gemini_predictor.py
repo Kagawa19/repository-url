@@ -53,12 +53,12 @@ class GoogleAutocompletePredictor:
         
         try:
             # Prompt to generate search suggestions
-            prompt = f"""Generate {limit} search query suggestions that expand on or relate to the following partial query:
+            # Prompt to generate search suggestions related to APHRC
+            prompt = f"""Generate {limit} search query suggestions that are specifically related to the African Population and Health Research Center (APHRC) and expand on or relate to the following partial query:
             "{partial_query}"
-            
-            Provide suggestions that are natural and might be typed into a search engine. 
-            Each suggestion should be distinct and relevant.
-            Format your response as a numbered list of suggestions."""
+
+            Focus on suggestions that pertain to APHRC's research areas, projects, publications, events, or other relevant aspects of the organization. Each suggestion should be distinct, relevant, and formatted as a numbered list."""
+
             
             # Generate suggestions
             response = self.model.generate_content(prompt)
