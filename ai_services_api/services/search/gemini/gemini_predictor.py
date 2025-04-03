@@ -34,7 +34,7 @@ class GoogleAutocompletePredictor:
         try:
             # Configure Gemini API
             genai.configure(api_key=key)
-            self.model = genai.GenerativeModel('gemini-1.5-flash-latest')
+            self.model = genai.GenerativeModel('gemini-pro')
             self.logger = logging.getLogger(__name__)
             
             # Load FAISS index and mapping
@@ -84,7 +84,7 @@ class GoogleAutocompletePredictor:
         """
         return str(text).lower().strip()
     
-    def _generate_intelligent_suggestions(self, partial_query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    async def _generate_intelligent_suggestions(self, partial_query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
         Generate intelligent search suggestions using FAISS index and Gemini API.
         
@@ -102,7 +102,7 @@ class GoogleAutocompletePredictor:
         if self.index and self.id_mapping:
             try:
                 # Generate embedding for the partial query using Gemini
-                query_embedding = self._get_gemini_embedding(partial_query)
+                query_embedding = await self._get_gemini_embedding(partial_query)
                 
                 if query_embedding is not None:
                     # Search the FAISS index
@@ -133,7 +133,7 @@ class GoogleAutocompletePredictor:
         # If we don't have enough suggestions, use Gemini API
         if len(suggestions) < limit:
             try:
-                gemini_suggestions = self._generate_gemini_suggestions(partial_query, limit - len(suggestions))
+                gemini_suggestions = await self._generate_gemini_suggestions(partial_query, limit - len(suggestions))
                 for suggestion in gemini_suggestions:
                     if suggestion['text'] not in seen_suggestions:
                         suggestions.append(suggestion)
@@ -146,7 +146,7 @@ class GoogleAutocompletePredictor:
         
         return suggestions[:limit]
     
-    def _get_gemini_embedding(self, text: str) -> Optional[List[float]]:
+    async def _get_gemini_embedding(self, text: str) -> Optional[List[float]]:
         """
         Get embedding for text using Gemini API.
         
@@ -158,7 +158,7 @@ class GoogleAutocompletePredictor:
         """
         try:
             # Use Gemini to generate embedding
-            response = self.model.embed_content(text)
+            response = await self.model.embed_content_async(text)
             if response and hasattr(response, 'embedding'):
                 return response.embedding
             return None
@@ -182,7 +182,7 @@ class GoogleAutocompletePredictor:
         
         try:
             # Generate intelligent suggestions
-            suggestions = self._generate_intelligent_suggestions(partial_query, limit)
+            suggestions = await self._generate_intelligent_suggestions(partial_query, limit)
             
             # Fallback if no suggestions
             if not suggestions:
