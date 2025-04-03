@@ -418,7 +418,10 @@ class GoogleAutocompletePredictor:
     
     def _execute_faiss_search(self, query_embedding: np.ndarray, k: int, partial_query: str) -> List[Dict[str, Any]]:
         """
-        Execute FAISS search to generate predictive search completions.
+        Execute FAISS search for Google-like predictive search suggestions.
+        
+        This method deliberately does NOT append the partial query to suggestions,
+        instead treating the retrieved results as complete prediction options.
         """
         try:
             # Search the FAISS index efficiently
@@ -431,6 +434,17 @@ class GoogleAutocompletePredictor:
             suggestions = []
             seen_texts = set()
             
+            # Set of generic research-related terms to use when no specific metadata is available
+            prediction_terms = [
+                "methods", "analysis", "frameworks", "data collection", 
+                "qualitative research", "quantitative analysis", "case studies",
+                "clinical trials", "public health", "policy analysis",
+                "children's health", "maternal care", "disease prevention"
+            ]
+            
+            # Counter for generic terms
+            generic_count = 0
+            
             for i, idx in enumerate(indices[0]):
                 if idx < 0:  # Skip invalid indices
                     continue
@@ -439,26 +453,94 @@ class GoogleAutocompletePredictor:
                 if not expert_id:
                     continue
                 
-                # Simply return the expert ID as a potential search completion
-                # This resolves the problem of "resea" instead of showing the full ID
-                suggestion_text = str(expert_id)
+                # Try to fetch expert metadata from Redis if available
+                expert_metadata = None
+                if hasattr(self, 'redis_client') and self.redis_client:
+                    try:
+                        redis_data = self.redis_client.get(f"expert:{expert_id}")
+                        if redis_data:
+                            expert_metadata = json.loads(redis_data)
+                    except Exception as e:
+                        self.logger.debug(f"Could not fetch expert metadata from Redis: {e}")
                 
-                if suggestion_text not in seen_texts:
-                    suggestions.append({
-                        "text": suggestion_text,
-                        "source": "faiss_index",
-                        "score": float(1.0 / (1.0 + distances[0][i]))
-                    })
-                    seen_texts.add(suggestion_text)
+                # Create suggestions based on expert knowledge areas
+                if expert_metadata and 'knowledge_expertise' in expert_metadata and expert_metadata['knowledge_expertise']:
+                    # If we have expertise information, use it directly as predictions
+                    expertise_areas = expert_metadata['knowledge_expertise']
+                    if isinstance(expertise_areas, str):
+                        expertise_areas = [expertise_areas]
+                    elif isinstance(expertise_areas, dict):
+                        expertise_areas = list(expertise_areas.keys())
+                    
+                    # Use expertise areas directly as predictions
+                    for expertise in expertise_areas[:2]:
+                        # Important: Do NOT append partial_query here!
+                        # Just use the expertise text directly as a prediction
+                        suggestion_text = expertise.lower().strip()
+                        
+                        # Only add if it contains or is relevant to the partial query
+                        # This ensures predictions are related to what the user is typing
+                        if partial_query.lower() in suggestion_text or self._text_similarity(partial_query, suggestion_text) > 0.3:
+                            if suggestion_text not in seen_texts:
+                                suggestions.append({
+                                    "text": suggestion_text,
+                                    "source": "faiss_expertise",
+                                    "score": float(1.0 / (1.0 + distances[0][i]))
+                                })
+                                seen_texts.add(suggestion_text)
+                else:
+                    # Without metadata, use generic research-related terms
+                    # but only add a limited number of these to avoid dominating results
+                    if generic_count < 5:
+                        term = prediction_terms[generic_count]
+                        generic_count += 1
+                        
+                        # Don't prepend or append partial_query, just use the term directly
+                        suggestion_text = term.lower().strip()
+                        
+                        if suggestion_text not in seen_texts:
+                            suggestions.append({
+                                "text": suggestion_text,
+                                "source": "generic_prediction",
+                                "score": float(0.8 / (1.0 + distances[0][i]))
+                            })
+                            seen_texts.add(suggestion_text)
                 
                 # Stop if we have enough suggestions
                 if len(suggestions) >= k:
                     break
             
+            # If we don't have enough suggestions, add a few generic ones
+            if len(suggestions) < min(3, k) and generic_count < len(prediction_terms):
+                for term in prediction_terms[generic_count:generic_count+3]:
+                    suggestion_text = term.lower().strip()
+                    if suggestion_text not in seen_texts and len(suggestions) < k:
+                        suggestions.append({
+                            "text": suggestion_text,
+                            "source": "generic_fallback",
+                            "score": 0.7
+                        })
+                        seen_texts.add(suggestion_text)
+            
             return suggestions
         except Exception as e:
             self.logger.error(f"Error in FAISS search execution: {e}")
             return []
+        
+    def _text_similarity(self, text1, text2):
+        """Simple text similarity measure to check relevance."""
+        # Convert texts to sets of words
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
+        
+        # Calculate Jaccard similarity
+        if not words1 or not words2:
+            return 0
+        
+        intersection = len(words1.intersection(words2))
+        union = len(words1.union(words2))
+        
+        return intersection / union if union > 0 else 0
     
     @retry(
         retry=retry_if_exception_type((asyncio.TimeoutError, ConnectionError)),
