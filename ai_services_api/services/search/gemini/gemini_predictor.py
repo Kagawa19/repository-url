@@ -417,7 +417,9 @@ class GoogleAutocompletePredictor:
             return []
     
     def _execute_faiss_search(self, query_embedding: np.ndarray, k: int, partial_query: str) -> List[Dict[str, Any]]:
-        """Execute FAISS search in a separate thread (CPU-bound operation) with improved suggestion formatting."""
+        """
+        Execute FAISS search to generate predictive search completions.
+        """
         try:
             # Search the FAISS index efficiently
             distances, indices = self.index.search(
@@ -429,23 +431,6 @@ class GoogleAutocompletePredictor:
             suggestions = []
             seen_texts = set()
             
-            # Common suffix terms for query expansion (domain-specific)
-            common_suffixes = [
-                "research", "methods", "studies", "management", "treatment", 
-                "prevention", "assessment", "analysis", "interventions", "care"
-            ]
-            
-            # Common keyword prefixes to form meaningful phrases
-            topic_prefixes = {
-                "disease": ["treatment for", "management of", "research on"],
-                "health": ["improving", "research on", "assessment of"],
-                "children": ["development in", "education for", "wellbeing of"],
-                "impact": ["measuring", "evaluation of", "assessment of"],
-                "chronic": ["management of", "treatment for", "living with"],
-                "nutrition": ["studies on", "research about", "improving"],
-                "mental": ["support for", "treatment of", "research on"]
-            }
-            
             for i, idx in enumerate(indices[0]):
                 if idx < 0:  # Skip invalid indices
                     continue
@@ -454,79 +439,21 @@ class GoogleAutocompletePredictor:
                 if not expert_id:
                     continue
                 
-                # Try to fetch expert metadata from Redis if available
-                expert_metadata = None
-                if hasattr(self, 'redis_client') and self.redis_client:
-                    try:
-                        redis_data = self.redis_client.get(f"expert:{expert_id}")
-                        if redis_data:
-                            expert_metadata = json.loads(redis_data)
-                    except Exception as e:
-                        self.logger.debug(f"Could not fetch expert metadata from Redis: {e}")
+                # Simply return the expert ID as a potential search completion
+                # This resolves the problem of "resea" instead of showing the full ID
+                suggestion_text = str(expert_id)
                 
-                # Create suggestions based on the query and expert knowledge areas
-                if expert_metadata and 'knowledge_expertise' in expert_metadata and expert_metadata['knowledge_expertise']:
-                    # If we have expertise information, use it to create meaningful suggestions
-                    expertise_areas = expert_metadata['knowledge_expertise']
-                    if isinstance(expertise_areas, str):
-                        expertise_areas = [expertise_areas]
-                    elif isinstance(expertise_areas, dict):
-                        expertise_areas = list(expertise_areas.keys())
-                    
-                    # Use up to 2 expertise areas for suggestions
-                    for expertise in expertise_areas[:2]:
-                        suggestion_text = f"{partial_query} {expertise}".lower().strip()
-                        if suggestion_text not in seen_texts:
-                            suggestions.append({
-                                "text": suggestion_text,
-                                "source": "faiss_expertise",
-                                "score": float(1.0 / (1.0 + distances[0][i]))
-                            })
-                            seen_texts.add(suggestion_text)
-                else:
-                    # No metadata available, create contextual suggestions based on the query
-                    
-                    # First, add a direct completion with a common suffix
-                    for suffix in common_suffixes[:3]:  # Use first 3 suffixes
-                        suggestion_text = f"{partial_query} {suffix}".strip()
-                        if suggestion_text not in seen_texts:
-                            suggestions.append({
-                                "text": suggestion_text,
-                                "source": "faiss_pattern",
-                                "score": float(0.9 / (1.0 + distances[0][i]))
-                            })
-                            seen_texts.add(suggestion_text)
-                            break  # Just add one suffix suggestion per expert
-                    
-                    # Then try to create a more specific suggestion based on key terms
-                    for keyword, prefixes in topic_prefixes.items():
-                        if keyword in partial_query.lower():
-                            prefix = prefixes[0]  # Take the first prefix
-                            suggestion_text = f"{prefix} {partial_query}".strip()
-                            if suggestion_text not in seen_texts:
-                                suggestions.append({
-                                    "text": suggestion_text,
-                                    "source": "faiss_context",
-                                    "score": float(0.85 / (1.0 + distances[0][i]))
-                                })
-                                seen_texts.add(suggestion_text)
-                                break  # Just add one contextual suggestion per expert
+                if suggestion_text not in seen_texts:
+                    suggestions.append({
+                        "text": suggestion_text,
+                        "source": "faiss_index",
+                        "score": float(1.0 / (1.0 + distances[0][i]))
+                    })
+                    seen_texts.add(suggestion_text)
                 
                 # Stop if we have enough suggestions
                 if len(suggestions) >= k:
                     break
-            
-            # If we still don't have enough suggestions, add simple pattern-based ones
-            if len(suggestions) < min(5, k):
-                for suffix in common_suffixes:
-                    suggestion_text = f"{partial_query} {suffix}".strip()
-                    if suggestion_text not in seen_texts and len(suggestions) < k:
-                        suggestions.append({
-                            "text": suggestion_text,
-                            "source": "faiss_fallback",
-                            "score": 0.7
-                        })
-                        seen_texts.add(suggestion_text)
             
             return suggestions
         except Exception as e:
