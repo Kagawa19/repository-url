@@ -214,24 +214,49 @@ class GoogleAutocompletePredictor:
     
     async def _generate_gemini_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
         """
-        Generate suggestions using Gemini API.
+        Generate structured search suggestions similar to Google's autocomplete.
         
         Args:
             partial_query: The partial query to get suggestions for
             limit: Maximum number of suggestions to return
         
         Returns:
-            List of suggestion dictionaries
+            List of suggestion dictionaries with rich formatting
         """
         try:
-            # Comprehensive suggestion prompt
-            prompt = f"""Generate {limit} intelligent search suggestions for a research organization. 
-            The query is: "{partial_query}"
-            Provide suggestions that help narrow down the search, focusing on:
-            - Research domains
-            - Relevant expertise areas
-            - Common search patterns
-            Ensure suggestions are meaningful and helpful."""
+            # Enhanced prompt for structured suggestions
+            prompt = f"""Generate {limit} intelligent search suggestions for a research organization's search system. 
+            The partial query is: "{partial_query}"
+            
+            Provide suggestions in this exact format (no numbering, no bullet points):
+            
+            [Main suggestion topic]
+            → [More specific subtopic or detail]
+            → [Another relevant subtopic]
+            
+            [Different main topic]
+            → [Specific aspect]
+            
+            Suggestions should:
+            1. Start with the most common/relevant completions of the partial query
+            2. Include specialized research areas with proper terminology
+            3. Show hierarchical relationships with arrows (→)
+            4. Cover diverse aspects (methods, populations, applications)
+            5. Use concise but informative phrasing
+            6. Never number the suggestions
+            
+            Example for "cancer":
+            Cancer research
+            → Genomics and personalized medicine
+            → Immunotherapy clinical trials
+            Cancer stem cells
+            → Drug discovery approaches
+            Epigenetic modifications
+            → Cancer prevention mechanisms
+            Metastatic cancer
+            → Advanced imaging techniques
+            
+            Now generate suggestions for "{partial_query}":"""
             
             # Generate suggestions
             response = await self.model.generate_content_async(prompt)
@@ -239,27 +264,35 @@ class GoogleAutocompletePredictor:
             # Parse the suggestions
             suggestions = []
             if response.text:
-                # Split and clean suggestions
-                raw_suggestions = [
-                    line.strip() 
-                    for line in response.text.split('\n') 
-                    if line.strip()
-                ]
+                # Split into lines and clean
+                raw_lines = [line.strip() for line in response.text.split('\n') if line.strip()]
                 
-                # Convert to suggestion objects
-                for idx, suggestion_text in enumerate(raw_suggestions[:limit]):
+                current_suggestion = ""
+                for line in raw_lines:
+                    if not line.startswith('→'):  # Main topic
+                        if current_suggestion:  # Save previous suggestion
+                            suggestions.append({
+                                "text": current_suggestion,
+                                "source": "gemini_api",
+                                "score": 1.0 - (len(suggestions) * 0.03)  # Gradual score decrease
+                            })
+                        current_suggestion = line
+                    else:  # Subtopic
+                        current_suggestion += f"\n{line}"
+                
+                # Add the last suggestion
+                if current_suggestion and len(suggestions) < limit:
                     suggestions.append({
-                        "text": suggestion_text,
+                        "text": current_suggestion,
                         "source": "gemini_api",
-                        "score": 1.0 - (idx * 0.05)  # Slightly decrease score for later suggestions
+                        "score": 1.0 - (len(suggestions) * 0.03
                     })
             
-            return suggestions
+            return suggestions[:limit]
         
         except Exception as e:
             self.logger.error(f"Gemini suggestion generation failed: {e}")
             return []
-    
     def _generate_fallback_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
         """
         Generate basic fallback suggestions.
