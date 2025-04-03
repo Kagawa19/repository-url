@@ -7,7 +7,7 @@ import json
 import uuid
 
 from ai_services_api.services.search.indexing.index_creator import ExpertSearchIndexManager
-from ai_services_api.services.search.gemini.gemini_predictor import GeminiPredictor
+from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
 from ai_services_api.services.message.core.database import get_db_connection
 from ai_services_api.services.search.core.models import ExpertSearchResult, SearchResponse
 
@@ -171,8 +171,8 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
             else:
                 # If no results or empty refinements, enhance with Gemini
                 try:
-                    # Use GeminiPredictor to get related queries
-                    gemini_predictor = GeminiPredictor()
+                    # Use GoogleAutocompletePredictor to get related queries
+                    gemini_predictor = GoogleAutocompletePredictor()
                     suggestion_objects = await gemini_predictor.predict(query, limit=5)
                     related_queries = [s["text"] for s in suggestion_objects]
                     

@@ -4,16 +4,45 @@ import logging
 from datetime import datetime
 import json
 import uuid
+import asyncio
+from redis import asyncio as aioredis
 
-from ai_services_api.services.search.gemini.gemini_predictor import GeminiPredictor
+from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
 from ai_services_api.services.message.core.database import get_db_connection
 from ai_services_api.services.search.core.models import PredictionResponse
 
 # Configure logger
 logger = logging.getLogger(__name__)
 
-# Reuse existing session function
+# Global predictor instance (singleton)
+_predictor = None
+
+# Global Redis instance
+_redis = None
+
+async def get_redis():
+    """Get or create Redis connection."""
+    global _redis
+    if _redis is None:
+        try:
+            # Create Redis connection
+            _redis = await aioredis.Redis.from_url("redis://redis:6379/0", decode_responses=True)
+            logger.info("Redis connection established successfully")
+        except Exception as e:
+            logger.error(f"Redis connection failed: {e}", exc_info=True)
+            _redis = None
+    return _redis
+
+async def get_predictor():
+    """Get or create predictor instance (singleton pattern)."""
+    global _predictor
+    if _predictor is None:
+        _predictor = GoogleAutocompletePredictor()
+    return _predictor
+
+# Record session and prediction in database for analytics
 async def get_or_create_session(conn, user_id: str) -> str:
+    """Create a session for tracking user interactions."""
     logger.info(f"Getting or creating session for user: {user_id}")
     cur = conn.cursor()
     try:
@@ -38,10 +67,19 @@ async def get_or_create_session(conn, user_id: str) -> str:
     finally:
         cur.close()
 
-# Record prediction in database for analytics
 async def record_prediction(conn, session_id: str, user_id: str, partial_query: str, predictions: List[str], confidence_scores: List[float]):
+    """Record prediction in database for analytics."""
+    try:
+        # Create a background task for recording to avoid blocking the response
+        asyncio.create_task(
+            _record_prediction_async(conn, session_id, user_id, partial_query, predictions, confidence_scores)
+        )
+    except Exception as e:
+        logger.error(f"Failed to create background task for recording prediction: {e}")
+
+async def _record_prediction_async(conn, session_id: str, user_id: str, partial_query: str, predictions: List[str], confidence_scores: List[float]):
+    """Asynchronous helper for recording predictions in the database."""
     logger.info(f"Recording predictions for user {user_id}, session {session_id}")
-    logger.debug(f"Recording predictions for partial query: {partial_query}")
     
     cur = conn.cursor()
     try:
@@ -53,30 +91,17 @@ async def record_prediction(conn, session_id: str, user_id: str, partial_query: 
                 VALUES 
                     (%s, %s, %s, %s, CURRENT_TIMESTAMP)
             """, (partial_query, pred, conf, user_id))
-            logger.debug(f"Recorded prediction: {pred} with confidence: {conf}")
         
         conn.commit()
         logger.info("Successfully recorded all predictions")
     except Exception as e:
         conn.rollback()
         logger.error(f"Error recording prediction: {str(e)}", exc_info=True)
-        logger.debug(f"Prediction recording failed: {str(e)}")
-        raise
     finally:
         cur.close()
 
-# Generate refinements based on predictions
 def generate_predictive_refinements(partial_query: str, predictions: List[str]) -> Dict[str, Any]:
-    """
-    Generate refinement suggestions based on partial query and predictions
-    
-    Args:
-        partial_query (str): Initial partial query
-        predictions (List[str]): Predicted full queries
-    
-    Returns:
-        Dict: Refinement suggestions
-    """
+    """Generate refinement suggestions based on partial query and predictions."""
     try:
         # Generate related filters and expertise areas
         related_filters = []
@@ -89,29 +114,10 @@ def generate_predictive_refinements(partial_query: str, predictions: List[str]) 
                 "values": predictions[:3]
             })
         
-        # Generate semantic variations to enhance related queries
-        semantic_variations = []
-        if partial_query:
-            # Create variations like "expert in X", "research about X"
-            variations = [
-                f"expert in {partial_query}",
-                f"{partial_query} research",
-                f"{partial_query} specialist",
-                f"studies on {partial_query}"
-            ]
-            semantic_variations = [v for v in variations if v not in predictions]
-        
-        # Combine predictions with variations
-        combined_queries = list(predictions)
-        for variation in semantic_variations:
-            if len(combined_queries) < 8:  # Limit to 8 total suggestions
-                combined_queries.append(variation)
-        
-        # Try to extract potential expertise areas from combined queries
+        # Extract potential expertise areas from predictions
         expertise_areas = set()
-        for query in combined_queries:
-            # Extract words that might be expertise areas
-            words = query.lower().split()
+        for prediction in predictions:
+            words = prediction.lower().split()
             for word in words:
                 if len(word) > 3 and word != partial_query.lower():
                     expertise_areas.add(word.capitalize())
@@ -126,7 +132,7 @@ def generate_predictive_refinements(partial_query: str, predictions: List[str]) 
         # Construct refinements
         refinements = {
             "filters": related_filters,
-            "related_queries": combined_queries[:5],
+            "related_queries": predictions[:5],
             "expertise_areas": expertise_areas
         }
         
@@ -142,10 +148,9 @@ def generate_predictive_refinements(partial_query: str, predictions: List[str]) 
             "expertise_areas": []
         }
 
-# The main process function that uses Gemini API directly
 async def process_query_prediction(partial_query: str, user_id: str) -> PredictionResponse:
     """
-    Enhanced query prediction using Gemini API with Google Search Retrieval
+    Enhanced query prediction using Google Autocomplete API with caching
     
     Args:
         partial_query (str): Partial search query
@@ -159,7 +164,39 @@ async def process_query_prediction(partial_query: str, user_id: str) -> Predicti
     conn = None
     session_id = str(uuid.uuid4())[:8]  # Default session ID in case DB connection fails
     
+    # Try to get Redis connection for caching
+    redis = await get_redis()
+    
     try:
+        # Check cache first if Redis is available
+        cache_hit = False
+        if redis:
+            try:
+                cache_key = f"google_autocomplete:{partial_query}"
+                cached_result = await redis.get(cache_key)
+                
+                if cached_result:
+                    logger.info(f"Cache hit for query: {partial_query}")
+                    cache_hit = True
+                    
+                    # Use cached suggestions
+                    cached_data = json.loads(cached_result)
+                    suggestions = cached_data["suggestions"]
+                    confidence_scores = cached_data["confidence_scores"]
+                    
+                    # Skip further processing
+                    return PredictionResponse(
+                        predictions=[s["text"] for s in suggestions],
+                        confidence_scores=confidence_scores,
+                        user_id=user_id,
+                        refinements=generate_predictive_refinements(
+                            partial_query, 
+                            [s["text"] for s in suggestions]
+                        )
+                    )
+            except Exception as cache_error:
+                logger.error(f"Cache retrieval error: {cache_error}", exc_info=True)
+        
         # Establish database connection for analytics
         try:
             conn = get_db_connection()
@@ -169,9 +206,11 @@ async def process_query_prediction(partial_query: str, user_id: str) -> Predicti
             logger.error(f"Database connection error: {db_error}", exc_info=True)
             # Continue processing with default session ID
         
-        # Generate predictions directly from Gemini API
-        predictor = GeminiPredictor()
-        suggestion_objects = await predictor.predict(partial_query, limit=5)
+        # Get predictor instance (singleton)
+        predictor = await get_predictor()
+        
+        # Generate predictions from Google Autocomplete API
+        suggestion_objects = await predictor.predict(partial_query, limit=10)
         
         # Extract suggestion texts
         predictions = [s["text"] for s in suggestion_objects]
@@ -182,22 +221,38 @@ async def process_query_prediction(partial_query: str, user_id: str) -> Predicti
         # Log the predictions
         logger.debug(f"Generated {len(predictions)} predictions: {predictions}")
         
+        # Cache the results if Redis is available
+        if redis and not cache_hit and predictions:
+            try:
+                cache_key = f"google_autocomplete:{partial_query}"
+                cache_data = {
+                    "suggestions": suggestion_objects,
+                    "confidence_scores": confidence_scores
+                }
+                
+                # Cache for 15 minutes (900 seconds)
+                await redis.setex(
+                    cache_key,
+                    900,
+                    json.dumps(cache_data)
+                )
+                logger.debug(f"Cached predictions for: {partial_query}")
+            except Exception as cache_error:
+                logger.error(f"Cache storage error: {cache_error}", exc_info=True)
+        
         # Generate refinement suggestions
         refinements = generate_predictive_refinements(partial_query, predictions)
         
         # Record prediction if we have a DB connection
         if conn and predictions:
-            try:
-                await record_prediction(
-                    conn,
-                    session_id,
-                    user_id,
-                    partial_query,
-                    predictions,
-                    confidence_scores
-                )
-            except Exception as record_error:
-                logger.error(f"Error recording prediction: {record_error}", exc_info=True)
+            await record_prediction(
+                conn,
+                session_id,
+                user_id,
+                partial_query,
+                predictions,
+                confidence_scores
+            )
         
         # Prepare response
         response = PredictionResponse(

@@ -10,6 +10,8 @@ from ai_services_api.controllers.message_router import api_router as message_rou
 from ai_services_api.services.chatbot.utils.redis_connection import redis_pool
 from ai_services_api.controllers.publications_router import api_router as publications_router
 from ai_services_api.controllers.autocomplete_router import api_router as autocomplete_router
+from ai_services_api.controllers.analytics_router import api_router as analytics_router
+
 
 # Define allowed GET routes
 ALLOWED_GET_ROUTES = [
@@ -79,6 +81,8 @@ app.include_router(search_router, prefix="/search")
 app.include_router(message_router, prefix="/message")
 app.include_router(publications_router, prefix="/publications")
 app.include_router(autocomplete_router, prefix="/autocomplete")
+app.include_router(analytics_router, prefix="/analytics")
+
 
 # Routes with HTML responses
 @app.get("/", response_class=HTMLResponse)
