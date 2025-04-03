@@ -4,7 +4,7 @@ import logging
 import numpy as np
 import faiss
 import pickle
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 
 # Load environment variables
