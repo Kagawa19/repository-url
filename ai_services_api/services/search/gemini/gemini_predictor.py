@@ -34,7 +34,7 @@ class GoogleAutocompletePredictor:
         try:
             # Configure Gemini API
             genai.configure(api_key=key)
-            self.model = genai.GenerativeModel('gemini-pro')
+            self.model = genai.GenerativeModel('gemini-1.5-flash-latest')
             self.logger = logging.getLogger(__name__)
             
             # Load FAISS index and mapping
