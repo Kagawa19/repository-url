@@ -78,6 +78,28 @@ async def test_predict_query(
     logger.info(f"Received test query prediction request - Partial query: {partial_query}")
     return await process_query_prediction(partial_query, user_id)
 
+@router.post("/experts/track-suggestion")
+async def track_suggestion(
+    request: Request,
+    partial_query: str = Body(...),
+    selected_suggestion: str = Body(...),
+    user_id: str = Depends(get_user_id)
+):
+    """
+    Track which suggestion the user selected from the prediction results.
+    This enables better personalization over time.
+    """
+    logger.info(f"Tracking selected suggestion - User: {user_id}")
+    
+    from ai_services_api.services.search.core.personalization import track_selected_suggestion
+    await track_selected_suggestion(
+        user_id,
+        partial_query,
+        selected_suggestion
+    )
+    
+    return {"status": "success", "message": "Suggestion selection tracked"}
+
 # Health check endpoint
 @router.get("/health")
 async def health_check():

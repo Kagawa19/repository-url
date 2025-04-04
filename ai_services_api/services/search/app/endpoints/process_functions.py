@@ -10,6 +10,9 @@ from redis import asyncio as aioredis
 from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
 from ai_services_api.services.message.core.database import get_db_connection
 from ai_services_api.services.search.core.models import PredictionResponse
+from ai_services_api.services.search.core.personalization import personalize_suggestions
+
+
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -150,16 +153,16 @@ def generate_predictive_refinements(partial_query: str, predictions: List[str]) 
 
 async def process_query_prediction(partial_query: str, user_id: str) -> PredictionResponse:
     """
-    Enhanced query prediction using Google Autocomplete API with caching
+    Process query prediction with personalization based on user history.
     
-    Args:_e
-        partial_query (str): Partial search query
-        user_id (str): User identifier
-    
+    Args:
+        partial_query: The partial query to get suggestions for
+        user_id: The ID of the user making the request
+        
     Returns:
-        PredictionResponse: Prediction results with refinements
+        PredictionResponse: Response containing predictions
     """
-    logger.info(f"Processing query prediction - Partial query: {partial_query}, User: {user_id}")
+    logger.info(f"Processing query prediction - Query: '{partial_query}', User: {user_id}")
     
     conn = None
     session_id = str(uuid.uuid4())[:8]  # Default session ID in case DB connection fails
@@ -184,16 +187,40 @@ async def process_query_prediction(partial_query: str, user_id: str) -> Predicti
                     suggestions = cached_data["suggestions"]
                     confidence_scores = cached_data["confidence_scores"]
                     
-                    # Skip further processing
-                    return PredictionResponse(
-                        predictions=[s["text"] for s in suggestions],
-                        confidence_scores=confidence_scores,
-                        user_id=user_id,
-                        refinements=generate_predictive_refinements(
-                            partial_query, 
-                            [s["text"] for s in suggestions]
+                    # Add personalization to cached suggestions
+                    try:
+                        personalized_suggestions = await personalize_suggestions(
+                            suggestions, user_id, partial_query
                         )
-                    )
+                        # Update scores after personalization
+                        confidence_scores = [s.get("score", 0.5) for s in personalized_suggestions]
+                        
+                        # Extract just the texts for the response
+                        predictions = [s.get("text", "") for s in personalized_suggestions]
+                        
+                        # Skip further processing
+                        return PredictionResponse(
+                            predictions=predictions,
+                            confidence_scores=confidence_scores,
+                            user_id=user_id,
+                            refinements=generate_predictive_refinements(
+                                partial_query, 
+                                predictions
+                            )
+                        )
+                    except Exception as personalize_error:
+                        logger.error(f"Personalization error for cached results: {personalize_error}")
+                        # Continue with non-personalized cached suggestions if personalization fails
+                        predictions = [s["text"] for s in suggestions]
+                        return PredictionResponse(
+                            predictions=predictions,
+                            confidence_scores=confidence_scores,
+                            user_id=user_id,
+                            refinements=generate_predictive_refinements(
+                                partial_query, 
+                                predictions
+                            )
+                        )
             except Exception as cache_error:
                 logger.error(f"Cache retrieval error: {cache_error}", exc_info=True)
         
@@ -212,11 +239,22 @@ async def process_query_prediction(partial_query: str, user_id: str) -> Predicti
         # Generate predictions from Google Autocomplete API
         suggestion_objects = await predictor.predict(partial_query, limit=10)
         
+        # Apply personalization to fresh suggestions
+        try:
+            personalized_suggestions = await personalize_suggestions(
+                suggestion_objects, user_id, partial_query
+            )
+            suggestion_objects = personalized_suggestions
+            logger.info(f"Applied personalization to suggestions")
+        except Exception as personalize_error:
+            logger.error(f"Personalization error for fresh results: {personalize_error}")
+            # Continue with non-personalized suggestions if personalization fails
+        
         # Extract suggestion texts
         predictions = [s["text"] for s in suggestion_objects]
         
-        # Generate confidence scores
-        confidence_scores = predictor.generate_confidence_scores(suggestion_objects)
+        # Generate confidence scores (use the personalized scores)
+        confidence_scores = [s.get("score", 0.5) for s in suggestion_objects]
         
         # Log the predictions
         logger.debug(f"Generated {len(predictions)} predictions: {predictions}")
