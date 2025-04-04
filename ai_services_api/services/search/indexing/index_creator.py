@@ -779,191 +779,126 @@ class ExpertSearchIndexManager:
         
         return filters
     
-    def search_experts_by_name(self, name: str, k: int = 5, active_only: bool = True) -> List[Dict[str, Any]]:
+    def search_experts_by_name(self, name: str, k: int = 5, active_only: bool = False, min_score: float = 0.1) -> List[Dict[str, Any]]:
         """
-        Search for experts by name.
+        Search for experts by name using semantic search with name filtering.
         
         Args:
             name: Name to search for
             k: Number of results to return
             active_only: Whether to return only active experts
-        
+            min_score: Minimum similarity score threshold
+            
         Returns:
-            List of expert matches
+            List of expert matches with metadata
         """
         try:
-            conn = self.db.get_connection()
-            cur = conn.cursor()
+            # First get all potential matches using semantic search
+            all_results = self.search_experts(name, k*3, active_only, min_score)
             
-            sql = """
-                SELECT 
-                    id, first_name, last_name, designation, theme, unit, 
-                    knowledge_expertise, is_active, bio, contact
-                FROM experts_expert
-                WHERE (first_name ILIKE %s OR last_name ILIKE %s)
-            """
-            
-            params = [f'%{name}%', f'%{name}%']
-            
-            if active_only:
-                sql += " AND (is_active = true OR is_active IS NULL)"
+            if not all_results:
+                return []
                 
-            sql += " LIMIT %s"
-            params.append(k)
+            # Filter results where name matches
+            filtered_results = []
+            name_lower = name.lower()
             
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-            
-            # Process results
-            results = []
-            for row in rows:
-                expert = {
-                    'id': row[0],
-                    'first_name': row[1] or '',
-                    'last_name': row[2] or '',
-                    'designation': row[3] or '',
-                    'theme': row[4] or '',
-                    'unit': row[5] or '',
-                    'knowledge_expertise': self._parse_jsonb(row[6]),
-                    'is_active': row[7] if row[7] is not None else True,
-                    'bio': row[8] or '',
-                    'contact': row[9] or '',
-                    'score': 1.0  # Default score for direct DB matches
-                }
-                results.append(expert)
-            
-            return results
+            for result in all_results:
+                first_name = result.get('first_name', '').lower()
+                last_name = result.get('last_name', '').lower()
+                
+                # Check if name appears in either first or last name
+                if (name_lower in first_name) or (name_lower in last_name):
+                    filtered_results.append(result)
+                    
+                if len(filtered_results) >= k:
+                    break
+                    
+            return filtered_results[:k]
             
         except Exception as e:
-            self.logger.error(f"Error searching experts by name: {e}")
+            logger.error(f"Error searching experts by name: {e}")
             return []
-        finally:
-            if 'conn' in locals() and conn:
-                conn.close()
 
-    def search_experts_by_theme(self, theme: str, k: int = 5, active_only: bool = True) -> List[Dict[str, Any]]:
+    def search_experts_by_theme(self, theme: str, k: int = 5, active_only: bool = False, min_score: float = 0.1) -> List[Dict[str, Any]]:
         """
-        Search for experts by theme.
+        Search for experts by theme using semantic search with theme filtering.
         
         Args:
             theme: Theme to search for
             k: Number of results to return
             active_only: Whether to return only active experts
-        
+            min_score: Minimum similarity score threshold
+            
         Returns:
-            List of expert matches
+            List of expert matches with metadata
         """
         try:
-            conn = self.db.get_connection()
-            cur = conn.cursor()
+            # First get all potential matches using semantic search
+            all_results = self.search_experts(theme, k*3, active_only, min_score)
             
-            sql = """
-                SELECT 
-                    id, first_name, last_name, designation, theme, unit, 
-                    knowledge_expertise, is_active, bio, contact
-                FROM experts_expert
-                WHERE theme ILIKE %s
-            """
-            
-            params = [f'%{theme}%']
-            
-            if active_only:
-                sql += " AND (is_active = true OR is_active IS NULL)"
+            if not all_results:
+                return []
                 
-            sql += " LIMIT %s"
-            params.append(k)
+            # Filter results where theme matches
+            filtered_results = []
+            theme_lower = theme.lower()
             
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-            
-            # Process results
-            results = []
-            for row in rows:
-                expert = {
-                    'id': row[0],
-                    'first_name': row[1] or '',
-                    'last_name': row[2] or '',
-                    'designation': row[3] or '',
-                    'theme': row[4] or '',
-                    'unit': row[5] or '',
-                    'knowledge_expertise': self._parse_jsonb(row[6]),
-                    'is_active': row[7] if row[7] is not None else True,
-                    'bio': row[8] or '',
-                    'contact': row[9] or '',
-                    'score': 1.0  # Default score for direct DB matches
-                }
-                results.append(expert)
-            
-            return results
+            for result in all_results:
+                expert_theme = result.get('theme', '').lower()
+                
+                # Check if theme matches
+                if theme_lower in expert_theme:
+                    filtered_results.append(result)
+                    
+                if len(filtered_results) >= k:
+                    break
+                    
+            return filtered_results[:k]
             
         except Exception as e:
-            self.logger.error(f"Error searching experts by theme: {e}")
+            logger.error(f"Error searching experts by theme: {e}")
             return []
-        finally:
-            if 'conn' in locals() and conn:
-                conn.close()
 
-    def search_experts_by_designation(self, designation: str, k: int = 5, active_only: bool = True) -> List[Dict[str, Any]]:
+    def search_experts_by_designation(self, designation: str, k: int = 5, active_only: bool = False, min_score: float = 0.1) -> List[Dict[str, Any]]:
         """
-        Search for experts by designation.
+        Search for experts by designation using semantic search with designation filtering.
         
         Args:
             designation: Designation to search for
             k: Number of results to return
             active_only: Whether to return only active experts
-        
+            min_score: Minimum similarity score threshold
+            
         Returns:
-            List of expert matches
+            List of expert matches with metadata
         """
         try:
-            conn = self.db.get_connection()
-            cur = conn.cursor()
+            # First get all potential matches using semantic search
+            all_results = self.search_experts(designation, k*3, active_only, min_score)
             
-            sql = """
-                SELECT 
-                    id, first_name, last_name, designation, theme, unit, 
-                    knowledge_expertise, is_active, bio, contact
-                FROM experts_expert
-                WHERE designation ILIKE %s
-            """
-            
-            params = [f'%{designation}%']
-            
-            if active_only:
-                sql += " AND (is_active = true OR is_active IS NULL)"
+            if not all_results:
+                return []
                 
-            sql += " LIMIT %s"
-            params.append(k)
+            # Filter results where designation matches
+            filtered_results = []
+            designation_lower = designation.lower()
             
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-            
-            # Process results
-            results = []
-            for row in rows:
-                expert = {
-                    'id': row[0],
-                    'first_name': row[1] or '',
-                    'last_name': row[2] or '',
-                    'designation': row[3] or '',
-                    'theme': row[4] or '',
-                    'unit': row[5] or '',
-                    'knowledge_expertise': self._parse_jsonb(row[6]),
-                    'is_active': row[7] if row[7] is not None else True,
-                    'bio': row[8] or '',
-                    'contact': row[9] or '',
-                    'score': 1.0  # Default score for direct DB matches
-                }
-                results.append(expert)
-            
-            return results
+            for result in all_results:
+                expert_designation = result.get('designation', '').lower()
+                
+                # Check if designation matches
+                if designation_lower in expert_designation:
+                    filtered_results.append(result)
+                    
+                if len(filtered_results) >= k:
+                    break
+                    
+            return filtered_results[:k]
             
         except Exception as e:
-            self.logger.error(f"Error searching experts by designation: {e}")
+            logger.error(f"Error searching experts by designation: {e}")
             return []
-        finally:
-            if 'conn' in locals() and conn:
-                conn.close()
 
     def _extract_expertise_areas(self, results: List[Dict]) -> List[str]:
         """Extract unique expertise areas from results."""

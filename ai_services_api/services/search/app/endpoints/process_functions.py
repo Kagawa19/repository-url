@@ -1,5 +1,5 @@
 from fastapi import HTTPException
-from typing import Any, List, Dict, Optional
+from typing import Any, List, Dict, Optional, Tuple
 import logging
 from datetime import datetime
 import json
@@ -150,19 +150,20 @@ def generate_predictive_refinements(partial_query: str, predictions: List[str]) 
             "related_queries": predictions[:5] if predictions else [],
             "expertise_areas": []
         }
-
-async def process_query_prediction(partial_query: str, user_id: str) -> PredictionResponse:
+    
+async def process_query_prediction(partial_query: str, user_id: str, context: Optional[str] = None) -> PredictionResponse:
     """
     Process query prediction with personalization based on user history.
     
     Args:
         partial_query: The partial query to get suggestions for
         user_id: The ID of the user making the request
+        context: Optional context for filtering predictions (name, theme, designation)
         
     Returns:
         PredictionResponse: Response containing predictions
     """
-    logger.info(f"Processing query prediction - Query: '{partial_query}', User: {user_id}")
+    logger.info(f"Processing query prediction - Query: '{partial_query}', User: {user_id}, Context: {context}")
     
     conn = None
     session_id = str(uuid.uuid4())[:8]  # Default session ID in case DB connection fails
@@ -198,6 +199,12 @@ async def process_query_prediction(partial_query: str, user_id: str) -> Predicti
                         # Extract just the texts for the response
                         predictions = [s.get("text", "") for s in personalized_suggestions]
                         
+                        # Apply context filtering if context is provided
+                        if context:
+                            predictions, confidence_scores = filter_predictions_by_context(
+                                predictions, confidence_scores, partial_query, context
+                            )
+                        
                         # Skip further processing
                         return PredictionResponse(
                             predictions=predictions,
@@ -212,6 +219,13 @@ async def process_query_prediction(partial_query: str, user_id: str) -> Predicti
                         logger.error(f"Personalization error for cached results: {personalize_error}")
                         # Continue with non-personalized cached suggestions if personalization fails
                         predictions = [s["text"] for s in suggestions]
+                        
+                        # Apply context filtering if context is provided
+                        if context:
+                            predictions, confidence_scores = filter_predictions_by_context(
+                                predictions, confidence_scores, partial_query, context
+                            )
+                        
                         return PredictionResponse(
                             predictions=predictions,
                             confidence_scores=confidence_scores,
@@ -255,6 +269,12 @@ async def process_query_prediction(partial_query: str, user_id: str) -> Predicti
         
         # Generate confidence scores (use the personalized scores)
         confidence_scores = [s.get("score", 0.5) for s in suggestion_objects]
+        
+        # Apply context filtering if context is provided
+        if context:
+            predictions, confidence_scores = filter_predictions_by_context(
+                predictions, confidence_scores, partial_query, context
+            )
         
         # Log the predictions
         logger.debug(f"Generated {len(predictions)} predictions: {predictions}")
@@ -322,3 +342,89 @@ async def process_query_prediction(partial_query: str, user_id: str) -> Predicti
         if conn:
             conn.close()
             logger.debug("Database connection closed")
+
+def filter_predictions_by_context(
+    predictions: List[str], 
+    confidence_scores: List[float], 
+    partial_query: str, 
+    context: str
+) -> Tuple[List[str], List[float]]:
+    """
+    Filter predictions based on context.
+    
+    Args:
+        predictions: Original predictions
+        confidence_scores: Original confidence scores
+        partial_query: The partial query
+        context: Context for filtering (name, theme, designation)
+        
+    Returns:
+        Tuple of filtered predictions and their confidence scores
+    """
+    filtered_predictions = []
+    filtered_scores = []
+    
+    context = context.lower()
+    
+    for i, pred in enumerate(predictions):
+        score = confidence_scores[i] if i < len(confidence_scores) else 0.5
+        include = False
+        
+        # Apply context-specific filtering
+        if context == "name":
+            # For names, prefer shorter predictions without research terms
+            if (len(pred.split()) <= 3 and 
+                not any(x in pred.lower() for x in ["analysis", "research", "study", "method"])):
+                include = True
+                score *= 1.2  # Boost name matches
+                
+        elif context == "theme":
+            # For themes, prefer research areas and topics
+            theme_indicators = ["health", "research", "policy", "studies", "development"]
+            if any(indicator in pred.lower() for indicator in theme_indicators):
+                include = True
+                score *= 1.1  # Boost theme matches
+                
+        elif context == "designation":
+            # For designations, prefer job titles
+            designation_indicators = ["director", "researcher", "professor", "lead", "coordinator"]
+            if any(indicator in pred.lower() for indicator in designation_indicators):
+                include = True
+                score *= 1.1  # Boost designation matches
+        
+        # Include if it passes context filtering or if it's the original query
+        if include or pred.lower() == partial_query.lower():
+            filtered_predictions.append(pred)
+            filtered_scores.append(score)
+    
+    # If we didn't get any filtered results, return a subset of the original ones
+    if not filtered_predictions:
+        # For names context, add suggestions that look like names
+        if context == "name" and partial_query:
+            filtered_predictions.append(f"Experts named {partial_query}")
+            filtered_scores.append(0.9)
+            
+            # Add the partial query itself if it's short (likely a name)
+            if len(partial_query.split()) <= 2:
+                filtered_predictions.append(partial_query)
+                filtered_scores.append(0.85)
+        
+        # For theme context, add research-related suggestions
+        elif context == "theme" and partial_query:
+            filtered_predictions.append(f"{partial_query} research")
+            filtered_scores.append(0.9)
+            filtered_predictions.append(f"{partial_query} studies")
+            filtered_scores.append(0.85)
+        
+        # For designation context, add job title suggestions
+        elif context == "designation" and partial_query:
+            filtered_predictions.append(f"{partial_query} specialists")
+            filtered_scores.append(0.9)
+            filtered_predictions.append(f"Senior {partial_query}")
+            filtered_scores.append(0.85)
+        
+        # If still empty or no context, use original predictions
+        if not filtered_predictions:
+            return predictions[:5], confidence_scores[:5] if confidence_scores else [0.5] * min(5, len(predictions))
+        
+    return filtered_predictions, filtered_scores
