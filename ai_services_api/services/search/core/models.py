@@ -103,12 +103,14 @@ class SearchResponse(BaseModel):
             }
         }
 
+
 class PredictionResponse(BaseModel):
-    """Model representing the query prediction response."""
     predictions: List[str]
+    total_suggestions: int
+    search_context: Optional[str] = None
     confidence_scores: List[float]
+    refinements: List[str] = []
     user_id: str
-    refinements: Optional[Dict[str, Any]] = None
     
     class Config:
         """Pydantic configuration for model."""

@@ -102,7 +102,7 @@ async def record_search(conn, session_id: str, user_id: str, query: str, results
     finally:
         cur.close()
 
-async def process_expert_search(query: str, user_id: str, active_only: bool = True) -> SearchResponse:
+async def process_expert_search(query: str, user_id: str, active_only: bool = True, k: int = 5) -> SearchResponse:
     """
     Process expert search with improved Gemini-enhanced refinements
     
@@ -110,6 +110,7 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
         query (str): Search query
         user_id (str): User identifier
         active_only (bool): Filter for active experts only
+        k (int): Number of results to return
     
     Returns:
         SearchResponse: Search results including optional refinements
@@ -134,7 +135,7 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
         results = []
         try:
             search_manager = ExpertSearchIndexManager()
-            results = search_manager.search_experts(query, k=5, active_only=active_only)
+            results = search_manager.search_experts(query, k=k, active_only=active_only)
             logger.info(f"Search found {len(results)} results")
         except Exception as search_error:
             logger.error(f"Search execution error: {search_error}", exc_info=True)
@@ -250,7 +251,12 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
             conn.close()
             logger.debug("Database connection closed")
 
-async def process_expert_name_search(name: str, user_id: str, active_only: bool = True) -> SearchResponse:
+async def process_expert_name_search(
+    name: str, 
+    user_id: str, 
+    active_only: bool = True, 
+    k: int = 5  # Add this parameter with a default value
+) -> SearchResponse:
     """
     Process search for experts by name.
     
@@ -318,12 +324,23 @@ async def process_expert_name_search(name: str, user_id: str, active_only: bool 
                 logger.error(f"Error recording search: {record_error}", exc_info=True)
         
         # Generate refinement suggestions
+        # Replace the entire refinements block with:
         refinements = {}
         try:
-            if results:
-                refinements = search_manager.get_search_refinements(name, results)
+            # Use the new refinement generation method
+            refinements = await search_manager.generate_advanced_search_refinements(
+                search_type='name',  # Explicitly specify as a keyword argument 
+                query=name, 
+                user_id=user_id, 
+                results=results
+            )
         except Exception as refine_error:
             logger.error(f"Refinements generation error: {refine_error}", exc_info=True)
+            refinements = {
+                "filters": [],
+                "related_queries": [],
+                "expertise_areas": []
+            }
         
         # Prepare response
         response = SearchResponse(
@@ -426,13 +443,24 @@ async def process_expert_theme_search(theme: str, user_id: str, active_only: boo
                 logger.error(f"Error recording search: {record_error}", exc_info=True)
         
         # Generate refinement suggestions
+        # Replace the entire refinements block with:
         refinements = {}
         try:
-            if results:
-                refinements = search_manager.get_search_refinements(theme, results)
+            # Use the new refinement generation method
+            refinements = await search_manager.generate_advanced_search_refinements(
+                search_type='theme', 
+                query=theme, 
+                user_id=user_id, 
+                results=results
+            )
         except Exception as refine_error:
             logger.error(f"Refinements generation error: {refine_error}", exc_info=True)
-        
+            refinements = {
+                "filters": [],
+                "related_queries": [],
+                "expertise_areas": []
+            }
+                
         # Prepare response
         response = SearchResponse(
             total_results=len(formatted_results),
@@ -534,13 +562,24 @@ async def process_expert_designation_search(designation: str, user_id: str, acti
                 logger.error(f"Error recording search: {record_error}", exc_info=True)
         
         # Generate refinement suggestions
+        # Replace the entire refinements block with:
         refinements = {}
         try:
-            if results:
-                refinements = search_manager.get_search_refinements(designation, results)
+            # Use the new refinement generation method
+            refinements = await search_manager.generate_advanced_search_refinements(
+                search_type='designation', 
+                query=designation, 
+                user_id=user_id, 
+                results=results
+            )
         except Exception as refine_error:
             logger.error(f"Refinements generation error: {refine_error}", exc_info=True)
-        
+            refinements = {
+                "filters": [],
+                "related_queries": [],
+                "expertise_areas": []
+            }
+                
         # Prepare response
         response = SearchResponse(
             total_results=len(formatted_results),

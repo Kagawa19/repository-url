@@ -3,6 +3,7 @@ from typing import Any, List, Dict, Optional
 from pydantic import BaseModel
 import logging
 import uuid
+from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
 from fastapi import APIRouter, HTTPException, Request, Depends, Body
 from ai_services_api.services.search.core.models import PredictionResponse, SearchResponse
 from ai_services_api.services.search.app.endpoints.process_functions import process_query_prediction
@@ -15,7 +16,7 @@ import logging
 import uuid
 
 from ai_services_api.services.search.core.models import PredictionResponse, SearchResponse
-from ai_services_api.services.search.app.endpoints.process_functions import process_query_prediction
+from ai_services_api.services.search.app.endpoints.process_functions import process_query_prediction, process_advanced_query_prediction
 from ai_services_api.services.search.core.expert_search import (
     process_expert_search,
     process_expert_name_search,
@@ -143,7 +144,42 @@ async def test_predict_query(
     """Test endpoint for query prediction using Gemini API."""
     logger.info(f"Received test query prediction request - Partial query: {partial_query}")
     return await process_query_prediction(partial_query, user_id)
-
+@router.get("/experts/advanced_predict/{partial_query}")
+async def advanced_predict_query(
+    partial_query: str,
+    request: Request,
+    user_id: str = Depends(get_user_id),
+    search_type: Optional[str] = None,
+    limit: int = 10
+):
+    """
+    Advanced query prediction with context-specific suggestions.
+    """
+    logger.info(f"Received advanced query prediction request - Partial query: {partial_query}, Search Type: {search_type}")
+    
+    # Validate search type
+    valid_search_types = ["name", "theme", "designation", None]
+    if search_type and search_type not in valid_search_types[:-1]:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid search type. Must be one of: {', '.join(valid_search_types[:-1])}"
+        )
+    
+    try:
+        # Process advanced query prediction
+        return await process_advanced_query_prediction(
+            partial_query, 
+            user_id, 
+            search_type, 
+            limit
+        )
+    
+    except Exception as e:
+        logger.error(f"Error in advanced query prediction: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"An error occurred while generating predictions: {str(e)}"
+        )
 @router.post("/experts/track-suggestion")
 async def track_suggestion(
     request: Request,

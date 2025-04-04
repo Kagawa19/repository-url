@@ -151,157 +151,151 @@ def generate_predictive_refinements(partial_query: str, predictions: List[str]) 
             "expertise_areas": []
         }
     
-async def process_query_prediction(partial_query: str, user_id: str, context: Optional[str] = None) -> PredictionResponse:
-    """
-    Process query prediction with personalization based on user history.
-    
-    Args:
-        partial_query: The partial query to get suggestions for
-        user_id: The ID of the user making the request
-        context: Optional context for filtering predictions (name, theme, designation)
-        
-    Returns:
-        PredictionResponse: Response containing predictions
-    """
+async def process_query_prediction(
+    partial_query: str, 
+    user_id: str, 
+    context: Optional[str] = None
+) -> PredictionResponse:
     logger.info(f"Processing query prediction - Query: '{partial_query}', User: {user_id}, Context: {context}")
     
-    conn = None
-    session_id = str(uuid.uuid4())[:8]  # Default session ID in case DB connection fails
+    valid_contexts = ["name", "theme", "designation", None]
+    if context and context not in valid_contexts[:-1]:
+        raise ValueError(f"Invalid context. Must be one of {', '.join(valid_contexts[:-1])}")
     
-    # Try to get Redis connection for caching
+    conn = None
+    session_id = str(uuid.uuid4())[:8]
+    
     redis = await get_redis()
     
     try:
-        # Check cache first if Redis is available
-        cache_hit = False
+        cache_key = f"google_autocomplete:{context or ''}:{partial_query}"
+        
         if redis:
             try:
-                cache_key = f"google_autocomplete:{partial_query}"
                 cached_result = await redis.get(cache_key)
                 
                 if cached_result:
                     logger.info(f"Cache hit for query: {partial_query}")
-                    cache_hit = True
-                    
-                    # Use cached suggestions
                     cached_data = json.loads(cached_result)
-                    suggestions = cached_data["suggestions"]
-                    confidence_scores = cached_data["confidence_scores"]
+                    suggestion_objects = cached_data.get("suggestions", [])
+                    confidence_scores = cached_data.get("confidence_scores", [])
+                    predictions = [s["text"] for s in suggestion_objects]
                     
-                    # Add personalization to cached suggestions
+                    if context:
+                        predictions, confidence_scores = filter_predictions_by_context(
+                            predictions, confidence_scores, partial_query, context
+                        )
+                    
                     try:
                         personalized_suggestions = await personalize_suggestions(
-                            suggestions, user_id, partial_query
+                            [{"text": pred, "score": score} for pred, score in zip(predictions, confidence_scores)],
+                            user_id, 
+                            partial_query
                         )
-                        # Update scores after personalization
+                        predictions = [s["text"] for s in personalized_suggestions]
                         confidence_scores = [s.get("score", 0.5) for s in personalized_suggestions]
-                        
-                        # Extract just the texts for the response
-                        predictions = [s.get("text", "") for s in personalized_suggestions]
-                        
-                        # Apply context filtering if context is provided
-                        if context:
-                            predictions, confidence_scores = filter_predictions_by_context(
-                                predictions, confidence_scores, partial_query, context
-                            )
-                        
-                        # Skip further processing
-                        return PredictionResponse(
-                            predictions=predictions,
-                            confidence_scores=confidence_scores,
-                            user_id=user_id,
-                            refinements=generate_predictive_refinements(
-                                partial_query, 
-                                predictions
-                            )
-                        )
                     except Exception as personalize_error:
                         logger.error(f"Personalization error for cached results: {personalize_error}")
-                        # Continue with non-personalized cached suggestions if personalization fails
-                        predictions = [s["text"] for s in suggestions]
+                    
+                    refinements_dict = generate_predictive_refinements(partial_query, predictions)
+                    
+                    # Convert refinements to a flat list of strings as expected by PredictionResponse
+                    refinements_list = []
+                    if isinstance(refinements_dict, dict):
+                        # Extract related queries if they exist
+                        if "related_queries" in refinements_dict and isinstance(refinements_dict["related_queries"], list):
+                            refinements_list.extend(refinements_dict["related_queries"])
                         
-                        # Apply context filtering if context is provided
-                        if context:
-                            predictions, confidence_scores = filter_predictions_by_context(
-                                predictions, confidence_scores, partial_query, context
-                            )
+                        # Extract expertise areas if they exist
+                        if "expertise_areas" in refinements_dict and isinstance(refinements_dict["expertise_areas"], list):
+                            refinements_list.extend(refinements_dict["expertise_areas"])
                         
-                        return PredictionResponse(
-                            predictions=predictions,
-                            confidence_scores=confidence_scores,
-                            user_id=user_id,
-                            refinements=generate_predictive_refinements(
-                                partial_query, 
-                                predictions
-                            )
-                        )
+                        # Extract values from filters if they exist
+                        if "filters" in refinements_dict and isinstance(refinements_dict["filters"], list):
+                            for filter_item in refinements_dict["filters"]:
+                                if isinstance(filter_item, dict) and "values" in filter_item:
+                                    if isinstance(filter_item["values"], list):
+                                        refinements_list.extend(filter_item["values"])
+                                    else:
+                                        refinements_list.append(str(filter_item["values"]))
+
+                    return PredictionResponse(
+                        predictions=predictions,
+                        confidence_scores=confidence_scores,
+                        user_id=user_id,
+                        refinements=refinements_list,
+                        total_suggestions=len(predictions)
+                    )
+
             except Exception as cache_error:
                 logger.error(f"Cache retrieval error: {cache_error}", exc_info=True)
         
-        # Establish database connection for analytics
         try:
             conn = get_db_connection()
             session_id = await get_or_create_session(conn, user_id)
             logger.debug(f"Created session: {session_id}")
         except Exception as db_error:
             logger.error(f"Database connection error: {db_error}", exc_info=True)
-            # Continue processing with default session ID
         
-        # Get predictor instance (singleton)
         predictor = await get_predictor()
-        
-        # Generate predictions from Google Autocomplete API
         suggestion_objects = await predictor.predict(partial_query, limit=10)
-        
-        # Apply personalization to fresh suggestions
-        try:
-            personalized_suggestions = await personalize_suggestions(
-                suggestion_objects, user_id, partial_query
-            )
-            suggestion_objects = personalized_suggestions
-            logger.info(f"Applied personalization to suggestions")
-        except Exception as personalize_error:
-            logger.error(f"Personalization error for fresh results: {personalize_error}")
-            # Continue with non-personalized suggestions if personalization fails
-        
-        # Extract suggestion texts
         predictions = [s["text"] for s in suggestion_objects]
-        
-        # Generate confidence scores (use the personalized scores)
         confidence_scores = [s.get("score", 0.5) for s in suggestion_objects]
         
-        # Apply context filtering if context is provided
         if context:
             predictions, confidence_scores = filter_predictions_by_context(
                 predictions, confidence_scores, partial_query, context
             )
         
-        # Log the predictions
+        try:
+            personalized_suggestions = await personalize_suggestions(
+                [{"text": pred, "score": score} for pred, score in zip(predictions, confidence_scores)],
+                user_id, 
+                partial_query
+            )
+            predictions = [s["text"] for s in personalized_suggestions]
+            confidence_scores = [s.get("score", 0.5) for s in personalized_suggestions]
+        except Exception as personalize_error:
+            logger.error(f"Personalization error for fresh results: {personalize_error}")
+        
         logger.debug(f"Generated {len(predictions)} predictions: {predictions}")
         
-        # Cache the results if Redis is available
-        if redis and not cache_hit and predictions:
+        if redis and predictions:
             try:
-                cache_key = f"google_autocomplete:{partial_query}"
                 cache_data = {
-                    "suggestions": suggestion_objects,
+                    "suggestions": [
+                        {"text": pred, "score": score} 
+                        for pred, score in zip(predictions, confidence_scores)
+                    ],
                     "confidence_scores": confidence_scores
                 }
-                
-                # Cache for 15 minutes (900 seconds)
-                await redis.setex(
-                    cache_key,
-                    900,
-                    json.dumps(cache_data)
-                )
+                await redis.setex(cache_key, 900, json.dumps(cache_data))
                 logger.debug(f"Cached predictions for: {partial_query}")
             except Exception as cache_error:
                 logger.error(f"Cache storage error: {cache_error}", exc_info=True)
         
-        # Generate refinement suggestions
-        refinements = generate_predictive_refinements(partial_query, predictions)
+        refinements_dict = generate_predictive_refinements(partial_query, predictions)
         
-        # Record prediction if we have a DB connection
+        # Convert refinements to a flat list of strings as expected by PredictionResponse
+        refinements_list = []
+        if isinstance(refinements_dict, dict):
+            # Extract related queries if they exist
+            if "related_queries" in refinements_dict and isinstance(refinements_dict["related_queries"], list):
+                refinements_list.extend(refinements_dict["related_queries"])
+            
+            # Extract expertise areas if they exist
+            if "expertise_areas" in refinements_dict and isinstance(refinements_dict["expertise_areas"], list):
+                refinements_list.extend(refinements_dict["expertise_areas"])
+            
+            # Extract values from filters if they exist
+            if "filters" in refinements_dict and isinstance(refinements_dict["filters"], list):
+                for filter_item in refinements_dict["filters"]:
+                    if isinstance(filter_item, dict) and "values" in filter_item:
+                        if isinstance(filter_item["values"], list):
+                            refinements_list.extend(filter_item["values"])
+                        else:
+                            refinements_list.append(str(filter_item["values"]))
+
         if conn and predictions:
             await record_prediction(
                 conn,
@@ -312,36 +306,105 @@ async def process_query_prediction(partial_query: str, user_id: str, context: Op
                 confidence_scores
             )
         
-        # Prepare response
-        response = PredictionResponse(
+        return PredictionResponse(
             predictions=predictions,
             confidence_scores=confidence_scores,
             user_id=user_id,
-            refinements=refinements
+            refinements=refinements_list,
+            total_suggestions=len(predictions)
         )
-        
-        return response
-        
+    
     except Exception as e:
-        # Catch-all for unexpected errors
-        logger.error(f"Critical error in query prediction: {e}", exc_info=True)
+        logger.exception(f"Unexpected error in process_query_prediction: {e}")
+        # Initialize empty lists for fallback response
+        predictions = []
+        confidence_scores = []
+        refinements_list = []  # Empty list of strings for refinements
         
-        # Always return a valid response even on error
         return PredictionResponse(
-            predictions=[partial_query] if partial_query else [],
-            confidence_scores=[0.5] if partial_query else [],
+            predictions=predictions,
+            confidence_scores=confidence_scores,
             user_id=user_id,
-            refinements={
-                "filters": [],
-                "related_queries": [partial_query] if partial_query else [],
-                "expertise_areas": []
-            }
+            refinements=refinements_list,
+            total_suggestions=len(predictions)
         )
-    finally:
-        # Always close connection if opened
-        if conn:
-            conn.close()
-            logger.debug("Database connection closed")
+async def process_advanced_query_prediction(
+    partial_query: str, 
+    user_id: str, 
+    context: Optional[str] = None,
+    limit: int = 10
+) -> PredictionResponse:
+    """
+    Process advanced query prediction with context-specific suggestions.
+    
+    Args:
+        partial_query: Partial query to predict
+        user_id: User identifier
+        context: Optional context for prediction (name, theme, designation)
+        limit: Maximum number of predictions
+    
+    Returns:
+        PredictionResponse with context-aware predictions
+    """
+    logger.info(f"Processing advanced query prediction - Query: {partial_query}, Context: {context}")
+    
+    try:
+        # Validate context
+        valid_contexts = ["name", "theme", "designation", None]
+        if context and context not in valid_contexts[:-1]:
+            raise ValueError(f"Invalid context. Must be one of {', '.join(valid_contexts[:-1])}")
+        
+        # Use process_query_prediction as base method
+        base_prediction = await process_query_prediction(partial_query, user_id, context)
+        
+        # Generate context-specific refinements
+        refinements_dict = generate_advanced_predictive_refinements(
+            partial_query, 
+            base_prediction.predictions, 
+            context
+        )
+        
+        # Convert refinements to a flat list of strings as expected by PredictionResponse
+        refinements_list = []
+        if isinstance(refinements_dict, dict):
+            # Extract related queries if they exist
+            if "related_queries" in refinements_dict and isinstance(refinements_dict["related_queries"], list):
+                refinements_list.extend(refinements_dict["related_queries"])
+            
+            # Extract expertise areas if they exist
+            if "expertise_areas" in refinements_dict and isinstance(refinements_dict["expertise_areas"], list):
+                refinements_list.extend(refinements_dict["expertise_areas"])
+            
+            # Extract values from filters if they exist
+            if "filters" in refinements_dict and isinstance(refinements_dict["filters"], list):
+                for filter_item in refinements_dict["filters"]:
+                    if isinstance(filter_item, dict) and "values" in filter_item:
+                        if isinstance(filter_item["values"], list):
+                            refinements_list.extend(filter_item["values"])
+                        else:
+                            refinements_list.append(str(filter_item["values"]))
+        
+        # Update the response with context-specific refinements
+        base_prediction.refinements = refinements_list
+        base_prediction.search_context = context
+        
+        return base_prediction
+    
+    except Exception as e:
+        logger.error(f"Error in advanced query prediction: {e}", exc_info=True)
+        # Initialize empty lists for fallback response
+        predictions = []
+        confidence_scores = []
+        refinements_list = []  # Ensure refinements is a list
+        
+        return PredictionResponse(
+            predictions=predictions,
+            confidence_scores=confidence_scores,
+            user_id=user_id,
+            refinements=refinements_list,
+            total_suggestions=len(predictions)
+        )
+
 
 def filter_predictions_by_context(
     predictions: List[str], 
@@ -350,81 +413,193 @@ def filter_predictions_by_context(
     context: str
 ) -> Tuple[List[str], List[float]]:
     """
-    Filter predictions based on context.
-    
-    Args:
-        predictions: Original predictions
-        confidence_scores: Original confidence scores
-        partial_query: The partial query
-        context: Context for filtering (name, theme, designation)
-        
-    Returns:
-        Tuple of filtered predictions and their confidence scores
+    Strictly filter predictions based on context type.
+    For 'name' context, only return person name suggestions.
     """
+    if context != "name":
+        # For non-name contexts, return original predictions
+        return predictions, confidence_scores
+    
     filtered_predictions = []
     filtered_scores = []
     
-    context = context.lower()
-    
     for i, pred in enumerate(predictions):
-        score = confidence_scores[i] if i < len(confidence_scores) else 0.5
-        include = False
+        original_score = confidence_scores[i] if i < len(confidence_scores) else 0.5
         
-        # Apply context-specific filtering
-        if context == "name":
-            # For names, prefer shorter predictions without research terms
-            if (len(pred.split()) <= 3 and 
-                not any(x in pred.lower() for x in ["analysis", "research", "study", "method"])):
-                include = True
-                score *= 1.2  # Boost name matches
-                
-        elif context == "theme":
-            # For themes, prefer research areas and topics
-            theme_indicators = ["health", "research", "policy", "studies", "development"]
-            if any(indicator in pred.lower() for indicator in theme_indicators):
-                include = True
-                score *= 1.1  # Boost theme matches
-                
-        elif context == "designation":
-            # For designations, prefer job titles
-            designation_indicators = ["director", "researcher", "professor", "lead", "coordinator"]
-            if any(indicator in pred.lower() for indicator in designation_indicators):
-                include = True
-                score *= 1.1  # Boost designation matches
-        
-        # Include if it passes context filtering or if it's the original query
-        if include or pred.lower() == partial_query.lower():
+        if is_person_name(pred, partial_query):
             filtered_predictions.append(pred)
-            filtered_scores.append(score)
+            filtered_scores.append(original_score * 1.2)  # Boost name matches
     
-    # If we didn't get any filtered results, return a subset of the original ones
+    # Fallback suggestions when no perfect matches exist
     if not filtered_predictions:
-        # For names context, add suggestions that look like names
-        if context == "name" and partial_query:
-            filtered_predictions.append(f"Experts named {partial_query}")
-            filtered_scores.append(0.9)
-            
-            # Add the partial query itself if it's short (likely a name)
-            if len(partial_query.split()) <= 2:
-                filtered_predictions.append(partial_query)
-                filtered_scores.append(0.85)
-        
-        # For theme context, add research-related suggestions
-        elif context == "theme" and partial_query:
-            filtered_predictions.append(f"{partial_query} research")
-            filtered_scores.append(0.9)
-            filtered_predictions.append(f"{partial_query} studies")
-            filtered_scores.append(0.85)
-        
-        # For designation context, add job title suggestions
-        elif context == "designation" and partial_query:
-            filtered_predictions.append(f"{partial_query} specialists")
-            filtered_scores.append(0.9)
-            filtered_predictions.append(f"Senior {partial_query}")
-            filtered_scores.append(0.85)
-        
-        # If still empty or no context, use original predictions
-        if not filtered_predictions:
-            return predictions[:5], confidence_scores[:5] if confidence_scores else [0.5] * min(5, len(predictions))
-        
+        return generate_name_fallback_suggestions(partial_query)
+    
     return filtered_predictions, filtered_scores
+
+def is_person_name(suggestion: str, partial_query: str) -> bool:
+    """
+    Strict check if suggestion appears to be a person name.
+    Names should:
+    - Contain the partial query (case-insensitive)
+    - Be 2-3 words 
+    - Have each word capitalized
+    - Not contain research or technical terms
+    """
+    # Research and technical terms to exclude
+    topic_indicators = [
+        "research", "study", "analysis", "method", 
+        "framework", "data", "model", "system", 
+        "pathway", "protein", "drug", "discovery", 
+        "resistance", "structure", "function", 
+        "signaling", "antimicrobial", "cancer"
+    ]
+    
+    # Convert partial query and suggestion to lowercase for comparison
+    partial_query_lower = partial_query.lower()
+    suggestion_lower = suggestion.lower()
+    
+    # First, check if partial query is in the suggestion
+    if partial_query_lower not in suggestion_lower:
+        return False
+    
+    words = suggestion.split()
+    
+    # Check length
+    if not (2 <= len(words) <= 3):
+        return False
+    
+    # Check capitalization
+    if not all(word.istitle() for word in words):
+        return False
+    
+    # Check for topic indicators
+    if any(indicator in suggestion_lower for indicator in topic_indicators):
+        return False
+    
+    # Additional checks to prevent non-name suggestions
+    if any(
+        last_word.endswith(suffix) 
+        for last_word in [words[-1].lower()] 
+        for suffix in ['ing', 'tion', 'ism', 'ogy', 'path', 'ence']
+    ):
+        return False
+    
+    return True
+
+def generate_name_fallback_suggestions(partial_query: str) -> Tuple[List[str], List[float]]:
+    """Generate simple name suggestions when no good matches are found"""
+    common_first_names = [
+        "Abdul", "Abdullah", "Abdel", "Abdala"
+    ]
+    common_last_names = [
+        "Rahman", "Ali", "Ahmed", "Muhammad"
+    ]
+    
+    suggestions = []
+    
+    # If partial query is one word, try to match with names
+    if len(partial_query.split()) == 1:
+        # Prioritize combinations that include the partial query
+        suggestions = [
+            f"{first} {last}" 
+            for first in common_first_names 
+            for last in common_last_names
+            if partial_query.lower() in (first + " " + last).lower()
+        ]
+        
+        # If no matches, fall back to generic combinations
+        if not suggestions:
+            suggestions = [
+                f"{first} {last}" 
+                for first in common_first_names[:2] 
+                for last in common_last_names[:2]
+            ]
+    else:
+        # If already two words, just return as-is if it looks like a name
+        suggestions = [partial_query] if is_person_name(partial_query, partial_query) else []
+    
+    # If still no suggestions, create some
+    if not suggestions:
+        suggestions = [f"{partial_query} {last}" for last in common_last_names[:2]]
+    
+    # Generate decreasing confidence scores
+    scores = [0.9 - (i * 0.1) for i in range(len(suggestions))]
+    
+    return suggestions, scores
+
+def generate_advanced_predictive_refinements(
+    partial_query: str, 
+    predictions: List[str], 
+    context: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Generate advanced predictive refinements with context-specific filtering.
+    
+    Args:
+        partial_query: The partial query string
+        predictions: List of predicted suggestions
+        context: Optional context for filtering (name, theme, designation)
+    
+    Returns:
+        Dict of refinement suggestions
+    """
+    logger.info(f"Generating advanced predictive refinements - Context: {context}")
+    
+    try:
+        # Context-specific keywords for refinement
+        context_keywords = {
+            "name": {
+                "filters": ["Personal Profiles", "Researcher Names", "Expert Identities"],
+                "expertise_prefixes": ["Expert in", "Researcher with", "Professional"]
+            },
+            "theme": {
+                "filters": ["Research Areas", "Study Domains", "Academic Fields"],
+                "expertise_prefixes": ["Research in", "Specializing in", "Focus on"]
+            },
+            "designation": {
+                "filters": ["Professional Roles", "Job Titles", "Career Levels"],
+                "expertise_prefixes": ["Experts as", "Professionals with", "Specialists in"]
+            }
+        }
+        
+        # Prepare base refinements structure
+        refinements = {
+            "filters": [],
+            "related_queries": predictions[:5],
+            "expertise_areas": []
+        }
+        
+        # Add context-specific filters if context is provided
+        if context and context in context_keywords:
+            refinements["filters"] = [{
+                "type": f"{context}_filter",
+                "label": context_keywords[context]["filters"][0],
+                "values": context_keywords[context]["filters"]
+            }]
+            
+            # Generate expertise areas
+            expertise_areas = set()
+            prefix = context_keywords[context]["expertise_prefixes"][0]
+            
+            for prediction in predictions:
+                words = prediction.split()
+                for word in words:
+                    if len(word) > 3 and word.lower() != partial_query.lower():
+                        expertise_areas.add(f"{prefix} {word.capitalize()}")
+            
+            # Ensure some expertise areas exist
+            if not expertise_areas:
+                expertise_areas.add(f"{prefix} {partial_query.capitalize()}")
+            
+            refinements["expertise_areas"] = list(expertise_areas)[:5]
+        
+        return refinements
+    
+    except Exception as e:
+        logger.error(f"Error in advanced predictive refinements: {e}")
+        return {
+            "filters": [],
+            "related_queries": predictions[:5],
+            "expertise_areas": []
+        }
+

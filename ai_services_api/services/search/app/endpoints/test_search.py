@@ -85,31 +85,35 @@ class InteractiveSearchTester:
         except Exception as e:
             logger.error(f"Exception in normal search: {str(e)}")
             return {}
-    
-    def advanced_search(self, name: Optional[str] = None, theme: Optional[str] = None, 
-                        designation: Optional[str] = None) -> Dict[str, Any]:
-        """Perform an advanced search."""
-        url = f"{self.base_url}/search/search/advanced_search"
+    def get_advanced_predictions(self, partial_query: str, search_type: str) -> List[str]:
+        """
+        Get advanced predictions with a specific search type.
         
-        params = {}
-        if name:
-            params["name"] = name
-        if theme:
-            params["theme"] = theme
-        if designation:
-            params["designation"] = designation
+        Args:
+            partial_query: Partial query to get predictions for
+            search_type: Type of search (e.g., 'name', 'theme', 'designation')
+            
+        Returns:
+            List of prediction strings
+        """
+        url = f"{self.base_url}/search/search/experts/advanced_predict/{partial_query}"
+        
+        params = {
+            "search_type": search_type
+        }
         
         try:
             response = requests.get(url, headers=self.headers, params=params)
             
             if response.status_code == 200:
-                return response.json()
+                data = response.json()
+                return data.get("predictions", [])
             else:
-                logger.error(f"Error in advanced search: {response.status_code}")
-                return {}
+                logger.error(f"Error getting advanced predictions: {response.status_code}")
+                return []
         except Exception as e:
-            logger.error(f"Exception in advanced search: {str(e)}")
-            return {}
+            logger.error(f"Exception getting advanced predictions: {str(e)}")
+            return []
     
     def display_search_results(self, results: Dict[str, Any]):
         """Display search results."""
@@ -221,58 +225,80 @@ class InteractiveSearchTester:
             print("\nSearch interrupted. Returning to the main menu.")
             time.sleep(1)
     
+    def advanced_search(self, query: str, search_type: str) -> Dict[str, Any]:
+        """Perform an advanced search with a specific search type."""
+        url = f"{self.base_url}/search/search/advanced_search/{query}"
+        
+        params = {
+            "search_type": search_type
+        }
+        
+        try:
+            response = requests.get(url, headers=self.headers, params=params)
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"Error in advanced search: {response.status_code}")
+                return {}
+        except Exception as e:
+            logger.error(f"Exception in advanced search: {str(e)}")
+            return {}
+
     def run_advanced_search(self):
         """Run an advanced search with choice of search type."""
         self.clear_screen()
         print("==== Advanced Search Mode ====\n")
-        print("Which fields would you like to search?")
+        print("Choose a search type:")
         print("1. Name")
         print("2. Theme")
         print("3. Designation")
-        print("4. Multiple Fields")
-        print("5. Go Back")
+        print("4. Go Back")
         
-        choice = input("\nEnter your choice (1-5): ")
+        choice = input("\nEnter your choice (1-4): ")
         
-        if choice == "5":
+        # Map choices to search types
+        search_type_map = {
+            "1": "name",
+            "2": "theme", 
+            "3": "designation"
+        }
+        
+        if choice == "4":
             return
         
-        name_query = None
-        theme_query = None
-        designation_query = None
+        if choice not in search_type_map:
+            print("Invalid choice. Press Enter to continue...")
+            input()
+            return
         
-        if choice == "1" or choice == "4":
-            name_query = self.get_search_field("name")
+        search_type = search_type_map[choice]
         
-        if choice == "2" or choice == "4":
-            theme_query = self.get_search_field("theme")
+        # Get search query with predictive suggestions
+        query = self.get_search_field(search_type)
         
-        if choice == "3" or choice == "4":
-            designation_query = self.get_search_field("designation")
+        if not query:
+            return
         
         # Perform the search
         self.clear_screen()
-        print("Performing advanced search with parameters:")
-        if name_query:
-            print(f"- Name: {name_query}")
-        if theme_query:
-            print(f"- Theme: {theme_query}")
-        if designation_query:
-            print(f"- Designation: {designation_query}")
+        print(f"Performing advanced {search_type} search:")
+        print(f"Query: {query}")
         
-        results = self.advanced_search(name_query, theme_query, designation_query)
+        # Updated to use single query parameter and search_type
+        results = self.advanced_search(query, search_type)
         
         # Display results
         self.display_search_results(results)
         
         print("\nPress Enter to continue...")
         input()
-    
+
     def get_search_field(self, field_type: str) -> Optional[str]:
         """Get a search field value with context-aware predictive suggestions."""
         self.clear_screen()
-        print(f"==== Enter {field_type.title()} ====\n")
-        print(f"Type your {field_type} search query and press Enter")
+        print(f"==== Enter {field_type.title()} Search ====\n")
+        print(f"Type your {field_type} search query")
         print("Press Ctrl+C to cancel\n")
         
         try:
@@ -282,13 +308,17 @@ class InteractiveSearchTester:
                 if not partial_query:
                     continue
                 
-                # Get context-specific predictions - explicitly pass the field_type as context
+                # Get both standard and advanced predictions
                 print("\nGetting predictions...")
-                predictions = self.get_predictions(partial_query, context_type=field_type)
+                standard_predictions = self.get_predictions(partial_query, context_type=field_type)
+                advanced_predictions = self.get_advanced_predictions(partial_query, search_type=field_type)
                 
-                if predictions:
+                # Combine predictions, removing duplicates while preserving order
+                all_predictions = list(dict.fromkeys(standard_predictions + advanced_predictions))
+                
+                if all_predictions:
                     print("\nPredictions:")
-                    for i, pred in enumerate(predictions[:MAX_SUGGESTIONS], 1):
+                    for i, pred in enumerate(all_predictions[:MAX_SUGGESTIONS], 1):
                         print(f"{i}. {pred}")
                     
                     # Ask if user wants to select a prediction
@@ -296,8 +326,8 @@ class InteractiveSearchTester:
                     
                     if selection.strip() and selection.isdigit():
                         idx = int(selection) - 1
-                        if 0 <= idx < len(predictions) and idx < MAX_SUGGESTIONS:
-                            partial_query = predictions[idx]
+                        if 0 <= idx < len(all_predictions) and idx < MAX_SUGGESTIONS:
+                            partial_query = all_predictions[idx]
                             print(f"Selected: {partial_query}")
                     break
                 else:
@@ -312,6 +342,8 @@ class InteractiveSearchTester:
             print("\nInput canceled.")
             time.sleep(1)
             return None
+    
+    
 
 # Main execution
 if __name__ == "__main__":

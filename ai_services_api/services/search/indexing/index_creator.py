@@ -1,5 +1,6 @@
 import os
 import numpy as np
+from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
 import faiss
 import pickle
 import redis
@@ -668,6 +669,80 @@ class ExpertSearchIndexManager:
         except Exception as e:
             logger.error(f"Fatal error in create_redis_index: {e}")
             return False
+
+    async def generate_advanced_search_refinements(
+        self, 
+        search_type: str, 
+        query: str, 
+        user_id: str, 
+        results: List[Dict[str, Any]] = []
+    ) -> Dict[str, Any]:
+        """
+        Generate advanced search refinements based on search type.
+        
+        Args:
+            search_type (str): Type of search ('name', 'theme', 'designation')
+            query (str): Original search query
+            user_id (str): User identifier
+            results (List[Dict[str, Any]], optional): Current search results
+        
+        Returns:
+            Dict[str, Any]: Refinement suggestions
+        """
+        logger.info(f"Generating advanced refinements for {search_type} search: {query}")
+        
+        try:
+            # If we have results, try to get refinements from search manager
+            search_manager = ExpertSearchIndexManager()
+            if results:
+                return search_manager.get_search_refinements(query, results)
+            
+            # If no results or empty refinements, enhance with Gemini
+            try:
+                # Use GoogleAutocompletePredictor to get related queries
+                gemini_predictor = GoogleAutocompletePredictor()
+                suggestion_objects = await gemini_predictor.predict(query, limit=5)
+                related_queries = [s["text"] for s in suggestion_objects]
+                
+                # Extract potential expertise areas
+                expertise_areas = set()
+                for related_query in related_queries:
+                    words = related_query.lower().split()
+                    for word in words:
+                        if len(word) > 3 and word != query.lower():
+                            expertise_areas.add(word.capitalize())
+                
+                # Ensure we have some expertise areas
+                if len(expertise_areas) < 3:
+                    expertise_areas.add(query.capitalize())
+                
+                # Build enhanced refinements
+                refinements = {
+                    "filters": [],
+                    "related_queries": related_queries,
+                    "expertise_areas": list(expertise_areas)[:5]
+                }
+                
+                return refinements
+            
+            except Exception as gemini_error:
+                logger.error(f"Gemini refinement error: {gemini_error}", exc_info=True)
+                # Fallback to basic refinements
+                refinements = {
+                    "filters": [],
+                    "related_queries": [],
+                    "expertise_areas": [query.capitalize()]
+                }
+                
+            return refinements
+        
+        except Exception as e:
+            logger.error(f"Error generating advanced refinements: {e}", exc_info=True)
+            return {
+                "filters": [],
+                "related_queries": [],
+                "expertise_areas": []
+            }
         
     
     def get_search_refinements(self, query: str, current_results: List[Dict]) -> Dict:
