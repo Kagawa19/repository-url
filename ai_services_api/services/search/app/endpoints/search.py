@@ -3,7 +3,10 @@ from typing import Any, List, Dict, Optional
 from pydantic import BaseModel
 import logging
 import uuid
-
+from fastapi import APIRouter, HTTPException, Request, Depends, Body
+from ai_services_api.services.search.core.models import PredictionResponse, SearchResponse
+from ai_services_api.services.search.app.endpoints.process_functions import process_query_prediction
+from ai_services_api.services.search.core.expert_search import process_expert_search
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request, Depends, Body
 from typing import Any, List, Dict, Optional
@@ -20,6 +23,12 @@ from ai_services_api.services.search.core.expert_search import (
     process_expert_designation_search
 )
 
+# Configure logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Configure logger
 logging.basicConfig(
@@ -71,71 +80,36 @@ async def predict_query(
 
 # Add these to your router file (search.py)
 
-@router.get("/experts/search_by_name/{name}")
-async def search_experts_by_name(
-    name: str,
-    request: Request,
-    active_only: bool = True,
-    user_id: str = Depends(get_user_id)
-):
-    """Search for experts by name."""
-    logger.info(f"Received name search request - Name: {name}, User: {user_id}")
-    return await process_expert_name_search(name, user_id, active_only)
+@router.get("/advanced_search")
+async def search_expert(query: str, user_id: str, search_type: str, active_only: bool = True, k: int = 5):
+    """
+    General search endpoint for experts based on different criteria (name, theme, designation).
+    
+    Args:
+        query: Search query term (name, theme, or designation).
+        user_id: User identifier.
+        search_type: Type of search (name, theme, or designation).
+        active_only: Filter for active experts only (default is True).
+        k: Number of results to return (default is 5).
+    
+    Returns:
+        SearchResponse: Search results based on the specified search type.
+    """
+    if search_type == "name":
+        # Perform name-based search
+        return await process_expert_name_search(query, user_id, active_only, k)
+    
+    elif search_type == "theme":
+        # Perform theme-based search
+        return await process_expert_theme_search(query, user_id, active_only, k)
+    
+    elif search_type == "designation":
+        # Perform designation-based search
+        return await process_expert_designation_search(query, user_id, active_only, k)
+    
+    else:
+        raise HTTPException(status_code=400, detail="Invalid search type. Must be 'name', 'theme', or 'designation'.")
 
-@router.get("/experts/search_by_theme/{theme}")
-async def search_experts_by_theme(
-    theme: str,
-    request: Request,
-    active_only: bool = True,
-    user_id: str = Depends(get_user_id)
-):
-    """Search for experts by theme."""
-    logger.info(f"Received theme search request - Theme: {theme}, User: {user_id}")
-    return await process_expert_theme_search(theme, user_id, active_only)
-
-@router.get("/experts/search_by_designation/{designation}")
-async def search_experts_by_designation(
-    designation: str,
-    request: Request,
-    active_only: bool = True,
-    user_id: str = Depends(get_user_id)
-):
-    """Search for experts by designation."""
-    logger.info(f"Received designation search request - Designation: {designation}, User: {user_id}")
-    return await process_expert_designation_search(designation, user_id, active_only)
-
-@router.get("/test/experts/search_by_name/{name}")
-async def test_search_experts_by_name(
-    name: str,
-    request: Request,
-    active_only: bool = True,
-    user_id: str = Depends(get_test_user_id)
-):
-    """Test endpoint for name search."""
-    logger.info(f"Received test name search request - Name: {name}")
-    return await process_expert_name_search(name, user_id, active_only)
-
-@router.get("/test/experts/search_by_theme/{theme}")
-async def test_search_experts_by_theme(
-    theme: str,
-    request: Request,
-    active_only: bool = True,
-    user_id: str = Depends(get_test_user_id)
-):
-    """Test endpoint for theme search."""
-    logger.info(f"Received test theme search request - Theme: {theme}")
-    return await process_expert_theme_search(theme, user_id, active_only)
-
-@router.get("/test/experts/search_by_designation/{designation}")
-async def test_search_experts_by_designation(
-    designation: str,
-    request: Request,
-    active_only: bool = True,
-    user_id: str = Depends(get_test_user_id)
-):
-    """Test endpoint for designation search."""
-    logger.info(f"Received test designation search request - Designation: {designation}")
-    return await process_expert_designation_search(designation, user_id, active_only)
 
 @router.get("/test/experts/search/{query}")
 async def test_search_experts(
