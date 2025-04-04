@@ -80,12 +80,12 @@ async def predict_query(
 
 # Add these to your router file (search.py)
 
-@router.get("/experts/advanced_search")  # Simplified endpoint path
+@router.get("/advanced_search/{query}")
 async def advanced_search(
     query: str, 
     search_type: str, 
     request: Request,
-    user_id: str = Depends(get_user_id),  # Use the standard user ID extraction
+    user_id: str = Depends(get_user_id),
     active_only: bool = True, 
     k: int = 5
 ):
