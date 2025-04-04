@@ -138,7 +138,7 @@ class GoogleAutocompletePredictor:
         try:
             # Configure Gemini API
             genai.configure(api_key=key)
-            self.model = genai.GenerativeModel('gemini-1.5-flash-latest')
+            self.model = genai.GenerativeModel('gemini-2.0-flash')
             self.logger = logging.getLogger(__name__)
             
             # Set up distributed Redis cache if configured
