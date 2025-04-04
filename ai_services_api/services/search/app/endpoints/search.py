@@ -80,7 +80,7 @@ async def predict_query(
 
 # Add these to your router file (search.py)
 
-@app.get("/search/search/advanced_search")
+@router.get("/search/search/advanced_search")
 async def advanced_search(query: str, search_type: str, user_id: str, active_only: bool = True, k: int = 5):
     """
     Advanced search endpoint to search experts based on different criteria (name, theme, or designation).
