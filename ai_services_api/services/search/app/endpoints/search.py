@@ -80,35 +80,47 @@ async def predict_query(
 
 # Add these to your router file (search.py)
 
-@router.get("/search/search/advanced_search")
-async def advanced_search(query: str, search_type: str, user_id: str, active_only: bool = True, k: int = 5):
+@router.get("/experts/advanced_search")  # Simplified endpoint path
+async def advanced_search(
+    query: str, 
+    search_type: str, 
+    request: Request,
+    user_id: str = Depends(get_user_id),  # Use the standard user ID extraction
+    active_only: bool = True, 
+    k: int = 5
+):
     """
-    Advanced search endpoint to search experts based on different criteria (name, theme, or designation).
-
-    Args:
-        query: Search query term (name, theme, or designation).
-        search_type: Type of search (name, theme, or designation).
-        user_id: User identifier.
-        active_only: Filter for active experts only (default is True).
-        k: Number of results to return (default is 5).
-
-    Returns:
-        SearchResponse: Search results based on the specified search type.
+    Advanced search endpoint to search experts based on different criteria.
+    
+    Allows searching experts by name, theme, or designation with optional filtering.
     """
-    if search_type == "name":
-        # Perform name-based search
-        return await process_expert_name_search(query, user_id, active_only, k)
+    logger.info(f"Advanced search request - Type: {search_type}, Query: {query}, User: {user_id}")
     
-    elif search_type == "theme":
-        # Perform theme-based search
-        return await process_expert_theme_search(query, user_id, active_only, k)
+    # Validate search type with clear error message
+    valid_search_types = ["name", "theme", "designation"]
+    if search_type not in valid_search_types:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid search type. Must be one of: {', '.join(valid_search_types)}"
+        )
     
-    elif search_type == "designation":
-        # Perform designation-based search
-        return await process_expert_designation_search(query, user_id, active_only, k)
+    try:
+        # Route to appropriate search method based on type
+        if search_type == "name":
+            return await process_expert_name_search(query, user_id, active_only, k)
+        
+        elif search_type == "theme":
+            return await process_expert_theme_search(query, user_id, active_only, k)
+        
+        elif search_type == "designation":
+            return await process_expert_designation_search(query, user_id, active_only, k)
     
-    else:
-        raise HTTPException(status_code=400, detail="Invalid search type. Must be 'name', 'theme', or 'designation'.")
+    except Exception as e:
+        logger.error(f"Error in advanced search: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail="An error occurred while processing the advanced search"
+        )
 
 
 @router.get("/test/experts/search/{query}")
