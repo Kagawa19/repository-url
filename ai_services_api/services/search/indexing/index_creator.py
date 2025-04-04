@@ -133,7 +133,7 @@ class ExpertSearchIndexManager:
         except ImportError:
             logger.warning("Could not import DatabaseConnector, trying alternative import path")
             try:
-                from ai_services_api.services.search.core.database import DatabaseConnector
+                from src.utils.db_utils import DatabaseConnector
                 self.db = DatabaseConnector()
             except ImportError:
                 logger.error("Failed to import DatabaseConnector")
@@ -778,6 +778,192 @@ class ExpertSearchIndexManager:
         })
         
         return filters
+    
+    def search_experts_by_name(self, name: str, k: int = 5, active_only: bool = True) -> List[Dict[str, Any]]:
+        """
+        Search for experts by name.
+        
+        Args:
+            name: Name to search for
+            k: Number of results to return
+            active_only: Whether to return only active experts
+        
+        Returns:
+            List of expert matches
+        """
+        try:
+            conn = self.db.get_connection()
+            cur = conn.cursor()
+            
+            sql = """
+                SELECT 
+                    id, first_name, last_name, designation, theme, unit, 
+                    knowledge_expertise, is_active, bio, contact
+                FROM experts_expert
+                WHERE (first_name ILIKE %s OR last_name ILIKE %s)
+            """
+            
+            params = [f'%{name}%', f'%{name}%']
+            
+            if active_only:
+                sql += " AND (is_active = true OR is_active IS NULL)"
+                
+            sql += " LIMIT %s"
+            params.append(k)
+            
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            
+            # Process results
+            results = []
+            for row in rows:
+                expert = {
+                    'id': row[0],
+                    'first_name': row[1] or '',
+                    'last_name': row[2] or '',
+                    'designation': row[3] or '',
+                    'theme': row[4] or '',
+                    'unit': row[5] or '',
+                    'knowledge_expertise': self._parse_jsonb(row[6]),
+                    'is_active': row[7] if row[7] is not None else True,
+                    'bio': row[8] or '',
+                    'contact': row[9] or '',
+                    'score': 1.0  # Default score for direct DB matches
+                }
+                results.append(expert)
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Error searching experts by name: {e}")
+            return []
+        finally:
+            if 'conn' in locals() and conn:
+                conn.close()
+
+    def search_experts_by_theme(self, theme: str, k: int = 5, active_only: bool = True) -> List[Dict[str, Any]]:
+        """
+        Search for experts by theme.
+        
+        Args:
+            theme: Theme to search for
+            k: Number of results to return
+            active_only: Whether to return only active experts
+        
+        Returns:
+            List of expert matches
+        """
+        try:
+            conn = self.db.get_connection()
+            cur = conn.cursor()
+            
+            sql = """
+                SELECT 
+                    id, first_name, last_name, designation, theme, unit, 
+                    knowledge_expertise, is_active, bio, contact
+                FROM experts_expert
+                WHERE theme ILIKE %s
+            """
+            
+            params = [f'%{theme}%']
+            
+            if active_only:
+                sql += " AND (is_active = true OR is_active IS NULL)"
+                
+            sql += " LIMIT %s"
+            params.append(k)
+            
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            
+            # Process results
+            results = []
+            for row in rows:
+                expert = {
+                    'id': row[0],
+                    'first_name': row[1] or '',
+                    'last_name': row[2] or '',
+                    'designation': row[3] or '',
+                    'theme': row[4] or '',
+                    'unit': row[5] or '',
+                    'knowledge_expertise': self._parse_jsonb(row[6]),
+                    'is_active': row[7] if row[7] is not None else True,
+                    'bio': row[8] or '',
+                    'contact': row[9] or '',
+                    'score': 1.0  # Default score for direct DB matches
+                }
+                results.append(expert)
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Error searching experts by theme: {e}")
+            return []
+        finally:
+            if 'conn' in locals() and conn:
+                conn.close()
+
+    def search_experts_by_designation(self, designation: str, k: int = 5, active_only: bool = True) -> List[Dict[str, Any]]:
+        """
+        Search for experts by designation.
+        
+        Args:
+            designation: Designation to search for
+            k: Number of results to return
+            active_only: Whether to return only active experts
+        
+        Returns:
+            List of expert matches
+        """
+        try:
+            conn = self.db.get_connection()
+            cur = conn.cursor()
+            
+            sql = """
+                SELECT 
+                    id, first_name, last_name, designation, theme, unit, 
+                    knowledge_expertise, is_active, bio, contact
+                FROM experts_expert
+                WHERE designation ILIKE %s
+            """
+            
+            params = [f'%{designation}%']
+            
+            if active_only:
+                sql += " AND (is_active = true OR is_active IS NULL)"
+                
+            sql += " LIMIT %s"
+            params.append(k)
+            
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            
+            # Process results
+            results = []
+            for row in rows:
+                expert = {
+                    'id': row[0],
+                    'first_name': row[1] or '',
+                    'last_name': row[2] or '',
+                    'designation': row[3] or '',
+                    'theme': row[4] or '',
+                    'unit': row[5] or '',
+                    'knowledge_expertise': self._parse_jsonb(row[6]),
+                    'is_active': row[7] if row[7] is not None else True,
+                    'bio': row[8] or '',
+                    'contact': row[9] or '',
+                    'score': 1.0  # Default score for direct DB matches
+                }
+                results.append(expert)
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Error searching experts by designation: {e}")
+            return []
+        finally:
+            if 'conn' in locals() and conn:
+                conn.close()
 
     def _extract_expertise_areas(self, results: List[Dict]) -> List[str]:
         """Extract unique expertise areas from results."""

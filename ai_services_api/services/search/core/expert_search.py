@@ -10,6 +10,13 @@ from ai_services_api.services.search.indexing.index_creator import ExpertSearchI
 from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
 from ai_services_api.services.message.core.database import get_db_connection
 from ai_services_api.services.search.core.models import ExpertSearchResult, SearchResponse
+from fastapi import HTTPException
+from typing import Any, List, Dict, Optional
+import logging
+from datetime import datetime
+import json
+import uuid
+
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -224,6 +231,330 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
     except Exception as e:
         # Catch-all for unexpected errors
         logger.error(f"Critical error in expert search: {e}", exc_info=True)
+        
+        # Always return a valid response
+        return SearchResponse(
+            total_results=0,
+            experts=[],
+            user_id=user_id,
+            session_id=session_id,
+            refinements={
+                "filters": [],
+                "related_queries": [],
+                "expertise_areas": []
+            }
+        )
+    finally:
+        # Always close connection if opened
+        if conn:
+            conn.close()
+            logger.debug("Database connection closed")
+
+async def process_expert_name_search(name: str, user_id: str, active_only: bool = True) -> SearchResponse:
+    """
+    Process search for experts by name.
+    
+    Args:
+        name: Name to search for
+        user_id: User identifier
+        active_only: Filter for active experts only
+    
+    Returns:
+        SearchResponse: Search results
+    """
+    logger.info(f"Processing name search - Name: {name}, User: {user_id}")
+    
+    conn = None
+    session_id = str(uuid.uuid4())[:8]  # Default session ID
+    
+    try:
+        # Establish database connection
+        try:
+            conn = get_db_connection()
+            session_id = await get_or_create_session(conn, user_id)
+            logger.debug(f"Created session: {session_id}")
+        except Exception as db_error:
+            logger.error(f"Database connection error: {db_error}", exc_info=True)
+            # Continue processing with default session ID
+        
+        # Execute search with timing
+        start_time = datetime.utcnow()
+        results = []
+        try:
+            search_manager = ExpertSearchIndexManager()
+            results = search_manager.search_experts_by_name(name, k=10, active_only=active_only)
+            logger.info(f"Name search found {len(results)} results")
+        except Exception as search_error:
+            logger.error(f"Search execution error: {search_error}", exc_info=True)
+        
+        response_time = (datetime.utcnow() - start_time).total_seconds()
+        
+        # Format results - handle empty results gracefully
+        formatted_results = []
+        try:
+            formatted_results = [
+                ExpertSearchResult(
+                    id=str(result.get('id', 'unknown')),
+                    first_name=result.get('first_name', ''),
+                    last_name=result.get('last_name', ''),
+                    designation=result.get('designation', ''),
+                    theme=result.get('theme', ''),
+                    unit=result.get('unit', ''),
+                    contact=result.get('contact', ''),
+                    is_active=result.get('is_active', True),
+                    score=result.get('score'),
+                    bio=result.get('bio'),
+                    knowledge_expertise=result.get('knowledge_expertise', [])
+                ) for result in results
+            ]
+        except Exception as format_error:
+            logger.error(f"Result formatting error: {format_error}", exc_info=True)
+        
+        # Record search analytics if we have a connection
+        if conn and results:
+            try:
+                await record_search(conn, session_id, user_id, f"name:{name}", results, response_time)
+            except Exception as record_error:
+                logger.error(f"Error recording search: {record_error}", exc_info=True)
+        
+        # Generate refinement suggestions
+        refinements = {}
+        try:
+            if results:
+                refinements = search_manager.get_search_refinements(name, results)
+        except Exception as refine_error:
+            logger.error(f"Refinements generation error: {refine_error}", exc_info=True)
+        
+        # Prepare response
+        response = SearchResponse(
+            total_results=len(formatted_results),
+            experts=formatted_results,
+            user_id=user_id,
+            session_id=session_id,
+            refinements=refinements
+        )
+        
+        return response
+        
+    except Exception as e:
+        # Catch-all for unexpected errors
+        logger.error(f"Critical error in name search: {e}", exc_info=True)
+        
+        # Always return a valid response
+        return SearchResponse(
+            total_results=0,
+            experts=[],
+            user_id=user_id,
+            session_id=session_id,
+            refinements={
+                "filters": [],
+                "related_queries": [],
+                "expertise_areas": []
+            }
+        )
+    finally:
+        # Always close connection if opened
+        if conn:
+            conn.close()
+            logger.debug("Database connection closed")
+
+async def process_expert_theme_search(theme: str, user_id: str, active_only: bool = True) -> SearchResponse:
+    """
+    Process search for experts by theme.
+    
+    Args:
+        theme: Theme to search for
+        user_id: User identifier
+        active_only: Filter for active experts only
+    
+    Returns:
+        SearchResponse: Search results
+    """
+    logger.info(f"Processing theme search - Theme: {theme}, User: {user_id}")
+    
+    conn = None
+    session_id = str(uuid.uuid4())[:8]  # Default session ID
+    
+    try:
+        # Establish database connection
+        try:
+            conn = get_db_connection()
+            session_id = await get_or_create_session(conn, user_id)
+            logger.debug(f"Created session: {session_id}")
+        except Exception as db_error:
+            logger.error(f"Database connection error: {db_error}", exc_info=True)
+            # Continue processing with default session ID
+        
+        # Execute search with timing
+        start_time = datetime.utcnow()
+        results = []
+        try:
+            search_manager = ExpertSearchIndexManager()
+            results = search_manager.search_experts_by_theme(theme, k=10, active_only=active_only)
+            logger.info(f"Theme search found {len(results)} results")
+        except Exception as search_error:
+            logger.error(f"Search execution error: {search_error}", exc_info=True)
+        
+        response_time = (datetime.utcnow() - start_time).total_seconds()
+        
+        # Format results - handle empty results gracefully
+        formatted_results = []
+        try:
+            formatted_results = [
+                ExpertSearchResult(
+                    id=str(result.get('id', 'unknown')),
+                    first_name=result.get('first_name', ''),
+                    last_name=result.get('last_name', ''),
+                    designation=result.get('designation', ''),
+                    theme=result.get('theme', ''),
+                    unit=result.get('unit', ''),
+                    contact=result.get('contact', ''),
+                    is_active=result.get('is_active', True),
+                    score=result.get('score'),
+                    bio=result.get('bio'),
+                    knowledge_expertise=result.get('knowledge_expertise', [])
+                ) for result in results
+            ]
+        except Exception as format_error:
+            logger.error(f"Result formatting error: {format_error}", exc_info=True)
+        
+        # Record search analytics if we have a connection
+        if conn and results:
+            try:
+                await record_search(conn, session_id, user_id, f"theme:{theme}", results, response_time)
+            except Exception as record_error:
+                logger.error(f"Error recording search: {record_error}", exc_info=True)
+        
+        # Generate refinement suggestions
+        refinements = {}
+        try:
+            if results:
+                refinements = search_manager.get_search_refinements(theme, results)
+        except Exception as refine_error:
+            logger.error(f"Refinements generation error: {refine_error}", exc_info=True)
+        
+        # Prepare response
+        response = SearchResponse(
+            total_results=len(formatted_results),
+            experts=formatted_results,
+            user_id=user_id,
+            session_id=session_id,
+            refinements=refinements
+        )
+        
+        return response
+        
+    except Exception as e:
+        # Catch-all for unexpected errors
+        logger.error(f"Critical error in theme search: {e}", exc_info=True)
+        
+        # Always return a valid response
+        return SearchResponse(
+            total_results=0,
+            experts=[],
+            user_id=user_id,
+            session_id=session_id,
+            refinements={
+                "filters": [],
+                "related_queries": [],
+                "expertise_areas": []
+            }
+        )
+    finally:
+        # Always close connection if opened
+        if conn:
+            conn.close()
+            logger.debug("Database connection closed")
+
+async def process_expert_designation_search(designation: str, user_id: str, active_only: bool = True) -> SearchResponse:
+    """
+    Process search for experts by designation.
+    
+    Args:
+        designation: Designation to search for
+        user_id: User identifier
+        active_only: Filter for active experts only
+    
+    Returns:
+        SearchResponse: Search results
+    """
+    logger.info(f"Processing designation search - Designation: {designation}, User: {user_id}")
+    
+    conn = None
+    session_id = str(uuid.uuid4())[:8]  # Default session ID
+    
+    try:
+        # Establish database connection
+        try:
+            conn = get_db_connection()
+            session_id = await get_or_create_session(conn, user_id)
+            logger.debug(f"Created session: {session_id}")
+        except Exception as db_error:
+            logger.error(f"Database connection error: {db_error}", exc_info=True)
+            # Continue processing with default session ID
+        
+        # Execute search with timing
+        start_time = datetime.utcnow()
+        results = []
+        try:
+            search_manager = ExpertSearchIndexManager()
+            results = search_manager.search_experts_by_designation(designation, k=10, active_only=active_only)
+            logger.info(f"Designation search found {len(results)} results")
+        except Exception as search_error:
+            logger.error(f"Search execution error: {search_error}", exc_info=True)
+        
+        response_time = (datetime.utcnow() - start_time).total_seconds()
+        
+        # Format results - handle empty results gracefully
+        formatted_results = []
+        try:
+            formatted_results = [
+                ExpertSearchResult(
+                    id=str(result.get('id', 'unknown')),
+                    first_name=result.get('first_name', ''),
+                    last_name=result.get('last_name', ''),
+                    designation=result.get('designation', ''),
+                    theme=result.get('theme', ''),
+                    unit=result.get('unit', ''),
+                    contact=result.get('contact', ''),
+                    is_active=result.get('is_active', True),
+                    score=result.get('score'),
+                    bio=result.get('bio'),
+                    knowledge_expertise=result.get('knowledge_expertise', [])
+                ) for result in results
+            ]
+        except Exception as format_error:
+            logger.error(f"Result formatting error: {format_error}", exc_info=True)
+        
+        # Record search analytics if we have a connection
+        if conn and results:
+            try:
+                await record_search(conn, session_id, user_id, f"designation:{designation}", results, response_time)
+            except Exception as record_error:
+                logger.error(f"Error recording search: {record_error}", exc_info=True)
+        
+        # Generate refinement suggestions
+        refinements = {}
+        try:
+            if results:
+                refinements = search_manager.get_search_refinements(designation, results)
+        except Exception as refine_error:
+            logger.error(f"Refinements generation error: {refine_error}", exc_info=True)
+        
+        # Prepare response
+        response = SearchResponse(
+            total_results=len(formatted_results),
+            experts=formatted_results,
+            user_id=user_id,
+            session_id=session_id,
+            refinements=refinements
+        )
+        
+        return response
+        
+    except Exception as e:
+        # Catch-all for unexpected errors
+        logger.error(f"Critical error in designation search: {e}", exc_info=True)
         
         # Always return a valid response
         return SearchResponse(
