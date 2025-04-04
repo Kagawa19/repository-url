@@ -80,18 +80,18 @@ async def predict_query(
 
 # Add these to your router file (search.py)
 
-@router.get("/advanced_search")
-async def search_expert(query: str, user_id: str, search_type: str, active_only: bool = True, k: int = 5):
+@app.get("/search/search/advanced_search")
+async def advanced_search(query: str, search_type: str, user_id: str, active_only: bool = True, k: int = 5):
     """
-    General search endpoint for experts based on different criteria (name, theme, designation).
-    
+    Advanced search endpoint to search experts based on different criteria (name, theme, or designation).
+
     Args:
         query: Search query term (name, theme, or designation).
-        user_id: User identifier.
         search_type: Type of search (name, theme, or designation).
+        user_id: User identifier.
         active_only: Filter for active experts only (default is True).
         k: Number of results to return (default is 5).
-    
+
     Returns:
         SearchResponse: Search results based on the specified search type.
     """
