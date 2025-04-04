@@ -282,6 +282,76 @@ class SearchTester:
         else:
             print("No suggestions found. Demo cannot continue.")
 
+    def advanced_search_experts(self, query: str, search_type: str, page: int = 1, page_size: int = 10) -> Dict[str, Any]:
+        """
+        Perform an advanced search for experts with specific search type.
+        
+        Args:
+            query: Search term
+            search_type: Type of search ('name', 'theme', or 'designation')
+            page: Page number for pagination
+            page_size: Number of results per page
+        
+        Returns:
+            Dictionary of search results
+        """
+        # Updated endpoint to match your API structure for advanced search
+        url = f"{self.base_url}/search/search/experts/advanced_search/{query}"
+        params = {
+            "search_type": search_type,
+            "page": page,
+            "page_size": page_size
+        }
+        
+        try:
+            response = requests.get(url, headers=self.headers, params=params)
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"Error in advanced search: {response.status_code}")
+                logger.error(response.text)
+                return {}
+        except Exception as e:
+            logger.error(f"Exception in advanced search: {str(e)}")
+            return {}
+
+    def advanced_search_demo(self, initial_query: str = "health"):
+        """
+        Demonstration of advanced search across different search types.
+        """
+        print("\n=== APHRC Advanced Search Demo ===\n")
+        
+        # List of search types to demonstrate
+        search_types = ["name", "theme", "designation"]
+        
+        for search_type in search_types:
+            print(f"\nPerforming advanced search with query: '{initial_query}', Type: {search_type}")
+            
+            # Perform advanced search
+            search_start = time.time()
+            results = self.advanced_search_experts(initial_query, search_type)
+            search_time = time.time() - search_start
+            
+            print(f"Advanced Search completed in {search_time:.2f} seconds")
+            
+            # Display results
+            if results:
+                print(f"\nAdvanced Search Results (Type: {search_type}):")
+                self.display_search_results(results)
+                
+                # Display refinements if available
+                refinements = results.get("refinements")
+                if refinements:
+                    print("\nRefinements:")
+                    self.display_refinements(refinements)
+            else:
+                print(f"No results found for {search_type} search.")
+            
+            # Add a small pause between searches
+            time.sleep(1)
+
+# Modify the main function to include advanced search demo option
 def main():
     """Main function for testing."""
     tester = SearchTester(BASE_URL, USER_ID)
@@ -293,14 +363,16 @@ def main():
         print("\nSelect test mode:")
         print("1. Interactive search")
         print("2. Demo search")
-        choice = input("Enter choice (1 or 2): ")
-        mode = "interactive" if choice == "1" else "demo"
+        print("3. Advanced search demo")
+        choice = input("Enter choice (1, 2, or 3): ")
+        mode = "interactive" if choice == "1" else "demo" if choice == "2" else "advanced"
     
     if mode == "interactive":
         tester.interactive_search()
-    else:
+    elif mode == "demo":
         query = os.environ.get("SEARCH_DEMO_QUERY", "health")
         tester.demo_search(query)
+    else:
+        query = os.environ.get("SEARCH_DEMO_QUERY", "health")
+        tester.advanced_search_demo(query)
 
-if __name__ == "__main__":
-    main()

@@ -84,7 +84,7 @@ async def predict_query(
 async def advanced_search(
     query: str, 
     search_type: str, 
-    request: Request,
+    request: Request,te
     user_id: str = Depends(get_user_id),
     active_only: bool = True, 
     k: int = 5

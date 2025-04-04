@@ -14,6 +14,8 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.callbacks import AsyncIteratorCallbackHandler
 from ai_services_api.services.search.indexing.redis_index_manager import ExpertRedisIndexManager
 
+
+
 logger = logging.getLogger(__name__)
 
 class QueryIntent(Enum):
@@ -196,16 +198,13 @@ class GeminiLLMManager:
         
         return "\n\n".join(context_parts)
 
-    async def get_relevant_publications(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """
-        Retrieve relevant publications from Redis based on the query.
-        Falls back gracefully if Redis is unavailable.
-        """
+    async def get_relevant_publications(self, query: str, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Enhanced publication search with suggestions"""
         try:
             if not self.redis_manager:
                 logger.warning("Redis manager not available, cannot retrieve publications")
-                return []
-                
+                return [], "Our publication database is currently unavailable. Please try again later."
+            
             # Check Redis for any keys with DOIs
             try:
                 all_keys = []
@@ -216,19 +215,16 @@ class GeminiLLMManager:
                     if cursor == 0:
                         break
                 
-                # Check if any publications have DOIs
                 doi_count = 0
-                for key in all_keys[:20]:  # Sample the first 20
+                for key in all_keys[:20]:
                     metadata = self.redis_manager.redis_text.hgetall(key)
                     if metadata.get('doi') and metadata.get('doi').strip() and metadata.get('doi') != 'None':
                         doi_count += 1
                         logger.info(f"Found publication with DOI: {metadata.get('doi')} - Title: {metadata.get('title')}")
-                
                 logger.info(f"Found {doi_count} publications with DOIs in sample of {min(20, len(all_keys))}")
             except Exception as e:
                 logger.error(f"Error checking for DOIs: {e}")
             
-            # Get all resource keys from Redis
             publication_keys = []
             try:
                 cursor = 0
@@ -243,22 +239,18 @@ class GeminiLLMManager:
                 
                 if not publication_keys:
                     logger.warning("No publications found in Redis database")
-                    return []
+                    return [], "No publications found in the database."
             except Exception as e:
                 logger.error(f"Error scanning Redis keys: {e}")
-                return []
+                return [], "Error scanning publication records."
             
-            # Direct keyword matching for simplicity (instead of embedding comparison)
-            # This approach doesn't require the embedding model
             query_keywords = set(re.findall(r'\b\w+\b', query.lower()))
             results = []
             
-            # Add special handling for DOI queries
             doi_pattern = r'\b(10\.\d+\/[a-zA-Z0-9./-]+)\b'
             url_doi_pattern = r'https?://doi\.org/(10\.\d+\/[a-zA-Z0-9./-]+)\b'
             doi_matches = re.findall(doi_pattern, query) + [m for m in re.findall(url_doi_pattern, query)]
             
-            # If the query contains a DOI, prioritize exact DOI matches
             if doi_matches:
                 logger.info(f"Found DOI in query: {doi_matches[0]}")
                 for key in publication_keys:
@@ -266,17 +258,12 @@ class GeminiLLMManager:
                         metadata = self.redis_manager.redis_text.hgetall(key)
                         doi = metadata.get('doi', '')
                         if doi:
-                            # Extract DOI from URL if needed
                             if doi.startswith('https://doi.org/'):
                                 extracted_doi = doi.replace('https://doi.org/', '')
                             else:
                                 extracted_doi = doi
-                                
-                            # Check for a match
                             if any(d in doi or d == extracted_doi for d in doi_matches):
-                                metadata['match_score'] = 100  # Very high score for direct DOI match
-                                
-                                # Parse JSON fields for return
+                                metadata['match_score'] = 100
                                 if metadata.get('authors'):
                                     try:
                                         metadata['authors'] = json.loads(metadata.get('authors', '[]'))
@@ -287,37 +274,30 @@ class GeminiLLMManager:
                                         metadata['domains'] = json.loads(metadata.get('domains', '[]'))
                                     except:
                                         metadata['domains'] = []
-                                        
                                 results.append(metadata)
                                 logger.info(f"Found exact DOI match: {metadata.get('doi')}")
                     except Exception as e:
                         logger.error(f"Error processing publication {key} for DOI match: {e}")
                         continue
             
-            # If we already have exact DOI matches, return those
             if results:
                 logger.info(f"Returning {len(results)} exact DOI matches")
-                return results[:limit]
+                return results[:limit], None
             
-            # Otherwise, proceed with keyword matching
             for key in publication_keys:
                 try:
-                    resource_id = key.split(':')[-1]  # Extract ID from key
+                    resource_id = key.split(':')[-1]
                     metadata = self.redis_manager.redis_text.hgetall(key)
-                    
                     if not metadata:
                         continue
-                        
-                    # Simple scoring based on keyword matches
+                    
                     score = 0
                     title = metadata.get('title', '').lower()
                     summary = metadata.get('summary_snippet', '').lower()
                     field = metadata.get('field', '').lower()
                     
-                    # Parse JSON fields
                     authors = []
                     domains = []
-                    
                     if metadata.get('authors'):
                         try:
                             authors_data = json.loads(metadata.get('authors', '[]'))
@@ -327,7 +307,6 @@ class GeminiLLMManager:
                                 authors = [str(v).lower() for v in authors_data.values() if v]
                         except json.JSONDecodeError:
                             authors = []
-                    
                     if metadata.get('domains'):
                         try:
                             domains_data = json.loads(metadata.get('domains', '[]'))
@@ -335,32 +314,28 @@ class GeminiLLMManager:
                         except json.JSONDecodeError:
                             domains = []
                     
-                    # Score each field
                     for keyword in query_keywords:
                         if keyword in title:
-                            score += 3  # Title matches are most important
+                            score += 3
                         if keyword in summary:
-                            score += 2  # Summary matches are valuable
+                            score += 2
                         if keyword in field:
-                            score += 2  # Field matches are valuable
+                            score += 2
                         if any(keyword in author for author in authors):
-                            score += 1  # Author matches
+                            score += 1
                         if any(keyword in domain for domain in domains):
-                            score += 1  # Domain matches
+                            score += 1
                     
-                    # Add publication year matching
                     year_matches = re.findall(r'\b(19|20)\d{2}\b', query)
                     pub_year = metadata.get('publication_year', '')
                     if year_matches and pub_year in year_matches:
-                        score += 3  # Exact year match is valuable
+                        score += 3
                     
-                    # Bonus for having DOIs
                     if metadata.get('doi') and metadata.get('doi').strip() and metadata.get('doi') != 'None':
-                        score += 5  # Bonus for having a DOI
+                        score += 5
                     
                     if score > 0:
                         metadata['match_score'] = score
-                        # Parse JSON fields for return
                         if metadata.get('authors'):
                             try:
                                 metadata['authors'] = json.loads(metadata.get('authors', '[]'))
@@ -371,27 +346,46 @@ class GeminiLLMManager:
                                 metadata['domains'] = json.loads(metadata.get('domains', '[]'))
                             except:
                                 metadata['domains'] = []
-                                
                         results.append(metadata)
-                        
                 except Exception as e:
                     logger.error(f"Error processing publication {key}: {e}")
                     continue
             
-            # Sort by score and limit results
             sorted_results = sorted(results, key=lambda x: x.get('match_score', 0), reverse=True)
             top_publications = sorted_results[:limit]
             
-            # Log what we found
             with_doi = [p for p in top_publications if p.get('doi') and p.get('doi').strip() and p.get('doi') != 'None']
             logger.info(f"Found {len(top_publications)} relevant publications for query")
             logger.info(f"Of these, {len(with_doi)} have DOIs")
-            
-            return top_publications
-            
+
+            if not top_publications:
+                # Generate suggestions for empty results
+                suggestions = self._generate_search_suggestions(query)
+                return [], suggestions
+
+            return top_publications, None
+        
         except Exception as e:
-            logger.error(f"Error retrieving publications from Redis: {e}")
-            return []
+            logger.error(f"Error retrieving publications: {e}")
+            return [], "We encountered an error searching publications. Try simplifying your query."
+
+        
+    def _generate_search_suggestions(self, query: str) -> str:
+        """Generate search suggestions for empty results"""
+        suggestions = [
+            "Try different keywords or more general terms",
+            "Search by publication year (e.g., 'studies from 2020-2022')",
+            "Include author names if known",
+            "Browse our publications by topic at [APHRC Publications](https://aphrc.org/publications)"
+        ]
+        
+        # Simple keyword analysis
+        if len(query.split()) > 4:
+            suggestions.insert(0, "Try a shorter, more focused query")
+        if any(word in query.lower() for word in ["recent", "new", "latest"]):
+            suggestions.append("For recent work, try 'publications from the last 3 years'")
+        
+        return "No exact matches found. Suggestions:\n- " + "\n- ".join(suggestions)
 
     def _create_system_message(self, intent: QueryIntent) -> str:
         """
@@ -577,12 +571,14 @@ class GeminiLLMManager:
             }
         }
     
-    async def detect_intent(self, message: str) -> Tuple[QueryIntent, float]:
-        """Detect intent of the message with confidence scoring."""
+    async def detect_intent(self, message: str, is_followup: bool = False) -> Tuple[QueryIntent, float, Optional[str]]:
+        """Enhanced intent detection with clarification support."""
         try:
             message = message.lower()
             intent_scores = {intent: 0.0 for intent in QueryIntent}
+            matched_keywords = {intent: [] for intent in QueryIntent}
             
+            # Score patterns and collect matched keywords
             for intent, config in self.intent_patterns.items():
                 score = 0.0
                 matches = 0
@@ -591,20 +587,49 @@ class GeminiLLMManager:
                     if re.search(pattern, message):
                         score += weight
                         matches += 1
+                        matched_keywords[intent].append(pattern)
                 
                 if matches > 0:
                     intent_scores[intent] = score / matches
             
-            max_intent = max(intent_scores.items(), key=lambda x: x[1])
+            max_intent, max_score = max(intent_scores.items(), key=lambda x: x[1])
+            clarification = None
             
-            if max_intent[1] >= self.intent_patterns.get(max_intent[0], {}).get('threshold', 0.6):
-                return max_intent[0], max_intent[1]
-            
-            return QueryIntent.GENERAL, 0.0
-            
+            # Generate clarification only for initial queries (not followups)
+            if not is_followup:
+                # Borderline confidence case
+                if 0.4 <= max_score < 0.6:
+                    top_intents = sorted(intent_scores.items(), key=lambda x: x[1], reverse=True)[:2]
+                    if len(top_intents) > 1 and top_intents[0][1] - top_intents[1][1] < 0.2:
+                        clarification = (
+                            f"I found both '{top_intents[0][0].value}' and '{top_intents[1][0].value}' relevant. "
+                            f"Are you looking for {self._get_intent_examples(top_intents[0][0])} or "
+                            f"{self._get_intent_examples(top_intents[1][0])}?"
+                        )
+                
+                # Low confidence case
+                elif max_score < 0.4:
+                    clarification = (
+                        "Could you clarify what you're looking for? For example:\n"
+                        "- Publications: 'Find papers about maternal health'\n"
+                        "- Navigation: 'Where can I find research datasets?'"
+                    )
+
+            # Return only if score meets threshold
+            if max_score >= self.intent_patterns.get(max_intent, {}).get('threshold', 0.6):
+                return max_intent, max_score, clarification
+
+            return QueryIntent.GENERAL, max_score, clarification
+
         except Exception as e:
-            logger.error(f"Error in intent detection: {e}", exc_info=True)
-            return QueryIntent.GENERAL, 0.0
+            # Safe fallback and error logging
+            logger.error(f"Intent detection failed: {e}", exc_info=True)
+            return QueryIntent.GENERAL, 0.0, "Sorry, I couldn't understand your request. Can you rephrase it?"
+
+        finally:
+            # Optional cleanup or logging
+            logger.debug(f"Intent detection executed for message: '{message}' (follow-up: {is_followup})")
+
 
     def create_context(self, relevant_data: List[Dict]) -> str:
         """
@@ -671,29 +696,35 @@ class GeminiLLMManager:
         if len(self.context_window) > self.max_context_items:
             self.context_window.pop(0)
 
-    async def generate_async_response(self, message: str) -> AsyncGenerator[Dict[str, Any], None]:
-        """Generate async response with real publication data."""
+  
+    async def generate_async_response(self, message: str, conversation_history: Optional[List[Dict]] = None) -> AsyncGenerator[Dict[str, Any], None]:
+        """Enhanced response generation with conversation awareness"""
         start_time = time.time()
         logger.info(f"Starting async response generation for message: {message}")
         
         try:
-            # Log message preprocessing
-            logger.debug("Preprocessing message")
-            processed_message = message
+            # Detect intent with conversation context
+            is_followup = conversation_history is not None and len(conversation_history) > 0
+            logger.info(f"Follow-up detected: {is_followup}")
             
-            # Detect intent
-            logger.info("Detecting query intent")
+            # Detect intent with conversation context, handling follow-ups
             try:
-                intent_result = await self.detect_intent(processed_message)
-                # Skip quality analysis to avoid extra API calls
-                initial_quality_data = self._get_default_quality()
+                intent_result, clarification = await self.detect_intent(message, is_followup)
+                intent, confidence = intent_result
+                
+                # Handle clarification questions first
+                if clarification:
+                    logger.info(f"Clarification needed: {clarification}")
+                    yield {'chunk': clarification, 'is_metadata': False}
+                    return
+                
             except Exception as task_error:
                 logger.error(f"Error in task processing: {task_error}", exc_info=True)
-                intent_result = (QueryIntent.GENERAL, 0.0)
-                initial_quality_data = self._get_default_quality()
+                intent = QueryIntent.GENERAL
+                confidence = 0.0
+                clarification = None
             
             # Log intent results
-            intent, confidence = intent_result
             logger.info(f"Intent detected: {intent} (Confidence: {confidence})")
             
             # Initialize default context
@@ -704,14 +735,19 @@ class GeminiLLMManager:
                 logger.info("Publication intent detected, retrieving real publication data")
                 try:
                     # Get relevant publications from Redis
-                    publications = await self.get_relevant_publications(processed_message)
+                    publications, suggestion = await self.get_relevant_publications(message)
+                    
+                    # Handle no publications found, but offer suggestion if available
+                    if not publications and suggestion:
+                        logger.info("No publications found, but suggestion available")
+                        yield {'chunk': suggestion, 'is_metadata': False}
+                        return
                     
                     if publications:
                         # Format publications into readable context
                         context = self.format_publication_context(publications)
                         logger.info(f"Retrieved and formatted {len(publications)} publications for context")
                     else:
-                        # No publications found
                         context = "I don't have specific publications on this topic. I can provide general information about APHRC's research."
                         logger.info("No relevant publications found in Redis")
                 except Exception as pub_error:
@@ -720,14 +756,14 @@ class GeminiLLMManager:
             
             # Manage context window
             logger.debug("Managing context window")
-            self.manage_context_window({'text': context, 'query': processed_message})
+            self.manage_context_window({'text': context, 'query': message})
             
             # Prepare messages for model
             logger.debug("Preparing system and human messages")
             system_message = self._create_system_message(intent)
             messages = [
                 SystemMessage(content=system_message),
-                HumanMessage(content=f"Context: {context}\n\nQuery: {processed_message}")
+                HumanMessage(content=f"Context: {context}\n\nQuery: {message}")
             ]
             
             # Initialize response tracking
@@ -744,10 +780,7 @@ class GeminiLLMManager:
                     
                     if not response_data.generations or not response_data.generations[0]:
                         logger.warning("Empty response received from model")
-                        yield {
-                            'chunk': "I'm sorry, but I couldn't generate a response at this time.",
-                            'is_metadata': False
-                        }
+                        yield {'chunk': "I'm sorry, but I couldn't generate a response at this time.", 'is_metadata': False}
                         return
                     
                     # Process the main response content
@@ -755,10 +788,7 @@ class GeminiLLMManager:
                     
                     if not content:
                         logger.warning("Empty content received from model")
-                        yield {
-                            'chunk': "I'm sorry, but I couldn't generate a response at this time.",
-                            'is_metadata': False
-                        }
+                        yield {'chunk': "I'm sorry, but I couldn't generate a response at this time.", 'is_metadata': False}
                         return
                     
                     # Process the content in chunks for streaming-like behavior
@@ -781,17 +811,11 @@ class GeminiLLMManager:
                         # Save and yield chunk
                         response_chunks.append(current_chunk)
                         logger.debug(f"Yielding chunk (length: {len(current_chunk)})")
-                        yield {
-                            'chunk': current_chunk,
-                            'is_metadata': False
-                        }
+                        yield {'chunk': current_chunk, 'is_metadata': False}
                     
                     # Prepare complete response
                     complete_response = ''.join(response_chunks)
                     logger.info(f"Complete response generated. Total length: {len(complete_response)}")
-                    
-                    # Skip second quality analysis to avoid rate limits
-                    quality_data = self._get_default_quality()
                     
                     # Yield metadata
                     logger.debug("Preparing and yielding metadata")
@@ -802,11 +826,8 @@ class GeminiLLMManager:
                             'timestamp': datetime.now().isoformat(),
                             'metrics': {
                                 'response_time': time.time() - start_time,
-                                'intent': {
-                                    'type': intent.value,
-                                    'confidence': confidence
-                                },
-                                'quality': quality_data  # Quality metrics
+                                'intent': {'type': intent.value, 'confidence': confidence},
+                                'quality': self._get_default_quality()  # Quality metrics
                             },
                             'error_occurred': False
                         }
@@ -814,19 +835,14 @@ class GeminiLLMManager:
                 except Exception as stream_error:
                     logger.error(f"Error in response processing: {stream_error}", exc_info=True)
                     error_message = "I apologize for the inconvenience. Could you please rephrase your question?"
-                    yield {
-                        'chunk': error_message,
-                        'is_metadata': False
-                    }
+                    yield {'chunk': error_message, 'is_metadata': False}
+            
             except Exception as e:
                 logger.error(f"Critical error generating response: {e}", exc_info=True)
                 error_message = "I apologize for the inconvenience. Could you please rephrase your question?"
                 
                 # Yield error chunk
-                yield {
-                    'chunk': error_message,
-                    'is_metadata': False
-                }
+                yield {'chunk': error_message, 'is_metadata': False}
                 
                 # Yield error metadata
                 yield {
@@ -842,15 +858,13 @@ class GeminiLLMManager:
                         'error_occurred': True
                     }
                 }
+        
         except Exception as e:
             logger.error(f"Critical error in generate_async_response: {e}", exc_info=True)
-            error_message = "I apologize for the inconvenience. Could you please rephrase your question."
+            error_message = "I apologize for the inconvenience. Could you please rephrase your question?"
             
             # Yield error chunk
-            yield {
-                'chunk': error_message,
-                'is_metadata': False
-            }
+            yield {'chunk': error_message, 'is_metadata': False}
             
             # Yield error metadata
             yield {
@@ -915,3 +929,47 @@ class GeminiLLMManager:
                     
             # Update last request time
             self.__class__._last_request_time = time.time()
+
+class ConversationHelper:
+    """New helper class for conversation enhancements"""
+    
+    def __init__(self, llm_manager):
+        self.llm_manager = llm_manager
+        self.summary_cache = {}
+        
+    async def generate_summary(self, conversation_id: str, turns: List[Dict]) -> str:
+        """Generate conversation summary"""
+        if conversation_id in self.summary_cache:
+            return self.summary_cache[conversation_id]
+            
+        key_points = []
+        for turn in turns[-5:]:  # Last 5 turns
+            if turn.get('intent') == QueryIntent.PUBLICATION:
+                key_points.append(f"Discussed publications about {turn.get('topics', 'various topics')}")
+            elif turn.get('intent') == QueryIntent.NAVIGATION:
+                key_points.append(f"Asked about {turn.get('section', 'website sections')}")
+        
+        summary = "Our conversation so far:\n- " + "\n- ".join(key_points[-3:])  # Last 3 points
+        self.summary_cache[conversation_id] = summary
+        return summary
+        
+    def get_suggested_questions(self, last_intent: QueryIntent) -> List[str]:
+        """Get context-aware follow-up questions"""
+        suggestions = {
+            QueryIntent.PUBLICATION: [
+                "Find more publications by the same authors",
+                "See related publications from recent years",
+                "Get citation formats for these papers"
+            ],
+            QueryIntent.NAVIGATION: [
+                "Show more sections in this category",
+                "Find contact information for this department",
+                "Open this page in my browser"
+            ],
+            QueryIntent.GENERAL: [
+                "What other programs does APHRC offer?",
+                "Tell me about upcoming events",
+                "Who are the key researchers in this field?"
+            ]
+        }
+        return suggestions.get(last_intent, [])
