@@ -416,19 +416,82 @@ class GoogleAutocompletePredictor:
             self.logger.error(f"Error generating FAISS suggestions: {e}")
             return []
     
+    def _extract_partial_word(self, query: str) -> Tuple[str, str]:
+        """
+        Extract the last partial word from a query and the query prefix.
+        
+        Args:
+            query: The search query
+            
+        Returns:
+            Tuple containing (query_prefix, partial_word)
+        """
+        words = query.split()
+        if not words:
+            return "", ""
+        
+        query_prefix = " ".join(words[:-1])
+        partial_word = words[-1] if words else ""
+        
+        return query_prefix.strip(), partial_word.strip()
+
+    def _is_prefix_match(self, suggestion: str, partial_query: str) -> bool:
+        """
+        Check if suggestion matches the partial query with proper prefix matching.
+        
+        Args:
+            suggestion: The suggestion text to check
+            partial_query: The user's partial query
+            
+        Returns:
+            Boolean indicating if the suggestion is a valid prefix match
+        """
+        # Get the query prefix and the partial word being typed
+        query_prefix, partial_word = self._extract_partial_word(partial_query)
+        
+        # If the partial word is empty, any suggestion is valid
+        if not partial_word:
+            return True
+        
+        # Extract words from the suggestion
+        suggestion_words = suggestion.lower().split()
+        
+        # If query has a prefix (multiple words), make sure they match in the suggestion
+        if query_prefix:
+            # Create a prefix pattern to match
+            prefix_pattern = query_prefix.lower()
+            suggestion_prefix = " ".join(suggestion_words[:len(prefix_pattern.split())])
+            
+            # If the prefix doesn't match, reject the suggestion
+            if not suggestion_prefix.startswith(prefix_pattern):
+                return False
+        
+        # Find the word in the suggestion that should complete the partial word
+        # This handles cases where suggestion might have a different word structure
+        for suggestion_word in suggestion_words:
+            if suggestion_word.startswith(partial_word.lower()):
+                return True
+        
+        # No matching prefix found
+        return False
+
     def _execute_faiss_search(self, query_embedding: np.ndarray, k: int, partial_query: str) -> List[Dict[str, Any]]:
         """
-        Execute FAISS search for Google-like predictive search suggestions.
+        Execute FAISS search for Google-like predictive search suggestions with strict prefix matching.
         
-        This method deliberately does NOT append the partial query to suggestions,
-        instead treating the retrieved results as complete prediction options.
+        This method prioritizes suggestions that properly complete the user's current word.
         """
         try:
             # Search the FAISS index efficiently
             distances, indices = self.index.search(
                 query_embedding.astype(np.float32), 
-                min(k, self.index.ntotal)
+                min(k * 3, self.index.ntotal)  # Get more candidates for filtering
             )
+            
+            # Log the partial query for debugging
+            self.logger.debug(f"Processing search for partial query: '{partial_query}'")
+            query_prefix, partial_word = self._extract_partial_word(partial_query)
+            self.logger.debug(f"Parsed as prefix: '{query_prefix}', partial word: '{partial_word}'")
             
             # Process results
             suggestions = []
@@ -472,15 +535,12 @@ class GoogleAutocompletePredictor:
                     elif isinstance(expertise_areas, dict):
                         expertise_areas = list(expertise_areas.keys())
                     
-                    # Use expertise areas directly as predictions
-                    for expertise in expertise_areas[:2]:
-                        # Important: Do NOT append partial_query here!
-                        # Just use the expertise text directly as a prediction
+                    # Use expertise areas directly as predictions, but apply prefix matching
+                    for expertise in expertise_areas[:3]:  # Check more candidates
                         suggestion_text = expertise.lower().strip()
                         
-                        # Only add if it contains or is relevant to the partial query
-                        # This ensures predictions are related to what the user is typing
-                        if partial_query.lower() in suggestion_text or self._text_similarity(partial_query, suggestion_text) > 0.3:
+                        # Only add if it passes the prefix matching check
+                        if self._is_prefix_match(suggestion_text, partial_query):
                             if suggestion_text not in seen_texts:
                                 suggestions.append({
                                     "text": suggestion_text,
@@ -488,37 +548,55 @@ class GoogleAutocompletePredictor:
                                     "score": float(1.0 / (1.0 + distances[0][i]))
                                 })
                                 seen_texts.add(suggestion_text)
+                                
+                                if len(suggestions) >= k:
+                                    break
                 else:
                     # Without metadata, use generic research-related terms
                     # but only add a limited number of these to avoid dominating results
                     if generic_count < 5:
-                        term = prediction_terms[generic_count]
-                        generic_count += 1
+                        matched_terms = []
+                        for term in prediction_terms:
+                            if self._is_prefix_match(term, partial_query):
+                                matched_terms.append(term)
                         
-                        # Don't prepend or append partial_query, just use the term directly
-                        suggestion_text = term.lower().strip()
-                        
-                        if suggestion_text not in seen_texts:
-                            suggestions.append({
-                                "text": suggestion_text,
-                                "source": "generic_prediction",
-                                "score": float(0.8 / (1.0 + distances[0][i]))
-                            })
-                            seen_texts.add(suggestion_text)
+                        if matched_terms:
+                            term = matched_terms[generic_count % len(matched_terms)]
+                            generic_count += 1
+                            
+                            # Don't prepend or append partial_query, just use the term directly
+                            suggestion_text = term.lower().strip()
+                            
+                            if suggestion_text not in seen_texts:
+                                suggestions.append({
+                                    "text": suggestion_text,
+                                    "source": "generic_prediction",
+                                    "score": float(0.8 / (1.0 + distances[0][i]))
+                                })
+                                seen_texts.add(suggestion_text)
                 
                 # Stop if we have enough suggestions
                 if len(suggestions) >= k:
                     break
             
-            # If we don't have enough suggestions, add a few generic ones
-            if len(suggestions) < min(3, k) and generic_count < len(prediction_terms):
-                for term in prediction_terms[generic_count:generic_count+3]:
-                    suggestion_text = term.lower().strip()
+            # If we don't have enough suggestions, try to generate appropriate completions
+            # for the partial word the user is typing
+            if len(suggestions) < min(3, k):
+                # Get completions that start with the current partial word
+                completions = self._generate_prefix_completions(partial_word)
+                
+                # For each completion, create a suggestion that completes the current query
+                for completion in completions:
+                    if query_prefix:
+                        suggestion_text = f"{query_prefix} {completion}".lower().strip()
+                    else:
+                        suggestion_text = completion.lower().strip()
+                    
                     if suggestion_text not in seen_texts and len(suggestions) < k:
                         suggestions.append({
                             "text": suggestion_text,
-                            "source": "generic_fallback",
-                            "score": 0.7
+                            "source": "prefix_completion",
+                            "score": 0.75
                         })
                         seen_texts.add(suggestion_text)
             
@@ -526,6 +604,76 @@ class GoogleAutocompletePredictor:
         except Exception as e:
             self.logger.error(f"Error in FAISS search execution: {e}")
             return []
+
+    def _generate_prefix_completions(self, partial_word: str) -> List[str]:
+        """
+        Generate completions for a partial word.
+        
+        Args:
+            partial_word: The partial word to complete
+            
+        Returns:
+            List of possible completions
+        """
+        if not partial_word:
+            return []
+        
+        # Common word completions based on research domain
+        common_words = {
+            "m": ["methods", "maternal", "mortality", "monitoring", "management"],
+            "n": ["newborn", "neonatal", "nutrition", "nurses", "network"],
+            "c": ["children", "care", "clinical", "community", "covid"],
+            "h": ["health", "hospital", "healthcare", "hiv", "hygiene"],
+            "d": ["data", "development", "disease", "determinants", "delivery"],
+            "r": ["research", "rates", "risk", "reproductive", "resources"],
+            "p": ["public", "policy", "prevention", "primary", "pandemic"],
+            "a": ["analysis", "assessment", "adolescent", "antenatal", "approach"],
+            "e": ["evaluation", "evidence", "education", "epidemiology", "equity"],
+            "i": ["intervention", "impact", "infant", "implementation", "infection"],
+            "s": ["study", "system", "services", "survey", "statistics"],
+            "t": ["treatment", "training", "tools", "transmission", "testing"],
+            "f": ["framework", "funding", "factors", "facilities", "food"],
+            "w": ["women", "water", "workers", "wellbeing", "workflow"],
+            "q": ["quality", "qualitative", "quantitative", "questionnaire"],
+            "v": ["vaccine", "virus", "vulnerable", "validation", "vector"],
+            "o": ["outcomes", "outreach", "organization", "outbreak", "observation"],
+            "b": ["birth", "behavior", "barriers", "baseline", "burden"],
+            "g": ["guidelines", "global", "gender", "genomics", "growth"],
+            "j": ["journal", "joint", "justice"],
+            "k": ["knowledge", "key"],
+            "l": ["long-term", "leadership", "laboratory", "logistics"],
+            "u": ["universal", "utilization", "urban", "undernutrition"],
+            "x": ["x-ray"],
+            "y": ["youth", "year"],
+            "z": ["zoonotic", "zones"]
+        }
+        
+        # First, check if we have predefined completions for this prefix
+        first_char = partial_word[0].lower() if partial_word else ""
+        completions = []
+        
+        if first_char in common_words:
+            # Filter completions that start with our partial word
+            completions = [word for word in common_words[first_char] 
+                        if word.startswith(partial_word.lower())]
+        
+        # Add domain-specific completions for common partial words
+        if partial_word.lower() == "new":
+            completions = ["newborn", "new research", "new methods", "new approaches"]
+        elif partial_word.lower() == "mat":
+            completions = ["maternal", "maternity", "matching", "materials"]
+        elif partial_word.lower() == "hea":
+            completions = ["health", "healthcare", "healthy", "healing"]
+        elif partial_word.lower() == "dat":
+            completions = ["data", "data collection", "database", "dates"]
+        elif partial_word.lower() == "res":
+            completions = ["research", "resource", "results", "response"]
+        elif partial_word.lower() == "ana":
+            completions = ["analysis", "analytical", "anatomy", "anaphylaxis"]
+        elif partial_word.lower() == "chi":
+            completions = ["children", "child", "childhood", "childbirth"]
+        
+        return completions[:5]  # Limit to 5 completions
         
     def _text_similarity(self, text1, text2):
         """Simple text similarity measure to check relevance."""

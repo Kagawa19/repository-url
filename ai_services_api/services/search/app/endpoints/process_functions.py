@@ -152,7 +152,7 @@ async def process_query_prediction(partial_query: str, user_id: str) -> Predicti
     """
     Enhanced query prediction using Google Autocomplete API with caching
     
-    Args:
+    Args:_e
         partial_query (str): Partial search query
         user_id (str): User identifier
     
