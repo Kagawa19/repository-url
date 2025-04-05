@@ -71,20 +71,6 @@ class InteractiveSearchTester:
             logger.error(f"Exception getting predictions: {str(e)}")
             return []
     
-    def normal_search(self, query: str) -> Dict[str, Any]:
-        """Perform a normal search."""
-        url = f"{self.base_url}/search/search/experts/search/{query}"
-        try:
-            response = requests.get(url, headers=self.headers)
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logger.error(f"Error in normal search: {response.status_code}")
-                return {}
-        except Exception as e:
-            logger.error(f"Exception in normal search: {str(e)}")
-            return {}
     def get_advanced_predictions(self, partial_query: str, search_type: str) -> List[str]:
         """
         Get advanced predictions with a specific search type.
@@ -105,15 +91,56 @@ class InteractiveSearchTester:
         try:
             response = requests.get(url, headers=self.headers, params=params)
             
+            # Log the full request URL for debugging
+            logger.info(f"Advanced prediction request URL: {response.request.url}")
+            
             if response.status_code == 200:
                 data = response.json()
+                # Log the response to see what's being returned
+                logger.info(f"Got advanced predictions: {data.get('predictions', [])}")
                 return data.get("predictions", [])
             else:
                 logger.error(f"Error getting advanced predictions: {response.status_code}")
+                logger.error(f"Response: {response.text}")
                 return []
         except Exception as e:
             logger.error(f"Exception getting advanced predictions: {str(e)}")
             return []
+    
+    def normal_search(self, query: str) -> Dict[str, Any]:
+        """Perform a normal search."""
+        url = f"{self.base_url}/search/search/experts/search/{query}"
+        try:
+            response = requests.get(url, headers=self.headers)
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"Error in normal search: {response.status_code}")
+                return {}
+        except Exception as e:
+            logger.error(f"Exception in normal search: {str(e)}")
+            return {}
+
+    def advanced_search(self, query: str, search_type: str) -> Dict[str, Any]:
+        """Perform an advanced search with a specific search type."""
+        url = f"{self.base_url}/search/search/advanced_search/{query}"
+        
+        params = {
+            "search_type": search_type
+        }
+        
+        try:
+            response = requests.get(url, headers=self.headers, params=params)
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"Error in advanced search: {response.status_code}")
+                return {}
+        except Exception as e:
+            logger.error(f"Exception in advanced search: {str(e)}")
+            return {}
     
     def display_search_results(self, results: Dict[str, Any]):
         """Display search results."""
@@ -224,26 +251,6 @@ class InteractiveSearchTester:
         except KeyboardInterrupt:
             print("\nSearch interrupted. Returning to the main menu.")
             time.sleep(1)
-    
-    def advanced_search(self, query: str, search_type: str) -> Dict[str, Any]:
-        """Perform an advanced search with a specific search type."""
-        url = f"{self.base_url}/search/search/advanced_search/{query}"
-        
-        params = {
-            "search_type": search_type
-        }
-        
-        try:
-            response = requests.get(url, headers=self.headers, params=params)
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logger.error(f"Error in advanced search: {response.status_code}")
-                return {}
-        except Exception as e:
-            logger.error(f"Exception in advanced search: {str(e)}")
-            return {}
 
     def run_advanced_search(self):
         """Run an advanced search with choice of search type."""
@@ -308,17 +315,14 @@ class InteractiveSearchTester:
                 if not partial_query:
                     continue
                 
-                # Get both standard and advanced predictions
+                # ONLY use the advanced predictions endpoint for context-specific searches
                 print("\nGetting predictions...")
-                standard_predictions = self.get_predictions(partial_query, context_type=field_type)
-                advanced_predictions = self.get_advanced_predictions(partial_query, search_type=field_type)
+                predictions = self.get_advanced_predictions(partial_query, search_type=field_type)
+                logger.info(f"Advanced prediction request for '{partial_query}' with type '{field_type}'")
                 
-                # Combine predictions, removing duplicates while preserving order
-                all_predictions = list(dict.fromkeys(standard_predictions + advanced_predictions))
-                
-                if all_predictions:
+                if predictions:
                     print("\nPredictions:")
-                    for i, pred in enumerate(all_predictions[:MAX_SUGGESTIONS], 1):
+                    for i, pred in enumerate(predictions[:MAX_SUGGESTIONS], 1):
                         print(f"{i}. {pred}")
                     
                     # Ask if user wants to select a prediction
@@ -326,8 +330,8 @@ class InteractiveSearchTester:
                     
                     if selection.strip() and selection.isdigit():
                         idx = int(selection) - 1
-                        if 0 <= idx < len(all_predictions) and idx < MAX_SUGGESTIONS:
-                            partial_query = all_predictions[idx]
+                        if 0 <= idx < len(predictions) and idx < MAX_SUGGESTIONS:
+                            partial_query = predictions[idx]
                             print(f"Selected: {partial_query}")
                     break
                 else:
@@ -342,8 +346,6 @@ class InteractiveSearchTester:
             print("\nInput canceled.")
             time.sleep(1)
             return None
-    
-    
 
 # Main execution
 if __name__ == "__main__":

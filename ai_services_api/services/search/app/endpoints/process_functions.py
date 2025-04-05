@@ -335,9 +335,9 @@ async def process_advanced_query_prediction(
     limit: int = 10
 ) -> PredictionResponse:
     """
-    Process advanced query prediction with context-specific suggestions.
-    This function directly queries the database for context-aware predictions
-    instead of relying on the general process_query_prediction function.
+    Process advanced query prediction with context-specific suggestions using FAISS indexes.
+    This function leverages the ExpertSearchIndexManager to get suggestions from indexes
+    rather than direct database queries.
     
     Args:
         partial_query: Partial query to predict
@@ -363,9 +363,10 @@ async def process_advanced_query_prediction(
         # Try to get from cache first
         predictions = []
         confidence_scores = []
+        cache_key = f"advanced_idx_predict:{context or ''}:{partial_query}"
+        
         if redis:
             try:
-                cache_key = f"advanced_predict:{context or ''}:{partial_query}"
                 cached_result = await redis.get(cache_key)
                 
                 if cached_result:
@@ -376,68 +377,153 @@ async def process_advanced_query_prediction(
             except Exception as cache_error:
                 logger.error(f"Cache retrieval error: {cache_error}", exc_info=True)
         
-        # If not in cache, query database based on context
+        # If not in cache, use the ExpertSearchIndexManager to get predictions
         if not predictions:
             try:
-                conn = get_db_connection()
+                # Create search manager
+                from ai_services_api.services.search.indexing.index_creator import ExpertSearchIndexManager
+                search_manager = ExpertSearchIndexManager()
                 
-                # For each context type, use a specific SQL query to get relevant predictions
+                # Use the appropriate index-based search method based on context
                 if context == "name":
-                    cur = conn.cursor()
-                    cur.execute("""
-                        SELECT 
-                            first_name || ' ' || last_name AS full_name,
-                            1.0 - (POSITION(%s IN LOWER(first_name || ' ' || last_name)) * 0.1) AS score
-                        FROM experts_expert
-                        WHERE LOWER(first_name || ' ' || last_name) LIKE LOWER(%s)
-                        ORDER BY score DESC
-                        LIMIT %s
-                    """, (partial_query.lower(), f"%{partial_query.lower()}%", limit))
+                    # Use the name index search
+                    results = search_manager.search_experts_by_name(
+                        partial_query, 
+                        k=limit, 
+                        active_only=True, 
+                        min_score=0.1
+                    )
                     
-                    results = cur.fetchall()
-                    predictions = [r[0] for r in results]
-                    confidence_scores = [float(r[1]) for r in results]
-                    
+                    # Extract names and scores
+                    for result in results:
+                        full_name = f"{result.get('first_name', '')} {result.get('last_name', '')}".strip()
+                        if full_name:
+                            predictions.append(full_name)
+                            confidence_scores.append(float(result.get('score', 0.5)))
+                
                 elif context == "designation":
-                    cur = conn.cursor()
-                    cur.execute("""
-                        SELECT 
-                            designation,
-                            1.0 - (POSITION(%s IN LOWER(designation)) * 0.1) AS score
-                        FROM experts_expert
-                        WHERE LOWER(designation) LIKE LOWER(%s)
-                        GROUP BY designation
-                        ORDER BY score DESC
-                        LIMIT %s
-                    """, (partial_query.lower(), f"%{partial_query.lower()}%", limit))
+                    # Use the designation index search
+                    results = search_manager.search_experts_by_designation(
+                        partial_query, 
+                        k=limit*3, 
+                        active_only=True, 
+                        min_score=0.1
+                    )
                     
-                    results = cur.fetchall()
-                    predictions = [r[0] for r in results]
-                    confidence_scores = [float(r[1]) for r in results]
+                    # Extract unique designations with scores
+                    unique_designations = {}
+                    for result in results:
+                        designation = result.get('designation', '')
+                        if designation and designation not in unique_designations:
+                            unique_designations[designation] = float(result.get('score', 0.5))
                     
+                    # Convert to lists
+                    predictions = list(unique_designations.keys())
+                    confidence_scores = list(unique_designations.values())
+                    
+                    # Limit to top results
+                    predictions = predictions[:limit]
+                    confidence_scores = confidence_scores[:limit]
+                
                 elif context == "theme":
-                    cur = conn.cursor()
-                    cur.execute("""
-                        SELECT 
-                            theme,
-                            1.0 - (POSITION(%s IN LOWER(theme)) * 0.1) AS score
-                        FROM experts_expert
-                        WHERE LOWER(theme) LIKE LOWER(%s)
-                        GROUP BY theme
-                        ORDER BY score DESC
-                        LIMIT %s
-                    """, (partial_query.lower(), f"%{partial_query.lower()}%", limit))
+                    # Use the theme index search
+                    results = search_manager.search_experts_by_theme(
+                        partial_query, 
+                        k=limit*3, 
+                        active_only=True, 
+                        min_score=0.1
+                    )
                     
-                    results = cur.fetchall()
-                    predictions = [r[0] for r in results]
-                    confidence_scores = [float(r[1]) for r in results]
+                    # Extract unique themes with scores
+                    unique_themes = {}
+                    for result in results:
+                        theme = result.get('theme', '')
+                        if theme and theme not in unique_themes:
+                            unique_themes[theme] = float(result.get('score', 0.5))
                     
+                    # Convert to lists
+                    predictions = list(unique_themes.keys())
+                    confidence_scores = list(unique_themes.values())
+                    
+                    # Limit to top results
+                    predictions = predictions[:limit]
+                    confidence_scores = confidence_scores[:limit]
+                
                 else:
-                    # If no specific context, fall back to regular predictor
+                    # No specific context, use general expert search
+                    results = search_manager.search_experts(
+                        partial_query, 
+                        k=limit*3, 
+                        active_only=True, 
+                        min_score=0.1
+                    )
+                    
+                    # Collect all types of results
+                    names = {}
+                    designations = {}
+                    themes = {}
+                    
+                    for result in results:
+                        # Add name
+                        full_name = f"{result.get('first_name', '')} {result.get('last_name', '')}".strip()
+                        if full_name and full_name not in names:
+                            names[full_name] = float(result.get('score', 0.5))
+                            
+                        # Add designation
+                        designation = result.get('designation', '')
+                        if designation and designation not in designations:
+                            designations[designation] = float(result.get('score', 0.5)) * 0.9  # Slightly lower priority
+                            
+                        # Add theme
+                        theme = result.get('theme', '')
+                        if theme and theme not in themes:
+                            themes[theme] = float(result.get('score', 0.5)) * 0.8  # Lower priority
+                    
+                    # Combine all results
+                    combined_items = list(names.items()) + list(designations.items()) + list(themes.items())
+                    
+                    # Sort by score (descending)
+                    combined_items.sort(key=lambda x: x[1], reverse=True)
+                    
+                    # Extract predictions and scores
+                    predictions = [item[0] for item in combined_items[:limit]]
+                    confidence_scores = [item[1] for item in combined_items[:limit]]
+                
+                # If predictions are empty, fall back to GoogleAutocompletePredictor
+                # but only for generating suggestions, not for final results
+                if not predictions:
+                    logger.info(f"No index-based predictions found, using fallback for context: {context}")
+                    
+                    # Get predictions from Google Autocomplete
                     predictor = await get_predictor()
                     suggestion_objects = await predictor.predict(partial_query, limit=limit)
-                    predictions = [s["text"] for s in suggestion_objects]
-                    confidence_scores = [s.get("score", 0.5) for s in suggestion_objects]
+                    ext_predictions = [s["text"] for s in suggestion_objects]
+                    ext_confidence_scores = [s.get("score", 0.5) for s in suggestion_objects]
+                    
+                    # Apply context-specific filtering
+                    if context and callable(getattr(search_manager, f"search_experts_by_{context}", None)):
+                        # For each predicted term, try to find matching experts
+                        for i, term in enumerate(ext_predictions[:3]):  # Check top 3 predictions
+                            search_method = getattr(search_manager, f"search_experts_by_{context}")
+                            term_results = search_method(term, k=3)
+                            
+                            if term_results:
+                                # Extract the relevant field based on context
+                                for result in term_results:
+                                    if context == "name":
+                                        item = f"{result.get('first_name', '')} {result.get('last_name', '')}".strip()
+                                    else:
+                                        item = result.get(context, '')
+                                        
+                                    if item and item not in predictions:
+                                        predictions.append(item)
+                                        # Score based on position in the fallback list
+                                        confidence_scores.append(0.9 - (0.1 * i))
+                    
+                    # If still no predictions, use the external ones directly
+                    if not predictions:
+                        predictions = ext_predictions
+                        confidence_scores = [score * 0.7 for score in ext_confidence_scores]  # Lower confidence for external results
                 
                 # Cache the results
                 if redis and predictions:
@@ -446,14 +532,14 @@ async def process_advanced_query_prediction(
                             "predictions": predictions,
                             "confidence_scores": confidence_scores
                         }
-                        await redis.setex(f"advanced_predict:{context or ''}:{partial_query}", 900, json.dumps(cache_data))
+                        await redis.setex(cache_key, 900, json.dumps(cache_data))
                     except Exception as cache_error:
                         logger.error(f"Cache storage error: {cache_error}", exc_info=True)
                         
-            except Exception as db_error:
-                logger.error(f"Database query error: {db_error}", exc_info=True)
+            except Exception as idx_error:
+                logger.error(f"Index search error: {idx_error}", exc_info=True)
                 
-                # Fallback to regular prediction if database query fails
+                # Fallback to GoogleAutocompletePredictor if index search fails
                 predictor = await get_predictor()
                 suggestion_objects = await predictor.predict(partial_query, limit=limit)
                 predictions = [s["text"] for s in suggestion_objects]
@@ -472,11 +558,36 @@ async def process_advanced_query_prediction(
             logger.error(f"Personalization error: {personalize_error}")
         
         # Generate advanced context-specific refinements
-        refinements_dict = generate_advanced_predictive_refinements(
-            partial_query, 
-            predictions, 
-            context
-        )
+        refinements_dict = None
+        try:
+            # Use the ExpertSearchIndexManager to generate refinements
+            from ai_services_api.services.search.indexing.index_creator import ExpertSearchIndexManager
+            search_manager = ExpertSearchIndexManager()
+            
+            # Get results to generate refinements
+            if context:
+                search_method = getattr(search_manager, f"search_experts_by_{context}", None)
+                if callable(search_method):
+                    results = search_method(partial_query, k=5)
+                else:
+                    results = search_manager.search_experts(partial_query, k=5)
+            else:
+                results = search_manager.search_experts(partial_query, k=5)
+            
+            # Generate refinements
+            refinements_dict = await search_manager.generate_advanced_search_refinements(
+                context or "general",
+                partial_query,
+                user_id,
+                results
+            )
+        except Exception as refine_error:
+            logger.error(f"Refinements generation error: {refine_error}", exc_info=True)
+            refinements_dict = {
+                "filters": [],
+                "related_queries": predictions[:5] if predictions else [],
+                "expertise_areas": []
+            }
         
         # Convert refinements to a flat list of strings as expected by PredictionResponse
         refinements_list = []
@@ -499,8 +610,9 @@ async def process_advanced_query_prediction(
                             refinements_list.append(str(filter_item["values"]))
         
         # Record analytics if we have a connection
-        if conn and predictions:
-            try:
+        try:
+            conn = get_db_connection()
+            if conn and predictions:
                 session_id = await get_or_create_session(conn, user_id)
                 await record_prediction(
                     conn,
@@ -510,8 +622,11 @@ async def process_advanced_query_prediction(
                     predictions,
                     confidence_scores
                 )
-            except Exception as record_error:
-                logger.error(f"Error recording prediction: {record_error}", exc_info=True)
+        except Exception as record_error:
+            logger.error(f"Error recording prediction: {record_error}", exc_info=True)
+        finally:
+            if conn:
+                conn.close()
         
         return PredictionResponse(
             predictions=predictions,
