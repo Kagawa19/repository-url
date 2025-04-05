@@ -375,7 +375,12 @@ async def process_expert_name_search(
             conn.close()
             logger.debug("Database connection closed")
 
-async def process_expert_theme_search(theme: str, user_id: str, active_only: bool = True) -> SearchResponse:
+async def process_expert_theme_search(
+        theme: str, 
+        user_id: str, 
+        active_only: bool = True, 
+        k: int = 5  # Add this parameter with a default value
+    ) -> SearchResponse:
     """
     Process search for experts by theme.
     
@@ -494,7 +499,12 @@ async def process_expert_theme_search(theme: str, user_id: str, active_only: boo
             conn.close()
             logger.debug("Database connection closed")
 
-async def process_expert_designation_search(designation: str, user_id: str, active_only: bool = True) -> SearchResponse:
+async def process_expert_designation_search(
+        designation: str, 
+        user_id: str, 
+        active_only: bool = True, 
+        k: int = 5  # Add this parameter with a default value
+    ) -> SearchResponse:
     """
     Process search for experts by designation.
     
@@ -567,7 +577,7 @@ async def process_expert_designation_search(designation: str, user_id: str, acti
         try:
             # Use the new refinement generation method
             refinements = await search_manager.generate_advanced_search_refinements(
-                search_type='designation', 
+                search_type='designation',  # Explicitly specify as a keyword argument 
                 query=designation, 
                 user_id=user_id, 
                 results=results

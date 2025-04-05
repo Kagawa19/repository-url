@@ -336,6 +336,8 @@ async def process_advanced_query_prediction(
 ) -> PredictionResponse:
     """
     Process advanced query prediction with context-specific suggestions.
+    This function directly queries the database for context-aware predictions
+    instead of relying on the general process_query_prediction function.
     
     Args:
         partial_query: Partial query to predict
@@ -354,13 +356,125 @@ async def process_advanced_query_prediction(
         if context and context not in valid_contexts[:-1]:
             raise ValueError(f"Invalid context. Must be one of {', '.join(valid_contexts[:-1])}")
         
-        # Use process_query_prediction as base method
-        base_prediction = await process_query_prediction(partial_query, user_id, context)
+        conn = None
+        session_id = str(uuid.uuid4())[:8]
+        redis = await get_redis()
         
-        # Generate context-specific refinements
+        # Try to get from cache first
+        predictions = []
+        confidence_scores = []
+        if redis:
+            try:
+                cache_key = f"advanced_predict:{context or ''}:{partial_query}"
+                cached_result = await redis.get(cache_key)
+                
+                if cached_result:
+                    logger.info(f"Cache hit for advanced query: {partial_query}")
+                    cached_data = json.loads(cached_result)
+                    predictions = cached_data.get("predictions", [])
+                    confidence_scores = cached_data.get("confidence_scores", [])
+            except Exception as cache_error:
+                logger.error(f"Cache retrieval error: {cache_error}", exc_info=True)
+        
+        # If not in cache, query database based on context
+        if not predictions:
+            try:
+                conn = get_db_connection()
+                
+                # For each context type, use a specific SQL query to get relevant predictions
+                if context == "name":
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT 
+                            first_name || ' ' || last_name AS full_name,
+                            1.0 - (POSITION(%s IN LOWER(first_name || ' ' || last_name)) * 0.1) AS score
+                        FROM experts_expert
+                        WHERE LOWER(first_name || ' ' || last_name) LIKE LOWER(%s)
+                        ORDER BY score DESC
+                        LIMIT %s
+                    """, (partial_query.lower(), f"%{partial_query.lower()}%", limit))
+                    
+                    results = cur.fetchall()
+                    predictions = [r[0] for r in results]
+                    confidence_scores = [float(r[1]) for r in results]
+                    
+                elif context == "designation":
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT 
+                            designation,
+                            1.0 - (POSITION(%s IN LOWER(designation)) * 0.1) AS score
+                        FROM experts_expert
+                        WHERE LOWER(designation) LIKE LOWER(%s)
+                        GROUP BY designation
+                        ORDER BY score DESC
+                        LIMIT %s
+                    """, (partial_query.lower(), f"%{partial_query.lower()}%", limit))
+                    
+                    results = cur.fetchall()
+                    predictions = [r[0] for r in results]
+                    confidence_scores = [float(r[1]) for r in results]
+                    
+                elif context == "theme":
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT 
+                            theme,
+                            1.0 - (POSITION(%s IN LOWER(theme)) * 0.1) AS score
+                        FROM experts_expert
+                        WHERE LOWER(theme) LIKE LOWER(%s)
+                        GROUP BY theme
+                        ORDER BY score DESC
+                        LIMIT %s
+                    """, (partial_query.lower(), f"%{partial_query.lower()}%", limit))
+                    
+                    results = cur.fetchall()
+                    predictions = [r[0] for r in results]
+                    confidence_scores = [float(r[1]) for r in results]
+                    
+                else:
+                    # If no specific context, fall back to regular predictor
+                    predictor = await get_predictor()
+                    suggestion_objects = await predictor.predict(partial_query, limit=limit)
+                    predictions = [s["text"] for s in suggestion_objects]
+                    confidence_scores = [s.get("score", 0.5) for s in suggestion_objects]
+                
+                # Cache the results
+                if redis and predictions:
+                    try:
+                        cache_data = {
+                            "predictions": predictions,
+                            "confidence_scores": confidence_scores
+                        }
+                        await redis.setex(f"advanced_predict:{context or ''}:{partial_query}", 900, json.dumps(cache_data))
+                    except Exception as cache_error:
+                        logger.error(f"Cache storage error: {cache_error}", exc_info=True)
+                        
+            except Exception as db_error:
+                logger.error(f"Database query error: {db_error}", exc_info=True)
+                
+                # Fallback to regular prediction if database query fails
+                predictor = await get_predictor()
+                suggestion_objects = await predictor.predict(partial_query, limit=limit)
+                predictions = [s["text"] for s in suggestion_objects]
+                confidence_scores = [s.get("score", 0.5) for s in suggestion_objects]
+        
+        # Personalize suggestions if possible
+        try:
+            personalized_suggestions = await personalize_suggestions(
+                [{"text": pred, "score": score} for pred, score in zip(predictions, confidence_scores)],
+                user_id, 
+                partial_query
+            )
+            predictions = [s["text"] for s in personalized_suggestions]
+            confidence_scores = [s.get("score", 0.5) for s in personalized_suggestions]
+        except Exception as personalize_error:
+            logger.error(f"Personalization error: {personalize_error}")
+        
+        # Generate advanced context-specific refinements
         refinements_dict = generate_advanced_predictive_refinements(
             partial_query, 
-            base_prediction.predictions, 
+            predictions, 
             context
         )
         
@@ -384,18 +498,36 @@ async def process_advanced_query_prediction(
                         else:
                             refinements_list.append(str(filter_item["values"]))
         
-        # Update the response with context-specific refinements
-        base_prediction.refinements = refinements_list
-        base_prediction.search_context = context
+        # Record analytics if we have a connection
+        if conn and predictions:
+            try:
+                session_id = await get_or_create_session(conn, user_id)
+                await record_prediction(
+                    conn,
+                    session_id,
+                    user_id,
+                    partial_query,
+                    predictions,
+                    confidence_scores
+                )
+            except Exception as record_error:
+                logger.error(f"Error recording prediction: {record_error}", exc_info=True)
         
-        return base_prediction
+        return PredictionResponse(
+            predictions=predictions,
+            confidence_scores=confidence_scores,
+            user_id=user_id,
+            refinements=refinements_list,
+            total_suggestions=len(predictions),
+            search_context=context
+        )
     
     except Exception as e:
         logger.error(f"Error in advanced query prediction: {e}", exc_info=True)
         # Initialize empty lists for fallback response
         predictions = []
         confidence_scores = []
-        refinements_list = []  # Ensure refinements is a list
+        refinements_list = []
         
         return PredictionResponse(
             predictions=predictions,
@@ -404,7 +536,6 @@ async def process_advanced_query_prediction(
             refinements=refinements_list,
             total_suggestions=len(predictions)
         )
-
 
 def filter_predictions_by_context(
     predictions: List[str], 

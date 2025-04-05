@@ -340,7 +340,7 @@ class GoogleAutocompletePredictor:
     async def _execute_embedding_request(self, text: str) -> Optional[List[float]]:
         """Execute the actual embedding API request with timeout."""
         response = await asyncio.wait_for(
-            self.model.embed_content_async(text),
+            self.model.generate_content_async(text),
             timeout=2.0  # 2 second timeout
         )
         
