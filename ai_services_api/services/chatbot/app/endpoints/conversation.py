@@ -97,7 +97,7 @@ async def process_chat_request(query: str, user_id: str, redis_client) -> ChatRe
         # Process message stream with timeout
         try:
             logger.info("Initiating message stream processing with 30-second timeout")
-            async with asyncio.timeout(30):
+            async with asyncio.timeout(200):
                 async for part in message_handler.send_message_async(
                     message=query,
                     user_id=user_id,

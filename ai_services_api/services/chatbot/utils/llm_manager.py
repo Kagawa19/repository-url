@@ -534,95 +534,62 @@ class GeminiLLMManager:
         return "No exact matches found. Suggestions:\n- " + "\n- ".join(suggestions)
 
     def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
-        """Format publication data into a readable, structured context for the LLM."""
+        """
+        Format publication data into a readable, structured context with minimal filtering.
+        
+        Args:
+            publications (List[Dict[str, Any]]): List of publication dictionaries to format
+        
+        Returns:
+            str: Formatted publication context
+        """
         if not publications:
-            return "No specific publications found."
-            
-        # First check if this is a list request (multiple publications)
+            return "No publications found."
+        
+        # Determine formatting based on number of publications
         is_list_format = len(publications) > 1
         
+        # Start with a header
         if is_list_format:
-            context_parts = [f"Here are {len(publications)} relevant APHRC publications:"]
+            context_parts = [f"Here are {len(publications)} publications:"]
         else:
-            context_parts = ["Here is a specific APHRC publication:"]
+            context_parts = ["Here is a publication:"]
         
-        # Count publications with DOIs for debugging and verification
-        doi_count = 0
+        # Process each publication
+        for idx, pub in enumerate(publications, 1):
+            # Create a list to hold all available publication details
+            pub_details = []
+            
+            # Add index for list format
+            prefix = f"{idx}. " if is_list_format else ""
+            
+            # Compile all available information
+            # Always try to include the field even if it might be empty
+            for key in [
+                'title', 'publication_year', 'doi', 'abstract', 
+                'summary', 'authors', 'field', 'subfield', 
+                'type', 'source', 'description'
+            ]:
+                value = pub.get(key)
+                
+                # Special handling for different types of values
+                if value:
+                    if key == 'authors':
+                        # Handle various author formats
+                        if isinstance(value, list):
+                            value = ", ".join(str(author) for author in value if author)
+                        elif isinstance(value, dict):
+                            value = ", ".join(str(v) for v in value.values() if v)
+                    
+                    # Convert to string and capitalize key for readability
+                    formatted_key = key.replace('_', ' ').title()
+                    pub_details.append(f"{prefix}{formatted_key}: {value}")
+            
+            # Join publication details and add to context
+            context_parts.append("\n".join(pub_details))
         
-        for idx, pub in enumerate(publications):
-            pub_context = []
-            
-            # Add index number for list formats
-            prefix = f"{idx + 1}. " if is_list_format else ""
-            
-            # Title - always include and make prominent
-            title = pub.get('title', 'Untitled')
-            pub_context.append(f"{prefix}Title: {title}")
-            
-            # Publication year
-            if pub.get('publication_year'):
-                pub_context.append(f"Year: {pub.get('publication_year')}")
-                
-            # DOI handling with NO transformation
-            if pub.get('doi') and pub.get('doi').strip() and pub.get('doi') != 'None':
-                doi_value = pub.get('doi').strip()
-                
-                # Log the raw DOI value for debugging
-                logger.debug(f"Raw DOI value from database: {doi_value}")
-                
-                # CRITICAL CHANGE: Use DOI exactly as it is, NO URL conversion
-                pub_context.append(f"DOI: {doi_value}")
-                
-                doi_count += 1
-                logger.info(f"Included DOI for publication: {title}")
-            else:
-                # Log when DOI is missing
-                logger.debug(f"No DOI available for publication: {title}")
-            
-            # Authors - more robust formatting
-            authors = pub.get('authors', [])
-            if authors:
-                if isinstance(authors, list):
-                    if authors:
-                        # Filter out empty/None values and join
-                        valid_authors = [str(a) for a in authors if a]
-                        if valid_authors:
-                            authors_text = ", ".join(valid_authors)
-                            pub_context.append(f"Authors: {authors_text}")
-                elif isinstance(authors, str):
-                    pub_context.append(f"Authors: {authors}")
-                elif isinstance(authors, dict):
-                    authors_text = ", ".join(str(v) for v in authors.values() if v)
-                    pub_context.append(f"Authors: {authors_text}")
-            
-            # Field and subfield
-            if pub.get('field'):
-                field_text = f"Field: {pub.get('field')}"
-                if pub.get('subfield'):
-                    field_text += f", Subfield: {pub.get('subfield')}"
-                pub_context.append(field_text)
-                
-            # Summary - with length control for multiple publications
-            if pub.get('summary_snippet'):
-                summary = pub.get('summary_snippet')
-                # Shorter summary when showing multiple publications
-                if is_list_format and len(summary) > 150:
-                    summary = summary[:147] + "..."
-                pub_context.append(f"Summary: {summary}")
-                
-            context_parts.append("\n".join(pub_context))
-        
-        # Add a note about DOIs for system understanding
-        if doi_count > 0:
-            context_parts.append(f"\nNote: {doi_count} of these publications have DOIs that should be included in any citation.")
-        else:
-            # Add explicit note when no DOIs are found
-            context_parts.append("\nNote: None of these publications have DOI links available in our database. Please refer to APHRC's publications database for more information.")
-        
-        logger.info(f"Formatted {len(publications)} publications, {doi_count} with DOIs")
-        
+        # Final formatting
         return "\n\n".join(context_parts)
-
     async def _get_expert_for_publications(self, publication_ids: List[str]) -> Dict[str, List[Dict]]:
         """Get experts associated with publications through expert-resource links"""
         publication_experts = {}
@@ -960,7 +927,7 @@ class GeminiLLMManager:
             # Use the exact same patterns as used in the _store_resource_data method
             patterns = [
                 'meta:resource:*',  # Primary pattern used by _store_resource_data
-                'meta:publication:*'  # Alternative pattern
+                'meta::*'  # Alternative pattern
             ]
             
             all_keys = []
@@ -1146,9 +1113,9 @@ class GeminiLLMManager:
             # For follow-up questions, we should be more lenient with confidence requirements
             if is_followup:
                 # Lower threshold for follow-ups to maintain conversation flow
-                threshold = 0.3
+                threshold = 0.1
             else:
-                threshold = 0.5
+                threshold = 0.1
             
             # If confidence is too low and this isn't a follow-up, consider clarification
             if max_score < threshold and not is_followup:
@@ -1340,7 +1307,7 @@ class GeminiLLMManager:
             logger.error(f"Error retrieving publications: {e}")
             return [], "We encountered an error searching publications. Try simplifying your query."
 
-        def _similar_strings(self, s1: str, s2: str) -> bool:
+    def _similar_strings(self, s1: str, s2: str) -> bool:
             """Check if two strings are similar (for fuzzy title matching)."""
             if not s1 or not s2:
                 return False
@@ -1367,7 +1334,7 @@ class GeminiLLMManager:
                 
             # For shorter titles, check percentage overlap
             overlap_ratio = len(common_words) / min(len(words1), len(words2))
-            return overlap_ratio > 0.5  # Over 50% word overlap
+            return overlap_ratio > 0.1 # Over 50% word overlap
 
 
     def create_context(self, relevant_data: List[Dict]) -> str:
