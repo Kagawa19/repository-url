@@ -14,6 +14,7 @@ from langchain.schema.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.callbacks import AsyncIteratorCallbackHandler
 from ai_services_api.services.search.indexing.redis_index_manager import ExpertRedisIndexManager
+from langchain.callbacks.streaming_aiter import AsyncIteratorCallbackHandler
 
 
 
@@ -25,25 +26,92 @@ class QueryIntent(Enum):
     PUBLICATION = "publication"
     GENERAL = "general"
 
+from langchain.callbacks.streaming_aiter import AsyncIteratorCallbackHandler
+
 class CustomAsyncCallbackHandler(AsyncIteratorCallbackHandler):
     """Custom callback handler for streaming responses."""
     
+    def __init__(self):
+        """Initialize the callback handler with a queue."""
+        super().__init__()
+        self.queue = asyncio.Queue()
+        self.finished = False
+        self.error = None
+
     async def on_llm_start(self, *args, **kwargs):
         """Handle LLM start."""
-        pass
+        self.finished = False
+        self.error = None
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+            except:
+                break
+
+    async def on_chat_model_start(self, serialized, messages, *args, **kwargs):
+        """Handle chat model start by delegating to on_llm_start."""
+        try:
+            # Extract content safely from messages which can be in various formats
+            prompts = []
+            for msg in messages:
+                if isinstance(msg, list):
+                    # If message is a list, process each item
+                    for item in msg:
+                        if hasattr(item, 'content'):
+                            prompts.append(item.content)
+                        elif isinstance(item, dict) and 'content' in item:
+                            prompts.append(item['content'])
+                        elif isinstance(item, str):
+                            prompts.append(item)
+                elif hasattr(msg, 'content'):
+                    # If message has content attribute
+                    prompts.append(msg.content)
+                elif isinstance(msg, dict) and 'content' in msg:
+                    # If message is a dict with content key
+                    prompts.append(msg['content'])
+                elif isinstance(msg, str):
+                    # If message is a string
+                    prompts.append(msg)
+            
+            # Call on_llm_start with extracted prompts
+            await self.on_llm_start(serialized, prompts, *args, **kwargs)
+        except Exception as e:
+            logger.error(f"Error in on_chat_model_start: {e}")
+            self.error = e
 
     async def on_llm_new_token(self, token: str, *args, **kwargs):
         """Handle new token."""
-        if token:
-            self.queue.put_nowait(token)
+        if token and not self.finished:
+            try:
+                await self.queue.put(token)
+            except Exception as e:
+                logger.error(f"Error putting token in queue: {e}")
+                self.error = e
 
     async def on_llm_end(self, *args, **kwargs):
         """Handle LLM end."""
-        self.queue.put_nowait(None)
+        try:
+            self.finished = True
+            await self.queue.put(None)
+        except Exception as e:
+            logger.error(f"Error in on_llm_end: {e}")
+            self.error = e
 
     async def on_llm_error(self, error: Exception, *args, **kwargs):
         """Handle LLM error."""
-        self.queue.put_nowait(f"Error: {str(error)}")
+        try:
+            self.error = error
+            self.finished = True
+            await self.queue.put(f"Error: {str(error)}")
+            await self.queue.put(None)
+        except Exception as e:
+            logger.error(f"Error in on_llm_error handler: {e}")
+
+    def reset(self):
+        """Reset the handler state."""
+        self.finished = False
+        self.error = None
+        self.queue = asyncio.Queue()
 
 class GeminiLLMManager:
     def __init__(self):
@@ -141,149 +209,101 @@ class GeminiLLMManager:
     
 
     async def get_relevant_publications(self, query: str, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        """Enhanced publication search with semantic relevance scoring and improved DOI handling"""
+        """
+        Retrieve publications from Redis with simple query matching
+        """
         try:
             if not self.redis_manager:
                 logger.warning("Redis manager not available, cannot retrieve publications")
                 return [], "Our publication database is currently unavailable. Please try again later."
             
-            # Parse specific requests for publication counts and years
+            # Get all publication keys
+            publication_keys = await self._get_all_publication_keys()
+            
+            if not publication_keys:
+                return [], "No publications found in the database."
+            
+            # Parse specific requests for publication counts
             count_pattern = r'(\d+)\s+publications?'
             count_match = re.search(count_pattern, query, re.IGNORECASE)
             requested_count = int(count_match.group(1)) if count_match else limit
             
-            year_pattern = r'(from|in|during)\s+(19|20)(\d{2})'
-            year_match = re.search(year_pattern, query, re.IGNORECASE)
-            target_year = f"20{year_match.group(3)}" if year_match and year_match.group(2) == "20" else \
-                        f"19{year_match.group(3)}" if year_match and year_match.group(2) == "19" else None
+            # Simple search across multiple fields
+            matched_publications = []
+            query_terms = set(query.lower().split())
             
-            # Check for exact DOI queries first - highest priority
-            doi_pattern = r'\b(10\.\d+\/[a-zA-Z0-9./-]+)\b'
-            url_doi_pattern = r'https?://doi\.org/(10\.\d+\/[a-zA-Z0-9./-]+)\b'
-            doi_matches = re.findall(doi_pattern, query) + [m for m in re.findall(url_doi_pattern, query)]
-            
-            if doi_matches:
-                logger.info(f"Found DOI in query: {doi_matches[0]}")
-                exact_matches = []
-                
-                # Get all publication keys for searching
-                publication_keys = await self._get_all_publication_keys()
-                if not publication_keys:
-                    return [], "No publications found in the database."
-                    
-                # Search for exact DOI matches with improved extraction
-                for key in publication_keys:
-                    try:
-                        metadata = self.redis_manager.redis_text.hgetall(key)
-                        doi = metadata.get('doi', '')
-                        if doi:
-                            # Normalize DOI format for comparison
-                            if doi.startswith('https://doi.org/'):
-                                extracted_doi = doi.replace('https://doi.org/', '')
-                            else:
-                                extracted_doi = doi
-                                
-                            if any(d in doi or d == extracted_doi for d in doi_matches):
-                                metadata['match_score'] = 100
-                                if metadata.get('authors'):
-                                    try:
-                                        metadata['authors'] = json.loads(metadata.get('authors', '[]'))
-                                    except:
-                                        metadata['authors'] = []
-                                if metadata.get('domains'):
-                                    try:
-                                        metadata['domains'] = json.loads(metadata.get('domains', '[]'))
-                                    except:
-                                        metadata['domains'] = []
-                                exact_matches.append(metadata)
-                                logger.info(f"Found exact DOI match: {metadata.get('doi')}")
-                    except Exception as e:
-                        logger.error(f"Error processing publication {key} for DOI match: {e}")
-                        continue
-                
-                if exact_matches:
-                    logger.info(f"Returning {len(exact_matches)} exact DOI matches")
-                    return exact_matches[:requested_count], None
-            
-            # No DOI matches - perform enhanced semantic search
-            publication_keys = await self._get_all_publication_keys()
-            if not publication_keys:
-                return [], "No publications found in the database."
-            
-            # Extract meaningful terms from query
-            query_terms = set(re.findall(r'\b[a-zA-Z]{3,}\b', query.lower()))
-            query_terms = {term for term in query_terms if term not in self._get_stopwords()}
-            
-            # Check for expert names in query to leverage expert-resource links
-            expert_related_publications = await self._check_for_expert_publications(query)
-            
-            scored_results = []
-            
-            # Process each publication with enhanced scoring
             for key in publication_keys:
                 try:
-                    resource_id = key.split(':')[-1]
+                    # Retrieve publication metadata
                     metadata = self.redis_manager.redis_text.hgetall(key)
-                    if not metadata:
-                        continue
                     
-                    # Apply year filter if specified
-                    if target_year and metadata.get('publication_year') != target_year:
-                        continue
+                    # Prepare search text
+                    search_text = ' '.join([
+                        str(metadata.get('title', '')).lower(),
+                        str(metadata.get('field', '')).lower(),
+                        str(metadata.get('summary_snippet', '')).lower(),
+                        ' '.join([str(a).lower() for a in json.loads(metadata.get('authors', '[]')) if a])
+                    ])
                     
-                    # Calculate base relevance score with improved weighting
-                    score = self._calculate_publication_relevance(metadata, query_terms)
-                    
-                    # Boost score for publications from expert-resource links
-                    if resource_id in expert_related_publications:
-                        score += expert_related_publications[resource_id] * 5  # Substantial boost based on confidence
-                    
-                    # Only include results with meaningful scores
-                    if score > 0:
-                        # Prepare authors and domains data
-                        self._prepare_publication_metadata(metadata)
-                        metadata['match_score'] = score
-                        scored_results.append(metadata)
+                    # Simple matching
+                    if any(term in search_text for term in query_terms):
+                        # Prepare metadata
+                        if metadata.get('authors'):
+                            try:
+                                metadata['authors'] = json.loads(metadata['authors'])
+                            except:
+                                metadata['authors'] = []
                         
+                        if metadata.get('domains'):
+                            try:
+                                metadata['domains'] = json.loads(metadata['domains'])
+                            except:
+                                metadata['domains'] = []
+                        
+                        matched_publications.append(metadata)
+                
                 except Exception as e:
                     logger.error(f"Error processing publication {key}: {e}")
-                    continue
             
-            # Sort by relevance score
-            sorted_results = sorted(scored_results, key=lambda x: x.get('match_score', 0), reverse=True)
-            top_publications = sorted_results[:requested_count]
+            # Sort and limit publications
+            sorted_publications = sorted(
+                matched_publications, 
+                key=lambda x: x.get('publication_year', '0000') if x.get('publication_year') else '0000', 
+                reverse=True
+            )
             
-            # Count publications with DOIs for quality assurance
-            with_doi = [p for p in top_publications if p.get('doi') and p.get('doi').strip() and p.get('doi') != 'None']
-            logger.info(f"Found {len(top_publications)} relevant publications for query")
-            logger.info(f"Of these, {len(with_doi)} have DOIs")
-
-            if not top_publications:
-                # Generate specific suggestions based on query analysis
-                suggestions = self._generate_search_suggestions(query)
-                return [], suggestions
-
+            # Limit to requested count
+            top_publications = sorted_publications[:requested_count]
+            
+            logger.info(f"Found {len(top_publications)} publications matching query")
+            
             return top_publications, None
         
         except Exception as e:
             logger.error(f"Error retrieving publications: {e}")
             return [], "We encountered an error searching publications. Try simplifying your query."
 
-    def _get_all_publication_keys(self) -> List[str]:
+    async def _get_all_publication_keys(self):
         """Helper method to get all publication keys from Redis"""
         try:
-            publication_keys = []
+            # Use scan to find all publication keys
             cursor = 0
-            pattern = "meta:resource:*"
+            publication_keys = []
             
-            while True:
-                cursor, keys = self.redis_manager.redis_text.scan(cursor, match=pattern, count=100)
-                publication_keys.extend(keys)
+            while cursor != 0 or len(publication_keys) == 0:
+                cursor, batch = self.redis_manager.redis_text.scan(
+                    cursor=cursor, 
+                    match='meta:resource:*', 
+                    count=100
+                )
+                publication_keys.extend(batch)
+                
                 if cursor == 0:
                     break
-                    
+            
             logger.info(f"Found {len(publication_keys)} total publications in Redis")
             return publication_keys
+        
         except Exception as e:
             logger.error(f"Error retrieving publication keys: {e}")
             return []
@@ -345,6 +365,49 @@ class GeminiLLMManager:
             score *= 1.5
         
         return score
+    
+    async def debug_publication_data(self, query: str = "nutrition", limit: int = 5):
+        """Debug method to check what publication data is actually being retrieved from Redis"""
+        try:
+            publications, suggestion = await self.get_relevant_publications(query, limit)
+            
+            if not publications:
+                logger.info(f"No publications found for query '{query}'")
+                if suggestion:
+                    logger.info(f"Suggestion: {suggestion}")
+                return
+                
+            logger.info(f"Found {len(publications)} publications for query '{query}'")
+            
+            for idx, pub in enumerate(publications):
+                logger.info(f"Publication {idx+1}:")
+                logger.info(f"  Title: {pub.get('title', 'N/A')}")
+                logger.info(f"  Year: {pub.get('publication_year', 'N/A')}")
+                logger.info(f"  DOI: {pub.get('doi', 'N/A')}")
+                
+                # Check if DOI is properly formatted
+                if pub.get('doi'):
+                    doi = pub.get('doi')
+                    if not doi.startswith('https://doi.org/') and not doi.startswith('10.'):
+                        logger.warning(f"  Unusual DOI format: {doi}")
+                
+                # Log author data to verify format
+                authors = pub.get('authors', [])
+                if authors:
+                    if isinstance(authors, list):
+                        logger.info(f"  Authors (list): {authors}")
+                    elif isinstance(authors, str):
+                        logger.info(f"  Authors (string): {authors}")
+                    elif isinstance(authors, dict):
+                        logger.info(f"  Authors (dict): {authors}")
+                    else:
+                        logger.info(f"  Authors (unknown type): {type(authors)}")
+                
+                # Log full publication data for reference
+                logger.debug(f"  Full data: {pub}")
+                
+        except Exception as e:
+            logger.error(f"Error in debug_publication_data: {e}")
 
     def _prepare_publication_metadata(self, metadata: Dict[str, Any]) -> None:
         """Prepare publication metadata for response formatting"""
@@ -470,8 +533,8 @@ class GeminiLLMManager:
         
         return "No exact matches found. Suggestions:\n- " + "\n- ".join(suggestions)
 
-    async def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
-        """Format publication data into a readable, structured context with expert associations."""
+    def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
+        """Format publication data into a readable, structured context for the LLM."""
         if not publications:
             return "No specific publications found."
             
@@ -483,11 +546,8 @@ class GeminiLLMManager:
         else:
             context_parts = ["Here is a specific APHRC publication:"]
         
-        # Count publications with DOIs for debugging
+        # Count publications with DOIs for debugging and verification
         doi_count = 0
-        
-        # Try to enrich publications with expert information
-        publication_experts = await self._get_expert_for_publications([pub.get('id') for pub in publications if pub.get('id')])
         
         for idx, pub in enumerate(publications):
             pub_context = []
@@ -503,17 +563,21 @@ class GeminiLLMManager:
             if pub.get('publication_year'):
                 pub_context.append(f"Year: {pub.get('publication_year')}")
                 
-            # DOI (crucial for preventing fictional DOIs)
+            # DOI handling with NO transformation
             if pub.get('doi') and pub.get('doi').strip() and pub.get('doi') != 'None':
                 doi_value = pub.get('doi').strip()
-                # Check if DOI is already a URL
-                if doi_value.startswith('https://doi.org/'):
-                    # It's already a full URL, use as is
-                    pub_context.append(f"DOI: {doi_value}")
-                else:
-                    # It's just the DOI identifier, format as URL
-                    pub_context.append(f"DOI: https://doi.org/{doi_value}")
+                
+                # Log the raw DOI value for debugging
+                logger.debug(f"Raw DOI value from database: {doi_value}")
+                
+                # CRITICAL CHANGE: Use DOI exactly as it is, NO URL conversion
+                pub_context.append(f"DOI: {doi_value}")
+                
                 doi_count += 1
+                logger.info(f"Included DOI for publication: {title}")
+            else:
+                # Log when DOI is missing
+                logger.debug(f"No DOI available for publication: {title}")
             
             # Authors - more robust formatting
             authors = pub.get('authors', [])
@@ -530,16 +594,6 @@ class GeminiLLMManager:
                 elif isinstance(authors, dict):
                     authors_text = ", ".join(str(v) for v in authors.values() if v)
                     pub_context.append(f"Authors: {authors_text}")
-            
-            # Add expert information if available
-            pub_id = str(pub.get('id', ''))
-            if pub_id in publication_experts:
-                experts = publication_experts[pub_id]
-                if experts:
-                    expert_names = [f"{e.get('first_name', '')} {e.get('last_name', '')}".strip() for e in experts]
-                    expert_names = [name for name in expert_names if name]  # Remove empty names
-                    if expert_names:
-                        pub_context.append(f"APHRC Experts: {', '.join(expert_names)}")
             
             # Field and subfield
             if pub.get('field'):
@@ -560,7 +614,10 @@ class GeminiLLMManager:
         
         # Add a note about DOIs for system understanding
         if doi_count > 0:
-            context_parts.append(f"\nNote: {doi_count} of these publications have verified DOIs that should be included in any citation.")
+            context_parts.append(f"\nNote: {doi_count} of these publications have DOIs that should be included in any citation.")
+        else:
+            # Add explicit note when no DOIs are found
+            context_parts.append("\nNote: None of these publications have DOI links available in our database. Please refer to APHRC's publications database for more information.")
         
         logger.info(f"Formatted {len(publications)} publications, {doi_count} with DOIs")
         
@@ -635,13 +692,12 @@ class GeminiLLMManager:
                 "1. ONLY reference publications explicitly provided in the context.\n"
                 "2. When showing multiple publications, use numbered lists consistently.\n"
                 "3. ALWAYS include publication year when available.\n"
-                "4. ALWAYS include DOI links when available in the format: https://doi.org/10.xxxx/yyyy\n"
-                "5. NEVER create or invent publication details, titles, authors, or DOIs.\n"
-                "6. If APHRC Experts are mentioned for a publication, include them in your response.\n"
-                "7. If asked for specific numbers of publications (e.g., '5 publications') and fewer are available, "
+                "4. NEVER create or invent publication details, titles, authors, or publication information.\n"
+                "5. If APHRC Experts are mentioned for a publication, include them in your response.\n"
+                "6. If asked for specific numbers of publications (e.g., '5 publications') and fewer are available, "
                 "explicitly state 'I found X out of the Y requested publications.'\n"
-                "8. If no publications match the criteria, state this clearly and offer alternative suggestions.\n"
-                "Format citations consistently as: Author et al. (Year). Title. DOI: https://doi.org/10.xxxx/yyyy"
+                "7. If no publications match the criteria, state this clearly and offer alternative suggestions.\n"
+                "8. Cite publications exactly as they are provided in the context."
             ),
             QueryIntent.GENERAL: (
                 "Provide focused overview of APHRC's work. "
@@ -649,25 +705,24 @@ class GeminiLLMManager:
                 "Direct users to specific resources when applicable."
             )
         }
-
+        
         response_guidelines = (
             "Structure responses in a natural conversational style. "
             "Start with a direct answer, then provide supporting details, and end with relevant links if applicable. "
             "Use natural, flowing language without repetition or technical jargon."
         )
-
+        
         # Add enhanced instructions for publication queries
         if intent == QueryIntent.PUBLICATION:
             publication_instruction = (
                 "CRITICAL INSTRUCTION: You are retrieving real APHRC publications from a database.\n"
                 "- You must ONLY reference the specific publications mentioned in the context.\n"
-                "- Review the exact titles, authors, years, and DOIs provided to you in the context.\n"
+                "- Review the exact titles, authors, years, and details provided to you in the context.\n"
                 "- When APHRC Experts are listed for a publication, highlight their association with the work.\n"
                 "- If no specific publications are provided in the context, clearly state this limitation "
                 "and recommend the user visit the APHRC website instead of making up publication details.\n"
-                "- When referencing a DOI, format it EXACTLY as provided in the context without modification.\n"
                 "- For list requests (like '5 publications from 2022'), maintain the numbering provided in the context.\n"
-                "- NEVER invent, modify, or embellish publication details such as titles, authors, years, findings, or DOIs."
+                "- NEVER invent, modify, or embellish any publication details."
             )
             return f"{base_prompts['common']} {base_prompts[intent]} {response_guidelines} {publication_instruction}"
         
@@ -779,46 +834,113 @@ class GeminiLLMManager:
             # Use model with retry logic already built in from get_gemini_model()
             try:
                 model = self.get_gemini_model()
-                response = await model.invoke(prompt)
                 
-                # Reset any rate limit flag if successful
-                if hasattr(self, '_rate_limited'):
-                    self._rate_limited = False
-                
-                cleaned_response = response.content.strip()
-                cleaned_response = cleaned_response.replace('```json', '').replace('```', '').strip()
-                
+                # Call the model and get response content safely
                 try:
-                    quality_data = json.loads(cleaned_response)
-                    logger.info(f"Response quality analysis result: {quality_data}")
+                    # Handle async or sync invoke results properly
+                    model_response = await model.ainvoke(prompt)
+                    response_text = self._extract_content_safely(model_response)
                     
-                    # For publication queries, add an additional check for post-processing action
-                    if is_publication_query and 'potentially_fabricated_elements' in quality_data:
-                        if quality_data['potentially_fabricated_elements']:
-                            logger.warning(f"Detected potentially fabricated publication elements: {quality_data['potentially_fabricated_elements']}")
-                            # Flag this response for review or intervention
-                            quality_data['requires_review'] = True
-                            
-                    return quality_data
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse quality analysis response: {cleaned_response}")
-                    logger.error(f"JSON parse error: {e}")
+                    # Reset any rate limit flag if successful
+                    if hasattr(self, '_rate_limited'):
+                        self._rate_limited = False
+                    
+                    if not response_text:
+                        logger.warning("Empty response from quality analysis model")
+                        return self._get_default_quality()
+                    
+                    cleaned_response = response_text.strip()
+                    cleaned_response = cleaned_response.replace('```json', '').replace('```', '').strip()
+                    
+                    try:
+                        quality_data = json.loads(cleaned_response)
+                        logger.info(f"Response quality analysis result: {quality_data}")
+                        
+                        # For publication queries, add an additional check for post-processing action
+                        if is_publication_query and 'potentially_fabricated_elements' in quality_data:
+                            if quality_data['potentially_fabricated_elements']:
+                                logger.warning(f"Detected potentially fabricated publication elements: {quality_data['potentially_fabricated_elements']}")
+                                # Flag this response for review or intervention
+                                quality_data['requires_review'] = True
+                                
+                        return quality_data
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Failed to parse quality analysis response: {cleaned_response}")
+                        logger.error(f"JSON parse error: {e}")
+                        return self._get_default_quality()
+                        
+                except Exception as api_error:
+                    # Check if this was a rate limit error
+                    if any(x in str(api_error).lower() for x in ["429", "quota", "rate limit", "resource exhausted"]):
+                        logger.warning("Rate limit detected in quality analysis, marking for cooldown")
+                        self._rate_limited = True
+                        # Set expiry for rate limit status
+                        asyncio.create_task(self._reset_rate_limited_after(300))  # 5 minutes cooldown
+                    
+                    logger.error(f"API error in quality analysis: {api_error}")
                     return self._get_default_quality()
-                    
-            except Exception as api_error:
-                # Check if this was a rate limit error
-                if any(x in str(api_error).lower() for x in ["429", "quota", "rate limit", "resource exhausted"]):
-                    logger.warning("Rate limit detected in quality analysis, marking for cooldown")
-                    self._rate_limited = True
-                    # Set expiry for rate limit status
-                    asyncio.create_task(self._reset_rate_limited_after(300))  # 5 minutes cooldown
-                
-                logger.error(f"API error in quality analysis: {api_error}")
+                        
+            except Exception as e:
+                logger.error(f"Error in quality analysis: {e}")
                 return self._get_default_quality()
-                    
+
         except Exception as e:
             logger.error(f"Error in quality analysis: {e}")
             return self._get_default_quality()
+
+    def _extract_content_safely(self, model_response):
+        """
+        Safely extract content from model response with multiple format support.
+        
+        Args:
+            model_response: The response from the model which could be in various formats
+            
+        Returns:
+            str: The extracted content text, or empty string if extraction fails
+        """
+        try:
+            # Case 1: Direct string
+            if isinstance(model_response, str):
+                return model_response
+                
+            # Case 2: Object with content attribute (like AIMessage)
+            if hasattr(model_response, 'content'):
+                return model_response.content
+                
+            # Case 3: List of messages
+            if isinstance(model_response, list):
+                # Try to get the last message
+                if model_response and hasattr(model_response[-1], 'content'):
+                    return model_response[-1].content
+                # Try to join all message contents
+                contents = []
+                for msg in model_response:
+                    if hasattr(msg, 'content'):
+                        contents.append(msg.content)
+                if contents:
+                    return ''.join(contents)
+                    
+            # Case 4: Dictionary with content key
+            if isinstance(model_response, dict) and 'content' in model_response:
+                return model_response['content']
+                
+            # Case 5: Generation object from LangChain
+            if hasattr(model_response, 'generations'):
+                generations = model_response.generations
+                if generations and generations[0]:
+                    if hasattr(generations[0][0], 'text'):
+                        return generations[0][0].text
+            
+            # Case 6: Object with text attribute
+            if hasattr(model_response, 'text'):
+                return model_response.text
+                
+            # If we can't determine the format, convert to string safely
+            return str(model_response)
+            
+        except Exception as e:
+            logger.error(f"Error extracting content from model response: {e}")
+            return ""
 
     def _get_default_quality(self) -> Dict:
         """Return default quality metric values with publication-specific flags."""
@@ -830,6 +952,51 @@ class GeminiLLMManager:
             'potentially_fabricated_elements': [],
             'requires_review': False
         }
+    
+    # 2. Updated _get_all_publication_keys method in GeminiLLMManager
+    async def _get_all_publication_keys(self):
+        """Helper method to get all publication keys from Redis with consistent patterns."""
+        try:
+            # Use the exact same patterns as used in the _store_resource_data method
+            patterns = [
+                'meta:resource:*',  # Primary pattern used by _store_resource_data
+                'meta:publication:*'  # Alternative pattern
+            ]
+            
+            all_keys = []
+            
+            # For each pattern, scan Redis for matching keys
+            for pattern in patterns:
+                cursor = 0
+                pattern_keys = []
+                
+                while cursor != 0 or len(pattern_keys) == 0:
+                    try:
+                        cursor, batch = self.redis_manager.redis_text.scan(
+                            cursor=cursor, 
+                            match=pattern, 
+                            count=100
+                        )
+                        pattern_keys.extend(batch)
+                        
+                        if cursor == 0:
+                            break
+                    except Exception as scan_error:
+                        logger.warning(f"Error scanning with pattern '{pattern}': {scan_error}")
+                        break
+                
+                logger.info(f"Found {len(pattern_keys)} keys with pattern '{pattern}'")
+                all_keys.extend(pattern_keys)
+            
+            # Remove any duplicates
+            unique_keys = list(set(all_keys))
+            
+            logger.info(f"Found {len(unique_keys)} total unique publication keys in Redis")
+            return unique_keys
+            
+        except Exception as e:
+            logger.error(f"Error retrieving publication keys: {e}")
+            return []
 
     # This maintains backwards compatibility with code still calling analyze_sentiment
     async def analyze_sentiment(self, message: str) -> Dict:
@@ -853,10 +1020,40 @@ class GeminiLLMManager:
             }
         }
     
-    async def detect_intent(self, message: str, is_followup: bool = False) -> Tuple[QueryIntent, float, Optional[str]]:
+    async def detect_intent(self, message: str, is_followup: bool = False) -> Dict[str, Any]:
         """Enhanced intent detection with improved pattern recognition and clarification support."""
         try:
+            original_message = message
             message = message.lower()
+            
+            # Initialize default results
+            result = {
+                'intent': QueryIntent.GENERAL,
+                'confidence': 0.0,
+                'clarification': None
+            }
+            
+            # First check for specific publication title requests - these should be highest priority
+            specific_pub_patterns = [
+                r'summarize the publication (.+)',
+                r'publication titled (.+)',
+                r'paper titled (.+)',
+                r'article about (.+)',
+                r'research on (.+)',
+                r'study about (.+)',
+                r'summarize (.+)',
+                r'publication (.+)'
+            ]
+            
+            # Check if the query contains a specific publication title
+            for pattern in specific_pub_patterns:
+                match = re.search(pattern, original_message, re.IGNORECASE)
+                if match:
+                    # If we find a specific publication title, this is a high-confidence publication intent
+                    logger.info(f"Detected specific publication title request: {match.group(1)}")
+                    result['intent'] = QueryIntent.PUBLICATION
+                    result['confidence'] = 0.95  # High confidence for specific publication requests
+                    return result
             
             # Check for publication list requests as a high-priority pattern
             list_patterns = [
@@ -870,111 +1067,307 @@ class GeminiLLMManager:
             for pattern in list_patterns:
                 if re.search(pattern, message):
                     logger.info(f"Detected publication list request: {message}")
-                    return QueryIntent.PUBLICATION, 0.95, None
+                    result['intent'] = QueryIntent.PUBLICATION
+                    result['confidence'] = 0.95
+                    return result
             
-            # Check for specific publication requests (by DOI or title)
-            if re.search(r'doi|10\.\d+\/|publication titled|paper titled|article about', message):
-                logger.info(f"Detected specific publication request: {message}")
-                return QueryIntent.PUBLICATION, 0.95, None
+            # Check for specific publication requests
+            publication_patterns = [
+                r'doi', 
+                r'10\.\d+\/', 
+                r'publication',
+                r'paper', 
+                r'article',
+                r'research',
+                r'study',
+                r'journal'
+            ]
+            
+            # Count how many publication-related keywords match
+            pub_keyword_count = sum(1 for pattern in publication_patterns if re.search(f'\b{pattern}\b', message))
+            
+            # If multiple publication keywords are found, this is likely a publication intent
+            if pub_keyword_count >= 2:
+                logger.info(f"Detected publication request with {pub_keyword_count} keywords: {message}")
+                result['intent'] = QueryIntent.PUBLICATION
+                result['confidence'] = 0.8 + (min(pub_keyword_count, 5) - 2) * 0.05  # Increase confidence with more keywords
+                return result
             
             # Initialize scores for general intent detection
             intent_scores = {intent: 0.0 for intent in QueryIntent}
-            matched_keywords = {intent: [] for intent in QueryIntent}
             
-            # Enhanced pattern matching with additional patterns
-            self.intent_patterns[QueryIntent.PUBLICATION]['patterns'].extend([
-                (r'research paper', 1.0),
-                (r'papers from', 0.9),
-                (r'articles', 0.9),
-                (r'publications from (\d{4})', 1.0),  # Year-specific requests
-                (r'published in (\d{4})', 1.0),
-                (r'recent studies', 0.9),
-                (r'bibliography', 0.8),
-                (r'works cited', 0.8),
-                (r'references', 0.7),
-                (r'latest research', 0.9)
-            ])
+            # Enhanced pattern matching
+            intent_patterns = {
+                QueryIntent.PUBLICATION: [
+                    (r'research paper', 1.0),
+                    (r'papers from', 0.9),
+                    (r'articles', 0.9),
+                    (r'publications from (\d{4})', 1.0),
+                    (r'published in (\d{4})', 1.0),
+                    (r'recent studies', 0.9),
+                    (r'bibliography', 0.8),
+                    (r'works cited', 0.8),
+                    (r'references', 0.7),
+                    (r'latest research', 0.9),
+                    (r'summary of', 0.9),
+                    (r'summarize', 0.9)
+                ],
+                QueryIntent.NAVIGATION: [
+                    (r'how do i get to', 1.0),
+                    (r'link to', 0.9),
+                    (r'url for', 1.0),
+                    (r'go to', 0.8),
+                    (r'access the', 0.7),
+                    (r'browse', 0.7),
+                    (r'site map', 0.9),
+                    (r'homepage', 0.9),
+                    (r'menu', 0.8)
+                ]
+            }
             
-            self.intent_patterns[QueryIntent.NAVIGATION]['patterns'].extend([
-                (r'how do i get to', 1.0),
-                (r'link to', 0.9),
-                (r'url for', 1.0),
-                (r'go to', 0.8),
-                (r'access the', 0.7),
-                (r'browse', 0.7),
-                (r'site map', 0.9),
-                (r'homepage', 0.9),
-                (r'menu', 0.8)
-            ])
-            
-            # Score patterns and collect matched keywords
-            for intent, config in self.intent_patterns.items():
+            # Score patterns
+            for intent, patterns in intent_patterns.items():
                 score = 0.0
                 matches = 0
                 
-                for pattern, weight in config['patterns']:
+                for pattern, weight in patterns:
                     pattern_matches = re.findall(pattern, message)
                     if pattern_matches:
                         score += weight
                         matches += 1
-                        matched_keywords[intent].append(pattern)
                 
                 if matches > 0:
                     intent_scores[intent] = score / matches
             
-            max_intent, max_score = max(intent_scores.items(), key=lambda x: x[1])
-            clarification = None
+            # Determine top intent
+            max_intent = max(intent_scores, key=intent_scores.get)
+            max_score = intent_scores[max_intent]
             
-            # Generate clarification only for initial queries (not followups)
-            if not is_followup:
-                # Borderline confidence case with improved specificity
-                if 0.4 <= max_score < 0.6:
-                    top_intents = sorted(intent_scores.items(), key=lambda x: x[1], reverse=True)[:2]
-                    if len(top_intents) > 1 and top_intents[0][1] - top_intents[1][1] < 0.2:
-                        # Create specific clarification based on the top intents
-                        if top_intents[0][0] == QueryIntent.PUBLICATION and top_intents[1][0] == QueryIntent.NAVIGATION:
-                            clarification = (
-                                "I'm not sure if you're looking for research publications or help navigating the website. "
-                                "Could you clarify if you want to find published research or locate a specific section of the website?"
-                            )
-                        else:
-                            clarification = (
-                                f"I found both '{top_intents[0][0].value}' and '{top_intents[1][0].value}' relevant. "
-                                f"Are you looking for {self._get_intent_examples(top_intents[0][0])} or "
-                                f"{self._get_intent_examples(top_intents[1][0])}?"
-                            )
+            # For follow-up questions, we should be more lenient with confidence requirements
+            if is_followup:
+                # Lower threshold for follow-ups to maintain conversation flow
+                threshold = 0.3
+            else:
+                threshold = 0.5
+            
+            # If confidence is too low and this isn't a follow-up, consider clarification
+            if max_score < threshold and not is_followup:
+                # Check for any publication-related terms to bias toward publication intent
+                # This helps with ambiguous queries that might contain publication titles
+                for pub_term in ["publication", "paper", "research", "study", "article", "journal"]:
+                    if pub_term in message:
+                        logger.info(f"Low confidence but found publication term '{pub_term}', defaulting to publication intent")
+                        result['intent'] = QueryIntent.PUBLICATION
+                        result['confidence'] = 0.7  # Reasonable confidence for publication-related terms
+                        return result
                 
-                # Low confidence case with more helpful suggestions
-                elif max_score < 0.4:
-                    clarification = (
-                        "Could you clarify what you're looking for? For example:\n"
-                        "- For publications: 'Find papers about maternal health' or 'List 5 publications from 2020'\n"
-                        "- For website navigation: 'Where can I find research datasets?' or 'How do I access reports?'"
-                    )
-
-            # Return only if score meets threshold
-            if max_score >= self.intent_patterns.get(max_intent, {}).get('threshold', 0.6):
-                return max_intent, max_score, clarification
-
-            return QueryIntent.GENERAL, max_score, clarification
-
+                # If no publication terms and confidence is truly low, ask for clarification
+                logger.info(f"Low confidence ({max_score}) for intent detection, requesting clarification")
+                result['clarification'] = (
+                    "Could you clarify what you're looking for? For example:\n"
+                    "- For publications: 'Find papers about maternal health' or 'List 5 publications from 2020'\n"
+                    "- For website navigation: 'Where can I find research datasets?' or 'How do I access reports?'"
+                )
+            
+            # Set final result
+            result['intent'] = max_intent
+            result['confidence'] = max_score
+            
+            return result
+        
         except Exception as e:
-            # Safe fallback and error logging
             logger.error(f"Intent detection failed: {e}", exc_info=True)
-            return QueryIntent.GENERAL, 0.0, "Sorry, I couldn't understand your request. Can you rephrase it?"
+            return {
+                'intent': QueryIntent.GENERAL,
+                'confidence': 0.0,
+                'clarification': "I'm sorry, I couldn't understand your request. Could you rephrase it?"
+            }
+        
+    async def get_relevant_publications(self, query: str, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """
+        Retrieve publications from Redis with improved pattern matching and error handling.
+        
+        Args:
+            query (str): The user's query about publications
+            limit (int): Maximum number of publications to return
+        
+        Returns:
+            Tuple[List[Dict[str, Any]], Optional[str]]: Matching publications and optional suggestion
+        """
+        try:
+            if not self.redis_manager:
+                logger.warning("Redis manager not available, cannot retrieve publications")
+                return [], "Our publication database is currently unavailable. Please try again later."
+            
+            # Extract potential publication title from query for title-specific searches
+            title_query = None
+            title_patterns = [
+                r'publication (?:titled|called|named) ["\']([^"\']+)["\']',
+                r'publication ["\']([^"\']+)["\']',
+                r'paper (?:titled|called|named) ["\']([^"\']+)["\']',
+                r'paper ["\']([^"\']+)["\']',
+                r'article (?:titled|called|named) ["\']([^"\']+)["\']',
+                r'article ["\']([^"\']+)["\']',
+                r'summarize (?:the publication|the paper|the article|) ["\']([^"\']+)["\']',
+                r'summarize (?:the publication|the paper|the article|) (.+?)(?:\.|$)',
+            ]
+            
+            for pattern in title_patterns:
+                match = re.search(pattern, query, re.IGNORECASE)
+                if match:
+                    title_query = match.group(1).strip()
+                    logger.info(f"Detected specific publication title request: '{title_query}'")
+                    break
+            
+            # Get all publication keys with proper error handling
+            publication_keys = await self._get_all_publication_keys()
+            
+            if not publication_keys:
+                logger.warning("No publication keys found in Redis")
+                return [], "No publications found in the database. Please try a different search."
+            
+            logger.info(f"Found {len(publication_keys)} total publication keys in Redis")
+            
+            # Parse specific requests for publication counts
+            count_pattern = r'(\d+)\s+publications?'
+            count_match = re.search(count_pattern, query, re.IGNORECASE)
+            requested_count = int(count_match.group(1)) if count_match else limit
+            
+            # Simple search across multiple fields
+            matched_publications = []
+            query_terms = set(query.lower().split())
+            stopwords = self._get_stopwords()
+            query_terms = {term for term in query_terms if term not in stopwords and len(term) > 2}
+            
+            # Keep track of search statistics
+            processed_count = 0
+            error_count = 0
+            
+            for key in publication_keys:
+                try:
+                    processed_count += 1
+                    
+                    # Retrieve publication metadata
+                    try:
+                        metadata = self.redis_manager.redis_text.hgetall(key)
+                        if not metadata:
+                            continue
+                    except Exception as redis_error:
+                        logger.debug(f"Error retrieving metadata for key {key}: {redis_error}")
+                        error_count += 1
+                        continue
+                    
+                    # Skip entries without a title
+                    if 'title' not in metadata:
+                        continue
+                    
+                    # If doing a title-specific search
+                    if title_query:
+                        # Check for title match
+                        pub_title = metadata.get('title', '').lower()
+                        title_query_lower = title_query.lower()
+                        
+                        # Match if the title contains the query, or query contains the title,
+                        # or they're very similar
+                        if (title_query_lower in pub_title or 
+                            pub_title in title_query_lower or 
+                            self._similar_strings(pub_title, title_query_lower)):
+                            try:
+                                # Prepare metadata (handle JSON fields)
+                                self._prepare_publication_metadata(metadata)
+                                matched_publications.append(metadata)
+                            except Exception as e:
+                                logger.error(f"Error preparing metadata for title match: {e}")
+                        # If we're searching for a specific title, don't do general matching
+                        continue
+                    
+                    # For general searches, prepare search text from multiple fields
+                    search_text = ' '.join([
+                        str(metadata.get('title', '')).lower(),
+                        str(metadata.get('field', '')).lower(),
+                        str(metadata.get('summary_snippet', '')).lower(),
+                    ])
+                    
+                    # Try to add authors if available
+                    try:
+                        if metadata.get('authors'):
+                            authors_data = json.loads(metadata.get('authors', '[]'))
+                            if isinstance(authors_data, list):
+                                authors_text = ' '.join([str(a).lower() for a in authors_data if a])
+                                search_text += ' ' + authors_text
+                    except Exception as authors_error:
+                        pass  # Continue without authors if there's an error
+                    
+                    # Check if any query terms match the search text
+                    if query_terms and any(term in search_text for term in query_terms):
+                        try:
+                            # Prepare metadata
+                            self._prepare_publication_metadata(metadata)
+                            matched_publications.append(metadata)
+                        except Exception as e:
+                            logger.error(f"Error preparing metadata: {e}")
+                
+                except Exception as e:
+                    error_count += 1
+                    logger.error(f"Error processing publication {key}: {e}")
+            
+            logger.info(f"Publication search stats: Processed {processed_count}, found {len(matched_publications)} matches, {error_count} errors")
+            
+            # If no matches found
+            if not matched_publications:
+                if title_query:
+                    # For specific title searches
+                    return [], f"I couldn't find a publication titled '{title_query}'. Please check the title or try a more general search."
+                else:
+                    # For general searches
+                    return [], self._generate_search_suggestions(query)
+            
+            # Sort publications by relevance (newest first for now)
+            sorted_publications = sorted(
+                matched_publications, 
+                key=lambda x: x.get('publication_year', '0000') if x.get('publication_year') else '0000', 
+                reverse=True
+            )
+            
+            # Limit to requested count
+            top_publications = sorted_publications[:requested_count]
+            
+            logger.info(f"Returning {len(top_publications)} publications matching query")
+            
+            return top_publications, None
+        
+        except Exception as e:
+            logger.error(f"Error retrieving publications: {e}")
+            return [], "We encountered an error searching publications. Try simplifying your query."
 
-        finally:
-            # Optional cleanup or logging
-            logger.debug(f"Intent detection executed for message: '{message}' (follow-up: {is_followup})")
-
-    def _get_intent_examples(self, intent: QueryIntent) -> str:
-        """Get examples for the given intent to help with clarification."""
-        examples = {
-            QueryIntent.PUBLICATION: "publications like 'recent research on maternal health' or 'papers from 2022'",
-            QueryIntent.NAVIGATION: "website sections like 'research datasets' or 'contact information'",
-            QueryIntent.GENERAL: "general information about APHRC's work"
-        }
-        return examples.get(intent, "information about this topic")
+        def _similar_strings(self, s1: str, s2: str) -> bool:
+            """Check if two strings are similar (for fuzzy title matching)."""
+            if not s1 or not s2:
+                return False
+                
+            # Quick exact match check
+            if s1 == s2:
+                return True
+                
+            # Get words from each string
+            words1 = set(s1.split())
+            words2 = set(s2.split())
+            
+            # Remove very short words
+            words1 = {w for w in words1 if len(w) > 2}
+            words2 = {w for w in words2 if len(w) > 2}
+            
+            if not words1 or not words2:
+                return False
+            
+            # Check word overlap
+            common_words = words1.intersection(words2)
+            if len(common_words) >= 2:  # At least 2 significant words in common
+                return True
+                
+            # For shorter titles, check percentage overlap
+            overlap_ratio = len(common_words) / min(len(words1), len(words2))
+            return overlap_ratio > 0.5  # Over 50% word overlap
 
 
     def create_context(self, relevant_data: List[Dict]) -> str:
@@ -1055,8 +1448,10 @@ class GeminiLLMManager:
             
             # Detect intent with conversation context, handling follow-ups
             try:
-                intent_result, clarification = await self.detect_intent(message, is_followup)
-                intent, confidence = intent_result
+                intent_data = await self.detect_intent(message, is_followup)
+                intent = intent_data['intent']
+                clarification = intent_data.get('clarification')
+                confidence = intent_data.get('confidence', 0.0)
                 
                 # Handle clarification questions first
                 if clarification:
@@ -1121,47 +1516,94 @@ class GeminiLLMManager:
                 model = self.get_gemini_model()
                 
                 try:
-                    # Get response with proper error handling
-                    response_data = await model.agenerate([messages])
+                    # Properly handle both streaming and non-streaming responses
+                    response_iterator = None
                     
-                    if not response_data.generations or not response_data.generations[0]:
-                        logger.warning("Empty response received from model")
-                        yield {'chunk': "I'm sorry, but I couldn't generate a response at this time.", 'is_metadata': False}
-                        return
-                    
-                    # Process the main response content
-                    content = response_data.generations[0][0].text
-                    
-                    if not content:
-                        logger.warning("Empty content received from model")
-                        yield {'chunk': "I'm sorry, but I couldn't generate a response at this time.", 'is_metadata': False}
-                        return
-                    
-                    # Process the content in chunks for streaming-like behavior
-                    remaining_content = content
-                    while remaining_content:
-                        # Find a good breaking point
-                        end_pos = min(100, len(remaining_content))
-                        if end_pos < len(remaining_content):
-                            # Try to break at a sentence or paragraph
-                            for break_char in ['. ', '! ', '? ', '\n']:
-                                pos = remaining_content[:end_pos].rfind(break_char)
-                                if pos > 0:
-                                    end_pos = pos + len(break_char)
-                                    break
+                    try:
+                        # First attempt with streaming (agenerate)
+                        self.callback.queue = asyncio.Queue()  # Reset queue
+                        response_data = await model.agenerate([messages])
                         
-                        # Extract current chunk
-                        current_chunk = remaining_content[:end_pos]
-                        remaining_content = remaining_content[end_pos:]
+                        # Check if we have valid generations
+                        if not response_data.generations or not response_data.generations[0]:
+                            logger.warning("Empty response received from model")
+                            yield {'chunk': "I'm sorry, but I couldn't generate a response at this time.", 'is_metadata': False}
+                            return
                         
-                        # Save and yield chunk
-                        response_chunks.append(current_chunk)
-                        logger.debug(f"Yielding chunk (length: {len(current_chunk)})")
-                        yield {'chunk': current_chunk, 'is_metadata': False}
-                    
+                        # Process the main response content
+                        content = response_data.generations[0][0].text
+                        
+                        if not content:
+                            logger.warning("Empty content received from model")
+                            yield {'chunk': "I'm sorry, but I couldn't generate a response at this time.", 'is_metadata': False}
+                            return
+                        
+                        # Process the content in smaller chunks for streaming-like behavior
+                        remaining_content = content
+                        while remaining_content:
+                            # Find a good breaking point
+                            end_pos = min(100, len(remaining_content))
+                            if end_pos < len(remaining_content):
+                                # Try to break at a sentence or paragraph
+                                for break_char in ['. ', '! ', '? ', '\n']:
+                                    pos = remaining_content[:end_pos].rfind(break_char)
+                                    if pos > 0:
+                                        end_pos = pos + len(break_char)
+                                        break
+                            
+                            # Extract current chunk
+                            current_chunk = remaining_content[:end_pos]
+                            remaining_content = remaining_content[end_pos:]
+                            
+                            # Save and yield chunk
+                            response_chunks.append(current_chunk)
+                            logger.debug(f"Yielding chunk (length: {len(current_chunk)})")
+                            yield {'chunk': current_chunk, 'is_metadata': False}
+                            
+                            # Small delay to simulate streaming
+                            await asyncio.sleep(0.05)
+                        
+                    except Exception as streaming_error:
+                        # If streaming fails, try non-streaming invoke
+                        logger.warning(f"Streaming generation failed, falling back to standard invoke: {streaming_error}")
+                        
+                        # Use regular invoke with proper content extraction
+                        model.streaming = False  # Turn off streaming
+                        response = await model.ainvoke(messages)
+                        content = self._extract_content_safely(response)
+                        
+                        if not content:
+                            logger.warning("Empty content received from fallback invoke")
+                            yield {'chunk': "I'm sorry, but I couldn't generate a response at this time.", 'is_metadata': False}
+                            return
+                        
+                        # Process the content in chunks for consistent behavior
+                        remaining_content = content
+                        while remaining_content:
+                            end_pos = min(100, len(remaining_content))
+                            if end_pos < len(remaining_content):
+                                for break_char in ['. ', '! ', '? ', '\n']:
+                                    pos = remaining_content[:end_pos].rfind(break_char)
+                                    if pos > 0:
+                                        end_pos = pos + len(break_char)
+                                        break
+                            
+                            current_chunk = remaining_content[:end_pos]
+                            remaining_content = remaining_content[end_pos:]
+                            
+                            response_chunks.append(current_chunk)
+                            logger.debug(f"Yielding chunk from fallback (length: {len(current_chunk)})")
+                            yield {'chunk': current_chunk, 'is_metadata': False}
+                            
+                            # Small delay to simulate streaming
+                            await asyncio.sleep(0.05)
+                        
                     # Prepare complete response
                     complete_response = ''.join(response_chunks)
                     logger.info(f"Complete response generated. Total length: {len(complete_response)}")
+                    
+                    # Analyze response quality
+                    quality_metrics = await self.analyze_quality(message, complete_response)
                     
                     # Yield metadata
                     logger.debug("Preparing and yielding metadata")
@@ -1173,7 +1615,7 @@ class GeminiLLMManager:
                             'metrics': {
                                 'response_time': time.time() - start_time,
                                 'intent': {'type': intent.value, 'confidence': confidence},
-                                'quality': self._get_default_quality()  # Quality metrics
+                                'quality': quality_metrics
                             },
                             'error_occurred': False
                         }

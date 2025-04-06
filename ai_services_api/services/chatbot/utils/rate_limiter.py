@@ -1,3 +1,4 @@
+import random
 from fastapi import APIRouter, HTTPException, Request, Depends
 from typing import Optional, Dict
 from pydantic import BaseModel
@@ -154,6 +155,42 @@ class DynamicRateLimiter:
         current_window = int(current_time / self.window_size)
         next_window = (current_window + 1) * self.window_size
         return int(next_window - current_time)
+
+    async def _record_api_rate_limit_error(self, redis_client):
+        """
+        Record an API rate limit error and activate circuit breaker if threshold is exceeded.
+        
+        Args:
+            redis_client: Redis client for storing rate limit data
+        """
+        try:
+            # Get counter key for API rate limit errors
+            counter_key = "global:api_rate_limit_errors"
+            circuit_key = "global:api_circuit_breaker"
+            
+            # Get current time window (truncated to nearest minute)
+            current_window = int(time.time() / 60) * 60
+            
+            # Record error in the current window
+            window_key = f"{counter_key}:{current_window}"
+            
+            # Increment counter and get new value
+            count = await redis_client.incr(window_key)
+            
+            # Set expiry for the counter (keep for 5 minutes)
+            await redis_client.expire(window_key, 300)
+            
+            # Check if circuit breaker threshold is exceeded
+            # Threshold: 5 rate limit errors within a minute
+            if count >= 5:
+                # Activate circuit breaker for 2 minutes
+                await redis_client.setex(circuit_key, 120, "1")
+                logger.warning(f"Circuit breaker activated due to {count} rate limit errors")
+            
+            logger.info(f"Recorded API rate limit error ({count} in current window)")
+            
+        except Exception as e:
+            logger.error(f"Error recording API rate limit: {e}")
 
     
     async def update_usage_pattern(self, user_id: str, request_count: int):

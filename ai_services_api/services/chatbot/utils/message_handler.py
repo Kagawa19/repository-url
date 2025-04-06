@@ -20,7 +20,7 @@ class MessageHandler:
     @staticmethod
     def clean_response_text(text: str) -> str:
         """
-        Clean and format the response text with enhanced handling of publication data.
+        Clean and format the response text with DOI preservation.
         
         Args:
             text (str): The input text with markdown formatting
@@ -28,53 +28,55 @@ class MessageHandler:
         Returns:
             str: Cleaned and reformatted text
         """
+        # Explicit DOI URL protection pattern
+        doi_url_pattern = r'(https?://doi\.org/10\.\d+/[^\s]+)'
+        doi_pattern = r'(10\.\d+/[^\s]+)'
+        
+        # If the entire text is a DOI or DOI URL, return it exactly
+        if re.match(f'^({doi_url_pattern}|{doi_pattern})$', text.strip()):
+            return text.strip()
+        
+        # Preserve DOI lines exactly
+        if re.match(r'^DOI:', text.strip()):
+            return text.strip()
+        
         # Skip cleaning for numbered publication list items
         if re.match(r'^\d+\.\s+Title:', text.strip()):
-            # Just remove some basic markdown but preserve structure
             cleaned = text.replace('\n**', ' ')
             cleaned = cleaned.replace('**', '')
             return cleaned.strip()
         
-        # Skip cleaning for DOI lines to preserve formatting
-        if re.match(r'^DOI:', text.strip()):
-            return text.strip()
+        # Temporarily protect DOI URLs
+        doi_matches = re.findall(doi_url_pattern, text)
+        doi_placeholders = {}
+        
+        # Replace DOI URLs with unique placeholders
+        for i, doi in enumerate(doi_matches):
+            placeholder = f"__DOI_PLACEHOLDER_{i}__"
+            doi_placeholders[placeholder] = doi
+            text = text.replace(doi, placeholder)
         
         # Regular cleaning for other text
         cleaned = text.replace('\n**', ' ')
         cleaned = cleaned.replace('**', '')
         
-        # Preserve numbered lists by not removing them
+        # Preserve numbered lists
         if not re.search(r'\n\d+\.', cleaned):
-            # Only remove numbered list formatting if not a real list
             cleaned = re.sub(r'\n\d+\.', '', cleaned)
         
-        # Handle bullet points - replace with comma-separated list
+        # Handle bullet points without converting DOIs
         bullet_points = re.findall(r'\*\s*([^*\n]+)', cleaned)
         if bullet_points:
             # Only convert bullets to flowing text outside of structured lists
             if "Title:" not in cleaned and "Authors:" not in cleaned:
-                # Remove all bullet points first
                 cleaned = re.sub(r'\*\s*[^*\n]+\n*', '', cleaned)
-                # Add them back as a flowing sentence
                 bullet_list = ', '.join(point.strip() for point in bullet_points)
                 if 'Key Findings:' in cleaned:
                     cleaned = cleaned.replace('Key Findings:', f'Key findings include: {bullet_list}.')
                 else:
                     cleaned += f" {bullet_list}."
         
-        # Handle DOI citations - preserve the format
-        doi_pattern = r'(https?://doi\.org/[^\s]+)'
-        if re.search(doi_pattern, cleaned):
-            # Ensure DOIs are properly formatted and not broken
-            def fix_doi(match):
-                doi = match.group(1)
-                # Remove any trailing punctuation
-                doi = re.sub(r'[.,;:]$', '', doi)
-                return doi
-            
-            cleaned = re.sub(doi_pattern, fix_doi, cleaned)
-        
-        # Fix spacing issues
+        # Fix spacing and formatting
         cleaned = re.sub(r'\s+', ' ', cleaned)
         cleaned = re.sub(r'\s+([.,:])', r'\1', cleaned)
         cleaned = cleaned.strip()
@@ -82,15 +84,19 @@ class MessageHandler:
         # Add proper spacing after periods
         cleaned = re.sub(r'\.(?! )', '. ', cleaned)
         
-        # Clean up any remaining special characters
+        # Clean up special characters
         cleaned = cleaned.replace('\\n', ' ')
         cleaned = cleaned.strip()
         
+        # Restore DOI URLs
+        for placeholder, doi in doi_placeholders.items():
+            cleaned = cleaned.replace(placeholder, doi)
+        
         return cleaned
-
+    
     async def process_stream_response(self, response_stream):
         """
-        Process the streaming response with enhanced formatting and structure preservation.
+        Process the streaming response with enhanced formatting, structure preservation, and metadata handling.
         
         Args:
             response_stream: Async generator of response chunks
@@ -100,65 +106,105 @@ class MessageHandler:
         """
         buffer = ""
         metadata = None
-        complete_text = ""
         in_publication_list = False
-        list_item_buffer = ""
         list_count = 0
         
-        async for chunk in response_stream:
-            # Capture metadata if present but continue processing
-            if isinstance(chunk, dict) and chunk.get('is_metadata'):
-                metadata = chunk
-                # Store metadata for later use
-                self.metadata = chunk
-                continue
+        try:
+            async for chunk in response_stream:
+                # Capture metadata with improved detection
+                if isinstance(chunk, dict) and chunk.get('is_metadata'):
+                    # Store metadata both in method instance and for return
+                    metadata = chunk.get('metadata', chunk)
+                    self.metadata = metadata
                     
-            if isinstance(chunk, dict) and 'chunk' in chunk:
-                text = chunk['chunk']
-            elif isinstance(chunk, (str, bytes)):
-                text = chunk.decode('utf-8') if isinstance(chunk, bytes) else chunk
-            else:
-                continue
+                    # Log metadata capture
+                    logger.debug(f"Captured metadata: {json.dumps(metadata, default=str) if metadata else 'None'}")
+                    continue
+                
+                # Extract text from chunk with enhanced format handling
+                if isinstance(chunk, dict):
+                    if 'chunk' in chunk:
+                        text = chunk['chunk']
+                    elif 'content' in chunk:
+                        text = chunk['content']
+                    elif 'text' in chunk:
+                        text = chunk['text']
+                    else:
+                        # Try to stringify the dict as fallback
+                        text = str(chunk)
+                elif isinstance(chunk, (str, bytes)):
+                    text = chunk.decode('utf-8') if isinstance(chunk, bytes) else chunk
+                elif hasattr(chunk, 'content'):
+                    # Handle AIMessage or similar objects
+                    text = chunk.content
+                elif hasattr(chunk, 'text'):
+                    # Handle objects with text attribute
+                    text = chunk.text
+                else:
+                    # Skip unknown formats
+                    logger.debug(f"Skipping unknown chunk format: {type(chunk)}")
+                    continue
+                
+                # Skip empty chunks
+                if not text:
+                    continue
                     
-            buffer += text
-            complete_text += text
+                buffer += text
+                
+                # Detect publication lists (unique preservation logic)
+                list_pattern = r'\d+\.\s+Title:'
+                if re.search(list_pattern, buffer) and not in_publication_list:
+                    in_publication_list = True
+                    list_count += 1
+                
+                # Unique list handling logic
+                if in_publication_list:
+                    # Try to find complete list items
+                    items = re.split(r'(?=\d+\.\s+Title:)', buffer)
+                    if len(items) > 1:
+                        # Keep the last (potentially incomplete) item in buffer
+                        complete_items = items[:-1]
+                        buffer = items[-1]
+                        
+                        for item in complete_items:
+                            if item.strip():
+                                # Use cleaning method, but preserve DOI exactly
+                                formatted_item = self.clean_response_text(item)
+                                yield formatted_item
+                else:
+                    # Normal sentence processing
+                    while '.' in buffer:
+                        split_idx = buffer.find('.') + 1
+                        sentence = self.clean_response_text(buffer[:split_idx])
+                        buffer = buffer[split_idx:].lstrip()
+                        
+                        if sentence.strip():
+                            yield sentence
             
-            # Detect and preserve publication lists
-            list_pattern = r'\d+\.\s+Title:'
-            if re.search(list_pattern, buffer) and not in_publication_list:
-                in_publication_list = True
-                list_count += 1
-                
-            # Process complete sentences or list items
-            if in_publication_list:
-                # Try to find complete list items
-                items = re.split(r'(?=\d+\.\s+Title:)', buffer)
-                if len(items) > 1:
-                    # Keep the last (potentially incomplete) item in buffer
-                    complete_items = items[:-1]
-                    buffer = items[-1]
+            # Handle remaining buffer
+            if buffer.strip():
+                yield self.clean_response_text(buffer)
+            
+            # Yield metadata if exists
+            if metadata:
+                # Wrap in proper format if needed
+                if not isinstance(metadata, dict) or 'is_metadata' not in metadata:
+                    metadata_wrapper = {'is_metadata': True, 'metadata': metadata}
+                    yield metadata_wrapper
+                else:
+                    yield metadata
                     
-                    for item in complete_items:
-                        if item.strip():
-                            formatted_item = self.clean_response_text(item)
-                            yield formatted_item
-            else:
-                # Normal sentence processing
-                while '.' in buffer:
-                    split_idx = buffer.find('.') + 1
-                    sentence = self.clean_response_text(buffer[:split_idx])
-                    buffer = buffer[split_idx:].lstrip()
-                    
-                    if sentence.strip():
-                        yield sentence
-        
-        # Handle remaining buffer
-        if buffer.strip():
-            yield self.clean_response_text(buffer)
-                
-        # After yielding all text chunks, yield the metadata if it exists
-        if metadata:
-            yield metadata
+        except Exception as e:
+            logger.error(f"Error processing stream response: {e}", exc_info=True)
+            # Yield any remaining buffer to avoid losing content
+            if buffer.strip():
+                yield self.clean_response_text(buffer)
+            
+            # If metadata was captured but not yet yielded, yield it now
+            if metadata and not isinstance(metadata, dict):
+                yield {'is_metadata': True, 'metadata': metadata}
+
+    
     async def start_chat_session(self, user_id: str) -> str:
         """
         Start a new chat session.
