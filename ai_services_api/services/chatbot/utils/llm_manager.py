@@ -535,7 +535,7 @@ class GeminiLLMManager:
 
     def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
-        Format publication data into a readable, structured context with minimal filtering.
+        Format publication data into a readable, structured context with DOI inclusion.
         
         Args:
             publications (List[Dict[str, Any]]): List of publication dictionaries to format
@@ -563,11 +563,31 @@ class GeminiLLMManager:
             # Add index for list format
             prefix = f"{idx}. " if is_list_format else ""
             
-            # Compile all available information
-            # Always try to include the field even if it might be empty
+            # Always include title first (most important field)
+            if pub.get('title'):
+                pub_details.append(f"{prefix}Title: {pub.get('title')}")
+                # Reset prefix after first use in non-list format
+                prefix = "" if not is_list_format else prefix
+            
+            # Always include DOI (or note if missing)
+            doi = pub.get('doi', '').strip()
+            if doi and doi.lower() != 'none':
+                # Format DOI if needed
+                if not doi.startswith('https://doi.org/') and doi.startswith('10.'):
+                    doi = f"https://doi.org/{doi}"
+                pub_details.append(f"{prefix}DOI: {doi}")
+            else:
+                # Make it clear there's no DOI but still include the publication
+                pub_details.append(f"{prefix}DOI: Not available")
+                logger.warning(f"Publication without DOI: {pub.get('title', 'Unknown title')}")
+            
+            # Add publication year if available (after DOI)
+            if pub.get('publication_year'):
+                pub_details.append(f"{prefix}Publication Year: {pub.get('publication_year')}")
+            
+            # Compile all other available information
             for key in [
-                'title', 'publication_year', 'doi', 'abstract', 
-                'summary', 'authors', 'field', 'subfield', 
+                'abstract', 'summary', 'authors', 'field', 'subfield', 
                 'type', 'source', 'description'
             ]:
                 value = pub.get(key)
