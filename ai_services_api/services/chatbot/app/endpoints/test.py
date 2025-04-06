@@ -5,6 +5,6 @@ import json
 response = requests.post(
     "http://localhost:8000/chatbot/conversation/chat",  # The correct endpoint path
     headers={"X-User-ID": "1", "Content-Type": "application/json"},
-    json={"message": "i need a summary of a covid 19 publication?"}
+    json={"message": "list for me 5 reproductive health publications"}
 )
 print(json.dumps(response.json(), indent=2))

@@ -6,9 +6,10 @@ import random
 import re
 import time
 import numpy as np
-from typing import Dict, Tuple, Any, List, AsyncGenerator, Optional
+from typing import Dict, Set, Tuple, Any, List, AsyncGenerator, Optional
 from datetime import datetime
 from enum import Enum
+from ai_services_api.services.chatbot.utils.db_utils import DatabaseConnector
 from langchain.schema.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.callbacks import AsyncIteratorCallbackHandler
@@ -137,131 +138,51 @@ class GeminiLLMManager:
             embedding = embedding / norm
         return embedding
     
-    def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
-        """Format publication data into a readable context for the LLM."""
-        if not publications:
-            return "No specific publications found."
-            
-        context_parts = ["Here are relevant APHRC publications:"]
-        
-        # Count publications with DOIs for debugging
-        doi_count = 0
-        
-        for pub in publications:
-            pub_context = []
-            # Title
-            pub_context.append(f"Title: {pub.get('title', 'Untitled')}")
-            
-            # Publication year
-            if pub.get('publication_year'):
-                pub_context.append(f"Year: {pub.get('publication_year')}")
-                
-            # DOI (crucial for preventing fictional DOIs)
-            if pub.get('doi') and pub.get('doi').strip() and pub.get('doi') != 'None':
-                doi_value = pub.get('doi').strip()
-                # Check if DOI is already a URL
-                if doi_value.startswith('https://doi.org/'):
-                    # It's already a full URL, use as is
-                    pub_context.append(f"DOI: [{doi_value}]({doi_value})")
-                else:
-                    # It's just the DOI identifier, format as URL
-                    pub_context.append(f"DOI: [{doi_value}](https://doi.org/{doi_value})")
-                doi_count += 1
-            
-            # Authors
-            authors = pub.get('authors', [])
-            if authors:
-                if isinstance(authors, list):
-                    if authors:
-                        authors_text = ", ".join(str(a) for a in authors if a)
-                        pub_context.append(f"Authors: {authors_text}")
-                elif isinstance(authors, str):
-                    pub_context.append(f"Authors: {authors}")
-                elif isinstance(authors, dict):
-                    authors_text = ", ".join(str(v) for v in authors.values() if v)
-                    pub_context.append(f"Authors: {authors_text}")
-            
-            # Field and subfield
-            if pub.get('field'):
-                field_text = f"Field: {pub.get('field')}"
-                if pub.get('subfield'):
-                    field_text += f", Subfield: {pub.get('subfield')}"
-                pub_context.append(field_text)
-                
-            # Summary
-            if pub.get('summary_snippet'):
-                pub_context.append(f"Summary: {pub.get('summary_snippet')}")
-                
-            context_parts.append("\n".join(pub_context))
-        
-        logger.info(f"Formatted {len(publications)} publications, {doi_count} with DOIs")
-        
-        return "\n\n".join(context_parts)
+    
 
     async def get_relevant_publications(self, query: str, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        """Enhanced publication search with suggestions"""
+        """Enhanced publication search with semantic relevance scoring and improved DOI handling"""
         try:
             if not self.redis_manager:
                 logger.warning("Redis manager not available, cannot retrieve publications")
                 return [], "Our publication database is currently unavailable. Please try again later."
             
-            # Check Redis for any keys with DOIs
-            try:
-                all_keys = []
-                cursor = 0
-                while True:
-                    cursor, keys = self.redis_manager.redis_text.scan(cursor, match="meta:resource:*", count=100)
-                    all_keys.extend(keys)
-                    if cursor == 0:
-                        break
-                
-                doi_count = 0
-                for key in all_keys[:20]:
-                    metadata = self.redis_manager.redis_text.hgetall(key)
-                    if metadata.get('doi') and metadata.get('doi').strip() and metadata.get('doi') != 'None':
-                        doi_count += 1
-                        logger.info(f"Found publication with DOI: {metadata.get('doi')} - Title: {metadata.get('title')}")
-                logger.info(f"Found {doi_count} publications with DOIs in sample of {min(20, len(all_keys))}")
-            except Exception as e:
-                logger.error(f"Error checking for DOIs: {e}")
+            # Parse specific requests for publication counts and years
+            count_pattern = r'(\d+)\s+publications?'
+            count_match = re.search(count_pattern, query, re.IGNORECASE)
+            requested_count = int(count_match.group(1)) if count_match else limit
             
-            publication_keys = []
-            try:
-                cursor = 0
-                pattern = "meta:resource:*"
-                while True:
-                    cursor, keys = self.redis_manager.redis_text.scan(cursor, match=pattern, count=100)
-                    publication_keys.extend(keys)
-                    if cursor == 0:
-                        break
-                        
-                logger.info(f"Found {len(publication_keys)} total publications in Redis")
-                
-                if not publication_keys:
-                    logger.warning("No publications found in Redis database")
-                    return [], "No publications found in the database."
-            except Exception as e:
-                logger.error(f"Error scanning Redis keys: {e}")
-                return [], "Error scanning publication records."
+            year_pattern = r'(from|in|during)\s+(19|20)(\d{2})'
+            year_match = re.search(year_pattern, query, re.IGNORECASE)
+            target_year = f"20{year_match.group(3)}" if year_match and year_match.group(2) == "20" else \
+                        f"19{year_match.group(3)}" if year_match and year_match.group(2) == "19" else None
             
-            query_keywords = set(re.findall(r'\b\w+\b', query.lower()))
-            results = []
-            
+            # Check for exact DOI queries first - highest priority
             doi_pattern = r'\b(10\.\d+\/[a-zA-Z0-9./-]+)\b'
             url_doi_pattern = r'https?://doi\.org/(10\.\d+\/[a-zA-Z0-9./-]+)\b'
             doi_matches = re.findall(doi_pattern, query) + [m for m in re.findall(url_doi_pattern, query)]
             
             if doi_matches:
                 logger.info(f"Found DOI in query: {doi_matches[0]}")
+                exact_matches = []
+                
+                # Get all publication keys for searching
+                publication_keys = await self._get_all_publication_keys()
+                if not publication_keys:
+                    return [], "No publications found in the database."
+                    
+                # Search for exact DOI matches with improved extraction
                 for key in publication_keys:
                     try:
                         metadata = self.redis_manager.redis_text.hgetall(key)
                         doi = metadata.get('doi', '')
                         if doi:
+                            # Normalize DOI format for comparison
                             if doi.startswith('https://doi.org/'):
                                 extracted_doi = doi.replace('https://doi.org/', '')
                             else:
                                 extracted_doi = doi
+                                
                             if any(d in doi or d == extracted_doi for d in doi_matches):
                                 metadata['match_score'] = 100
                                 if metadata.get('authors'):
@@ -274,16 +195,31 @@ class GeminiLLMManager:
                                         metadata['domains'] = json.loads(metadata.get('domains', '[]'))
                                     except:
                                         metadata['domains'] = []
-                                results.append(metadata)
+                                exact_matches.append(metadata)
                                 logger.info(f"Found exact DOI match: {metadata.get('doi')}")
                     except Exception as e:
                         logger.error(f"Error processing publication {key} for DOI match: {e}")
                         continue
+                
+                if exact_matches:
+                    logger.info(f"Returning {len(exact_matches)} exact DOI matches")
+                    return exact_matches[:requested_count], None
             
-            if results:
-                logger.info(f"Returning {len(results)} exact DOI matches")
-                return results[:limit], None
+            # No DOI matches - perform enhanced semantic search
+            publication_keys = await self._get_all_publication_keys()
+            if not publication_keys:
+                return [], "No publications found in the database."
             
+            # Extract meaningful terms from query
+            query_terms = set(re.findall(r'\b[a-zA-Z]{3,}\b', query.lower()))
+            query_terms = {term for term in query_terms if term not in self._get_stopwords()}
+            
+            # Check for expert names in query to leverage expert-resource links
+            expert_related_publications = await self._check_for_expert_publications(query)
+            
+            scored_results = []
+            
+            # Process each publication with enhanced scoring
             for key in publication_keys:
                 try:
                     resource_id = key.split(':')[-1]
@@ -291,75 +227,39 @@ class GeminiLLMManager:
                     if not metadata:
                         continue
                     
-                    score = 0
-                    title = metadata.get('title', '').lower()
-                    summary = metadata.get('summary_snippet', '').lower()
-                    field = metadata.get('field', '').lower()
+                    # Apply year filter if specified
+                    if target_year and metadata.get('publication_year') != target_year:
+                        continue
                     
-                    authors = []
-                    domains = []
-                    if metadata.get('authors'):
-                        try:
-                            authors_data = json.loads(metadata.get('authors', '[]'))
-                            if isinstance(authors_data, list):
-                                authors = [str(a).lower() for a in authors_data if a]
-                            elif isinstance(authors_data, dict):
-                                authors = [str(v).lower() for v in authors_data.values() if v]
-                        except json.JSONDecodeError:
-                            authors = []
-                    if metadata.get('domains'):
-                        try:
-                            domains_data = json.loads(metadata.get('domains', '[]'))
-                            domains = [str(d).lower() for d in domains_data if d]
-                        except json.JSONDecodeError:
-                            domains = []
+                    # Calculate base relevance score with improved weighting
+                    score = self._calculate_publication_relevance(metadata, query_terms)
                     
-                    for keyword in query_keywords:
-                        if keyword in title:
-                            score += 3
-                        if keyword in summary:
-                            score += 2
-                        if keyword in field:
-                            score += 2
-                        if any(keyword in author for author in authors):
-                            score += 1
-                        if any(keyword in domain for domain in domains):
-                            score += 1
+                    # Boost score for publications from expert-resource links
+                    if resource_id in expert_related_publications:
+                        score += expert_related_publications[resource_id] * 5  # Substantial boost based on confidence
                     
-                    year_matches = re.findall(r'\b(19|20)\d{2}\b', query)
-                    pub_year = metadata.get('publication_year', '')
-                    if year_matches and pub_year in year_matches:
-                        score += 3
-                    
-                    if metadata.get('doi') and metadata.get('doi').strip() and metadata.get('doi') != 'None':
-                        score += 5
-                    
+                    # Only include results with meaningful scores
                     if score > 0:
+                        # Prepare authors and domains data
+                        self._prepare_publication_metadata(metadata)
                         metadata['match_score'] = score
-                        if metadata.get('authors'):
-                            try:
-                                metadata['authors'] = json.loads(metadata.get('authors', '[]'))
-                            except:
-                                metadata['authors'] = []
-                        if metadata.get('domains'):
-                            try:
-                                metadata['domains'] = json.loads(metadata.get('domains', '[]'))
-                            except:
-                                metadata['domains'] = []
-                        results.append(metadata)
+                        scored_results.append(metadata)
+                        
                 except Exception as e:
                     logger.error(f"Error processing publication {key}: {e}")
                     continue
             
-            sorted_results = sorted(results, key=lambda x: x.get('match_score', 0), reverse=True)
-            top_publications = sorted_results[:limit]
+            # Sort by relevance score
+            sorted_results = sorted(scored_results, key=lambda x: x.get('match_score', 0), reverse=True)
+            top_publications = sorted_results[:requested_count]
             
+            # Count publications with DOIs for quality assurance
             with_doi = [p for p in top_publications if p.get('doi') and p.get('doi').strip() and p.get('doi') != 'None']
             logger.info(f"Found {len(top_publications)} relevant publications for query")
             logger.info(f"Of these, {len(with_doi)} have DOIs")
 
             if not top_publications:
-                # Generate suggestions for empty results
+                # Generate specific suggestions based on query analysis
                 suggestions = self._generate_search_suggestions(query)
                 return [], suggestions
 
@@ -368,6 +268,189 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error retrieving publications: {e}")
             return [], "We encountered an error searching publications. Try simplifying your query."
+
+    def _get_all_publication_keys(self) -> List[str]:
+        """Helper method to get all publication keys from Redis"""
+        try:
+            publication_keys = []
+            cursor = 0
+            pattern = "meta:resource:*"
+            
+            while True:
+                cursor, keys = self.redis_manager.redis_text.scan(cursor, match=pattern, count=100)
+                publication_keys.extend(keys)
+                if cursor == 0:
+                    break
+                    
+            logger.info(f"Found {len(publication_keys)} total publications in Redis")
+            return publication_keys
+        except Exception as e:
+            logger.error(f"Error retrieving publication keys: {e}")
+            return []
+
+    def _get_stopwords(self) -> Set[str]:
+        """Return common stopwords to ignore in queries"""
+        return {
+            'what', 'when', 'where', 'which', 'who', 'why', 'how', 
+            'the', 'and', 'for', 'that', 'this', 'are', 'with',
+            'list', 'show', 'find', 'get', 'give', 'me', 'about',
+            'publications', 'publication', 'papers', 'paper', 'research',
+            'from', 'during', 'between'
+        }
+
+    def _calculate_publication_relevance(self, metadata: Dict[str, Any], query_terms: Set[str]) -> float:
+        """Calculate relevance score for a publication with improved weighting"""
+        score = 0
+        
+        # Extract relevant fields for matching
+        title = metadata.get('title', '').lower()
+        summary = metadata.get('summary_snippet', '').lower()
+        field = metadata.get('field', '').lower()
+        
+        # Process authors with better error handling
+        authors = []
+        domains = []
+        if metadata.get('authors'):
+            try:
+                authors_data = json.loads(metadata.get('authors', '[]'))
+                if isinstance(authors_data, list):
+                    authors = [str(a).lower() for a in authors_data if a]
+                elif isinstance(authors_data, dict):
+                    authors = [str(v).lower() for v in authors_data.values() if v]
+            except json.JSONDecodeError:
+                authors = []
+                
+        if metadata.get('domains'):
+            try:
+                domains_data = json.loads(metadata.get('domains', '[]'))
+                domains = [str(d).lower() for d in domains_data if d]
+            except json.JSONDecodeError:
+                domains = []
+        
+        # Apply semantic weights to different fields
+        for keyword in query_terms:
+            if keyword in title:
+                score += 4  # Higher weight for title matches
+            if keyword in summary:
+                score += 2  # Medium weight for summary matches
+            if keyword in field:
+                score += 2.5  # Increased weight for field matches
+            if any(keyword in author for author in authors):
+                score += 3  # Higher weight for author matches
+            if any(keyword in domain for domain in domains):
+                score += 2  # Medium weight for domain matches
+        
+        # Apply multiplier for publications with DOIs for higher quality
+        if metadata.get('doi') and metadata.get('doi').strip() and metadata.get('doi') != 'None':
+            score *= 1.5
+        
+        return score
+
+    def _prepare_publication_metadata(self, metadata: Dict[str, Any]) -> None:
+        """Prepare publication metadata for response formatting"""
+        # Process authors data
+        if metadata.get('authors'):
+            try:
+                metadata['authors'] = json.loads(metadata.get('authors', '[]'))
+            except:
+                metadata['authors'] = []
+                
+        # Process domains data
+        if metadata.get('domains'):
+            try:
+                metadata['domains'] = json.loads(metadata.get('domains', '[]'))
+            except:
+                metadata['domains'] = []
+
+    async def _check_for_expert_publications(self, query: str) -> Dict[str, float]:
+        """Check if query mentions experts and find their linked publications with direct matcher integration"""
+        publication_confidence = {}
+        
+        try:
+            # Extract potential name fragments from query
+            name_fragments = re.findall(r'\b[A-Z][a-z]{2,}\b', query)
+            
+            if not name_fragments:
+                return publication_confidence
+                
+            # Use EnhancedMatcher directly when possible
+            try:
+                from ai_services_api.services.centralized_repository.expert_matching.models import EnhancedMatcher
+                matcher = EnhancedMatcher()
+                
+                # First try to get experts by name from the matcher
+                expert_ids = []
+                for name in name_fragments:
+                    # Use the normalized name functionality from matcher
+                    normalized_name = matcher._normalize_name(name)
+                    if normalized_name:
+                        # Connect to database to search for matching experts
+                        async with DatabaseConnector.get_connection() as conn:
+                            query_text = """
+                                SELECT id FROM experts_expert
+                                WHERE first_name ILIKE $1 OR last_name ILIKE $1
+                            """
+                            rows = await conn.fetch(query_text, f"%{name}%")
+                            expert_ids.extend([row['id'] for row in rows])
+                
+                if expert_ids:
+                    # Get linked publications with confidence scores from expert_resource_links
+                    expert_placeholders = ",".join([f"${i+1}" for i in range(len(expert_ids))])
+                    query_text = f"""
+                        SELECT resource_id, confidence_score 
+                        FROM expert_resource_links
+                        WHERE expert_id IN ({expert_placeholders})
+                        ORDER BY confidence_score DESC
+                    """
+                    
+                    async with DatabaseConnector.get_connection() as conn:
+                        rows = await conn.fetch(query_text, *expert_ids)
+                        
+                        for row in rows:
+                            resource_id = str(row['resource_id'])
+                            confidence = float(row['confidence_score'])
+                            
+                            # Use highest confidence score if multiple experts match
+                            if resource_id not in publication_confidence or confidence > publication_confidence[resource_id]:
+                                publication_confidence[resource_id] = confidence
+                                
+                    logger.info(f"Found {len(publication_confidence)} publications linked to experts mentioned in query (EnhancedMatcher)")
+                    
+            except ImportError:
+                # Fall back to direct database query if EnhancedMatcher not available
+                logger.info("EnhancedMatcher not available, using direct database query")
+                
+                # Look for experts whose names might be mentioned
+                async with DatabaseConnector.get_connection() as conn:
+                    placeholders = ",".join([f"${i+1}" for i in range(len(name_fragments))])
+                    query_text = f"""
+                        SELECT e.id, e.first_name, e.last_name, l.resource_id, l.confidence_score
+                        FROM experts_expert e
+                        JOIN expert_resource_links l ON e.id = l.expert_id
+                        WHERE e.first_name IN ({placeholders}) OR e.last_name IN ({placeholders})
+                        ORDER BY l.confidence_score DESC
+                    """
+                    
+                    # Double the name fragments list for both first_name and last_name checks
+                    query_params = name_fragments + name_fragments
+                    
+                    # Execute query and process results
+                    rows = await conn.fetch(query_text, *query_params)
+                    
+                    for row in rows:
+                        resource_id = str(row['resource_id'])
+                        confidence = float(row['confidence_score'])
+                        
+                        # Use highest confidence score if multiple experts match
+                        if resource_id not in publication_confidence or confidence > publication_confidence[resource_id]:
+                            publication_confidence[resource_id] = confidence
+                            
+                    logger.info(f"Found {len(publication_confidence)} publications linked to experts mentioned in query (direct query)")
+                
+        except Exception as e:
+            logger.error(f"Error checking for expert publications: {e}")
+            
+        return publication_confidence
 
         
     def _generate_search_suggestions(self, query: str) -> str:
@@ -387,9 +470,154 @@ class GeminiLLMManager:
         
         return "No exact matches found. Suggestions:\n- " + "\n- ".join(suggestions)
 
+    async def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
+        """Format publication data into a readable, structured context with expert associations."""
+        if not publications:
+            return "No specific publications found."
+            
+        # First check if this is a list request (multiple publications)
+        is_list_format = len(publications) > 1
+        
+        if is_list_format:
+            context_parts = [f"Here are {len(publications)} relevant APHRC publications:"]
+        else:
+            context_parts = ["Here is a specific APHRC publication:"]
+        
+        # Count publications with DOIs for debugging
+        doi_count = 0
+        
+        # Try to enrich publications with expert information
+        publication_experts = await self._get_expert_for_publications([pub.get('id') for pub in publications if pub.get('id')])
+        
+        for idx, pub in enumerate(publications):
+            pub_context = []
+            
+            # Add index number for list formats
+            prefix = f"{idx + 1}. " if is_list_format else ""
+            
+            # Title - always include and make prominent
+            title = pub.get('title', 'Untitled')
+            pub_context.append(f"{prefix}Title: {title}")
+            
+            # Publication year
+            if pub.get('publication_year'):
+                pub_context.append(f"Year: {pub.get('publication_year')}")
+                
+            # DOI (crucial for preventing fictional DOIs)
+            if pub.get('doi') and pub.get('doi').strip() and pub.get('doi') != 'None':
+                doi_value = pub.get('doi').strip()
+                # Check if DOI is already a URL
+                if doi_value.startswith('https://doi.org/'):
+                    # It's already a full URL, use as is
+                    pub_context.append(f"DOI: {doi_value}")
+                else:
+                    # It's just the DOI identifier, format as URL
+                    pub_context.append(f"DOI: https://doi.org/{doi_value}")
+                doi_count += 1
+            
+            # Authors - more robust formatting
+            authors = pub.get('authors', [])
+            if authors:
+                if isinstance(authors, list):
+                    if authors:
+                        # Filter out empty/None values and join
+                        valid_authors = [str(a) for a in authors if a]
+                        if valid_authors:
+                            authors_text = ", ".join(valid_authors)
+                            pub_context.append(f"Authors: {authors_text}")
+                elif isinstance(authors, str):
+                    pub_context.append(f"Authors: {authors}")
+                elif isinstance(authors, dict):
+                    authors_text = ", ".join(str(v) for v in authors.values() if v)
+                    pub_context.append(f"Authors: {authors_text}")
+            
+            # Add expert information if available
+            pub_id = str(pub.get('id', ''))
+            if pub_id in publication_experts:
+                experts = publication_experts[pub_id]
+                if experts:
+                    expert_names = [f"{e.get('first_name', '')} {e.get('last_name', '')}".strip() for e in experts]
+                    expert_names = [name for name in expert_names if name]  # Remove empty names
+                    if expert_names:
+                        pub_context.append(f"APHRC Experts: {', '.join(expert_names)}")
+            
+            # Field and subfield
+            if pub.get('field'):
+                field_text = f"Field: {pub.get('field')}"
+                if pub.get('subfield'):
+                    field_text += f", Subfield: {pub.get('subfield')}"
+                pub_context.append(field_text)
+                
+            # Summary - with length control for multiple publications
+            if pub.get('summary_snippet'):
+                summary = pub.get('summary_snippet')
+                # Shorter summary when showing multiple publications
+                if is_list_format and len(summary) > 150:
+                    summary = summary[:147] + "..."
+                pub_context.append(f"Summary: {summary}")
+                
+            context_parts.append("\n".join(pub_context))
+        
+        # Add a note about DOIs for system understanding
+        if doi_count > 0:
+            context_parts.append(f"\nNote: {doi_count} of these publications have verified DOIs that should be included in any citation.")
+        
+        logger.info(f"Formatted {len(publications)} publications, {doi_count} with DOIs")
+        
+        return "\n\n".join(context_parts)
+
+    async def _get_expert_for_publications(self, publication_ids: List[str]) -> Dict[str, List[Dict]]:
+        """Get experts associated with publications through expert-resource links"""
+        publication_experts = {}
+        
+        if not publication_ids:
+            return publication_experts
+            
+        try:
+            # Convert all IDs to strings for consistent comparison
+            publication_ids = [str(pub_id) for pub_id in publication_ids]
+            
+            # Create placeholders for SQL query
+            placeholders = ",".join([f"${i+1}" for i in range(len(publication_ids))])
+            
+            async with DatabaseConnector.get_connection() as conn:
+                query = f"""
+                    SELECT l.resource_id, e.id, e.first_name, e.last_name, l.confidence_score
+                    FROM expert_resource_links l
+                    JOIN experts_expert e ON l.expert_id = e.id
+                    WHERE l.resource_id IN ({placeholders})
+                    AND l.confidence_score >= 0.7
+                    ORDER BY l.confidence_score DESC
+                """
+                
+                rows = await conn.fetch(query, *publication_ids)
+                
+                # Group experts by publication
+                for row in rows:
+                    resource_id = str(row['resource_id'])
+                    
+                    if resource_id not in publication_experts:
+                        publication_experts[resource_id] = []
+                        
+                    expert = {
+                        'id': row['id'],
+                        'first_name': row['first_name'],
+                        'last_name': row['last_name'],
+                        'confidence': row['confidence_score']
+                    }
+                    
+                    publication_experts[resource_id].append(expert)
+                    
+            logger.info(f"Found experts for {len(publication_experts)} publications")
+            
+        except Exception as e:
+            logger.error(f"Error fetching experts for publications: {e}")
+            
+        return publication_experts
+
     def _create_system_message(self, intent: QueryIntent) -> str:
         """
-        Create appropriate system message based on intent with natural, flowing responses.
+        Create appropriate system message with expert reference integration.
         """
         base_prompts = {
             "common": (
@@ -403,12 +631,17 @@ class GeminiLLMManager:
                 "Prioritize most relevant sections first."
             ),
             QueryIntent.PUBLICATION: (
-                "Summarize research publications briefly. "
-                "IMPORTANT: When DOIs are available, use them as clickable links. "
-                "If the DOI is already a full URL like 'https://doi.org/10.xxxx/yyyy', "
-                "format it as [https://doi.org/10.xxxx/yyyy](https://doi.org/10.xxxx/yyyy). "
-                "Always format citations as: Author et al. (Year) - Key finding. Include the DOI link at the end of each citation. "
-                "Focus on main conclusions and practical implications."
+                "When presenting publications, follow these strict guidelines:\n"
+                "1. ONLY reference publications explicitly provided in the context.\n"
+                "2. When showing multiple publications, use numbered lists consistently.\n"
+                "3. ALWAYS include publication year when available.\n"
+                "4. ALWAYS include DOI links when available in the format: https://doi.org/10.xxxx/yyyy\n"
+                "5. NEVER create or invent publication details, titles, authors, or DOIs.\n"
+                "6. If APHRC Experts are mentioned for a publication, include them in your response.\n"
+                "7. If asked for specific numbers of publications (e.g., '5 publications') and fewer are available, "
+                "explicitly state 'I found X out of the Y requested publications.'\n"
+                "8. If no publications match the criteria, state this clearly and offer alternative suggestions.\n"
+                "Format citations consistently as: Author et al. (Year). Title. DOI: https://doi.org/10.xxxx/yyyy"
             ),
             QueryIntent.GENERAL: (
                 "Provide focused overview of APHRC's work. "
@@ -420,20 +653,21 @@ class GeminiLLMManager:
         response_guidelines = (
             "Structure responses in a natural conversational style. "
             "Start with a direct answer, then provide supporting details, and end with relevant links if applicable. "
-            "Use natural, flowing language without numbered points. "
-            "Avoid repetition and technical jargon."
+            "Use natural, flowing language without repetition or technical jargon."
         )
 
-        # Add specific instruction for publication queries to prevent making up information
+        # Add enhanced instructions for publication queries
         if intent == QueryIntent.PUBLICATION:
             publication_instruction = (
-                "VERY IMPORTANT: Only reference the specific publications mentioned in the context. "
-                "Do NOT create hypothetical or fictional DOIs. "
-                "Make sure to include DOI links when they are present in the context. "
-                "If no specific publications are provided in the context, "
-                "recommend the user visit the APHRC website for publication information "
-                "instead of making up publication details. "
-                "Never invent research findings or publication information."
+                "CRITICAL INSTRUCTION: You are retrieving real APHRC publications from a database.\n"
+                "- You must ONLY reference the specific publications mentioned in the context.\n"
+                "- Review the exact titles, authors, years, and DOIs provided to you in the context.\n"
+                "- When APHRC Experts are listed for a publication, highlight their association with the work.\n"
+                "- If no specific publications are provided in the context, clearly state this limitation "
+                "and recommend the user visit the APHRC website instead of making up publication details.\n"
+                "- When referencing a DOI, format it EXACTLY as provided in the context without modification.\n"
+                "- For list requests (like '5 publications from 2022'), maintain the numbering provided in the context.\n"
+                "- NEVER invent, modify, or embellish publication details such as titles, authors, years, findings, or DOIs."
             )
             return f"{base_prompts['common']} {base_prompts[intent]} {response_guidelines} {publication_instruction}"
         
@@ -441,10 +675,16 @@ class GeminiLLMManager:
 
     
 
+   
+    async def _reset_rate_limited_after(self, seconds: int):
+        """Reset rate limited flag after specified seconds."""
+        await asyncio.sleep(seconds)
+        self._rate_limited = False
+        logger.info(f"Rate limit cooldown expired after {seconds} seconds")
+
     async def analyze_quality(self, message: str, response: str = "") -> Dict:
         """
-        Analyze the quality of a response in terms of helpfulness, factual accuracy, and potential hallucination.
-        Includes improved rate limit handling.
+        Analyze the quality of a response with enhanced hallucination detection for publications.
         
         Args:
             message (str): The user's original query
@@ -459,7 +699,17 @@ class GeminiLLMManager:
                 logger.warning("Skipping quality analysis due to recent rate limit")
                 return self._get_default_quality()
             
-            # If no response provided, we can only analyze the query
+            # Check if query relates to publications
+            is_publication_query = False
+            publication_patterns = [
+                r'publications?', r'papers?', r'research', r'articles?', 
+                r'studies', r'doi', r'authors?', r'published'
+            ]
+            if any(re.search(pattern, message.lower()) for pattern in publication_patterns):
+                is_publication_query = True
+                logger.info("Detected publication-related query - applying enhanced quality checks")
+            
+            # If no response provided, analyze the query only
             if not response:
                 prompt = f"""Analyze this query for an APHRC chatbot and return a JSON object with quality expectations.
                 The chatbot helps users find publications and navigate APHRC resources.
@@ -477,25 +727,54 @@ class GeminiLLMManager:
                 Query to analyze: {message}
                 """
             else:
-                # If we have both query and response, analyze the response quality
-                prompt = f"""Analyze the quality of this chatbot response for the given query and return a JSON object.
-                The APHRC chatbot helps users find publications and navigate APHRC resources.
-                Evaluate helpfulness, factual accuracy, and potential hallucination.
-                Return ONLY the JSON object with no markdown formatting, no code blocks, and no additional text.
-                
-                Required format:
-                {{
-                    "helpfulness_score": <float between 0 and 1>,
-                    "hallucination_risk": <float between 0 and 1>,
-                    "factual_grounding_score": <float between 0 and 1>,
-                    "unclear_elements": [<array of strings representing unclear aspects of the response>],
-                    "potentially_fabricated_elements": [<array of strings representing statements that may be hallucinated>]
-                }}
-                
-                User query: {message}
-                
-                Chatbot response: {response}
-                """
+                # For publication queries, add specific checks for hallucination
+                if is_publication_query:
+                    prompt = f"""Analyze the quality of this chatbot response about APHRC publications and return a JSON object.
+                    Focus especially on detecting potential fabrication of publication details.
+                    Return ONLY the JSON object with no markdown formatting, no code blocks, and no additional text.
+                    
+                    Required format:
+                    {{
+                        "helpfulness_score": <float between 0 and 1>,
+                        "hallucination_risk": <float between 0 and 1>,
+                        "factual_grounding_score": <float between 0 and 1>,
+                        "unclear_elements": [<array of strings representing unclear aspects of the response>],
+                        "potentially_fabricated_elements": [<array of specific publication details that may be fabricated>]
+                    }}
+                    
+                    Pay special attention to:
+                    1. Publication titles that seem generic or made-up
+                    2. Author names
+                    3. DOIs that don't follow standard formats (e.g., missing "10." prefix)
+                    4. Specific years or dates mentioned without context
+                    5. Publication findings or conclusions stated without reference to actual documents
+                    
+                    Flag any specific sections of the response that appear fabricated or hallucinated.
+                    
+                    User query: {message}
+                    
+                    Chatbot response: {response}
+                    """
+                else:
+                    # For non-publication queries, use standard analysis
+                    prompt = f"""Analyze the quality of this chatbot response for the given query and return a JSON object.
+                    The APHRC chatbot helps users find publications and navigate APHRC resources.
+                    Evaluate helpfulness, factual accuracy, and potential hallucination.
+                    Return ONLY the JSON object with no markdown formatting, no code blocks, and no additional text.
+                    
+                    Required format:
+                    {{
+                        "helpfulness_score": <float between 0 and 1>,
+                        "hallucination_risk": <float between 0 and 1>,
+                        "factual_grounding_score": <float between 0 and 1>,
+                        "unclear_elements": [<array of strings representing unclear aspects of the response>],
+                        "potentially_fabricated_elements": [<array of strings representing statements that may be hallucinated>]
+                    }}
+                    
+                    User query: {message}
+                    
+                    Chatbot response: {response}
+                    """
             
             # Use model with retry logic already built in from get_gemini_model()
             try:
@@ -512,6 +791,14 @@ class GeminiLLMManager:
                 try:
                     quality_data = json.loads(cleaned_response)
                     logger.info(f"Response quality analysis result: {quality_data}")
+                    
+                    # For publication queries, add an additional check for post-processing action
+                    if is_publication_query and 'potentially_fabricated_elements' in quality_data:
+                        if quality_data['potentially_fabricated_elements']:
+                            logger.warning(f"Detected potentially fabricated publication elements: {quality_data['potentially_fabricated_elements']}")
+                            # Flag this response for review or intervention
+                            quality_data['requires_review'] = True
+                            
                     return quality_data
                 except json.JSONDecodeError as e:
                     logger.error(f"Failed to parse quality analysis response: {cleaned_response}")
@@ -533,20 +820,15 @@ class GeminiLLMManager:
             logger.error(f"Error in quality analysis: {e}")
             return self._get_default_quality()
 
-    async def _reset_rate_limited_after(self, seconds: int):
-        """Reset rate limited flag after specified seconds."""
-        await asyncio.sleep(seconds)
-        self._rate_limited = False
-        logger.info(f"Rate limit cooldown expired after {seconds} seconds")
-
     def _get_default_quality(self) -> Dict:
-        """Return default quality metric values."""
+        """Return default quality metric values with publication-specific flags."""
         return {
             'helpfulness_score': 0.5,
             'hallucination_risk': 0.5,
             'factual_grounding_score': 0.5,
             'unclear_elements': [],
-            'potentially_fabricated_elements': []
+            'potentially_fabricated_elements': [],
+            'requires_review': False
         }
 
     # This maintains backwards compatibility with code still calling analyze_sentiment
@@ -572,11 +854,58 @@ class GeminiLLMManager:
         }
     
     async def detect_intent(self, message: str, is_followup: bool = False) -> Tuple[QueryIntent, float, Optional[str]]:
-        """Enhanced intent detection with clarification support."""
+        """Enhanced intent detection with improved pattern recognition and clarification support."""
         try:
             message = message.lower()
+            
+            # Check for publication list requests as a high-priority pattern
+            list_patterns = [
+                r'(\d+)\s+publications',
+                r'list\s+(\d+)',
+                r'top\s+(\d+)\s+papers',
+                r'show\s+(\d+)\s+research',
+                r'find\s+(\d+)\s+studies'
+            ]
+            
+            for pattern in list_patterns:
+                if re.search(pattern, message):
+                    logger.info(f"Detected publication list request: {message}")
+                    return QueryIntent.PUBLICATION, 0.95, None
+            
+            # Check for specific publication requests (by DOI or title)
+            if re.search(r'doi|10\.\d+\/|publication titled|paper titled|article about', message):
+                logger.info(f"Detected specific publication request: {message}")
+                return QueryIntent.PUBLICATION, 0.95, None
+            
+            # Initialize scores for general intent detection
             intent_scores = {intent: 0.0 for intent in QueryIntent}
             matched_keywords = {intent: [] for intent in QueryIntent}
+            
+            # Enhanced pattern matching with additional patterns
+            self.intent_patterns[QueryIntent.PUBLICATION]['patterns'].extend([
+                (r'research paper', 1.0),
+                (r'papers from', 0.9),
+                (r'articles', 0.9),
+                (r'publications from (\d{4})', 1.0),  # Year-specific requests
+                (r'published in (\d{4})', 1.0),
+                (r'recent studies', 0.9),
+                (r'bibliography', 0.8),
+                (r'works cited', 0.8),
+                (r'references', 0.7),
+                (r'latest research', 0.9)
+            ])
+            
+            self.intent_patterns[QueryIntent.NAVIGATION]['patterns'].extend([
+                (r'how do i get to', 1.0),
+                (r'link to', 0.9),
+                (r'url for', 1.0),
+                (r'go to', 0.8),
+                (r'access the', 0.7),
+                (r'browse', 0.7),
+                (r'site map', 0.9),
+                (r'homepage', 0.9),
+                (r'menu', 0.8)
+            ])
             
             # Score patterns and collect matched keywords
             for intent, config in self.intent_patterns.items():
@@ -584,7 +913,8 @@ class GeminiLLMManager:
                 matches = 0
                 
                 for pattern, weight in config['patterns']:
-                    if re.search(pattern, message):
+                    pattern_matches = re.findall(pattern, message)
+                    if pattern_matches:
                         score += weight
                         matches += 1
                         matched_keywords[intent].append(pattern)
@@ -597,22 +927,29 @@ class GeminiLLMManager:
             
             # Generate clarification only for initial queries (not followups)
             if not is_followup:
-                # Borderline confidence case
+                # Borderline confidence case with improved specificity
                 if 0.4 <= max_score < 0.6:
                     top_intents = sorted(intent_scores.items(), key=lambda x: x[1], reverse=True)[:2]
                     if len(top_intents) > 1 and top_intents[0][1] - top_intents[1][1] < 0.2:
-                        clarification = (
-                            f"I found both '{top_intents[0][0].value}' and '{top_intents[1][0].value}' relevant. "
-                            f"Are you looking for {self._get_intent_examples(top_intents[0][0])} or "
-                            f"{self._get_intent_examples(top_intents[1][0])}?"
-                        )
+                        # Create specific clarification based on the top intents
+                        if top_intents[0][0] == QueryIntent.PUBLICATION and top_intents[1][0] == QueryIntent.NAVIGATION:
+                            clarification = (
+                                "I'm not sure if you're looking for research publications or help navigating the website. "
+                                "Could you clarify if you want to find published research or locate a specific section of the website?"
+                            )
+                        else:
+                            clarification = (
+                                f"I found both '{top_intents[0][0].value}' and '{top_intents[1][0].value}' relevant. "
+                                f"Are you looking for {self._get_intent_examples(top_intents[0][0])} or "
+                                f"{self._get_intent_examples(top_intents[1][0])}?"
+                            )
                 
-                # Low confidence case
+                # Low confidence case with more helpful suggestions
                 elif max_score < 0.4:
                     clarification = (
                         "Could you clarify what you're looking for? For example:\n"
-                        "- Publications: 'Find papers about maternal health'\n"
-                        "- Navigation: 'Where can I find research datasets?'"
+                        "- For publications: 'Find papers about maternal health' or 'List 5 publications from 2020'\n"
+                        "- For website navigation: 'Where can I find research datasets?' or 'How do I access reports?'"
                     )
 
             # Return only if score meets threshold
@@ -629,6 +966,15 @@ class GeminiLLMManager:
         finally:
             # Optional cleanup or logging
             logger.debug(f"Intent detection executed for message: '{message}' (follow-up: {is_followup})")
+
+    def _get_intent_examples(self, intent: QueryIntent) -> str:
+        """Get examples for the given intent to help with clarification."""
+        examples = {
+            QueryIntent.PUBLICATION: "publications like 'recent research on maternal health' or 'papers from 2022'",
+            QueryIntent.NAVIGATION: "website sections like 'research datasets' or 'contact information'",
+            QueryIntent.GENERAL: "general information about APHRC's work"
+        }
+        return examples.get(intent, "information about this topic")
 
 
     def create_context(self, relevant_data: List[Dict]) -> str:

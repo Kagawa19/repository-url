@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 from typing import AsyncIterable, Optional, Dict
 from datetime import datetime
@@ -16,12 +17,10 @@ class MessageHandler:
     def __init__(self, llm_manager):
         self.metadata = None
         self.llm_manager = llm_manager
-    
     @staticmethod
     def clean_response_text(text: str) -> str:
         """
-        Clean and format the response text to remove markdown formatting and make it more natural.
-        Converts DOI citations into clickable links with publication titles.
+        Clean and format the response text with enhanced handling of publication data.
         
         Args:
             text (str): The input text with markdown formatting
@@ -29,44 +28,51 @@ class MessageHandler:
         Returns:
             str: Cleaned and reformatted text
         """
-        # Replace common markdown patterns
+        # Skip cleaning for numbered publication list items
+        if re.match(r'^\d+\.\s+Title:', text.strip()):
+            # Just remove some basic markdown but preserve structure
+            cleaned = text.replace('\n**', ' ')
+            cleaned = cleaned.replace('**', '')
+            return cleaned.strip()
+        
+        # Skip cleaning for DOI lines to preserve formatting
+        if re.match(r'^DOI:', text.strip()):
+            return text.strip()
+        
+        # Regular cleaning for other text
         cleaned = text.replace('\n**', ' ')
         cleaned = cleaned.replace('**', '')
         
-        # Remove numbered list formatting and bullet points
-        import re
-        cleaned = re.sub(r'\n\d+\.', '', cleaned)
+        # Preserve numbered lists by not removing them
+        if not re.search(r'\n\d+\.', cleaned):
+            # Only remove numbered list formatting if not a real list
+            cleaned = re.sub(r'\n\d+\.', '', cleaned)
         
         # Handle bullet points - replace with comma-separated list
         bullet_points = re.findall(r'\*\s*([^*\n]+)', cleaned)
         if bullet_points:
-            # Remove all bullet points first
-            cleaned = re.sub(r'\*\s*[^*\n]+\n*', '', cleaned)
-            # Add them back as a flowing sentence
-            bullet_list = ', '.join(point.strip() for point in bullet_points)
-            if 'Key Findings:' in cleaned:
-                cleaned = cleaned.replace('Key Findings:', f'Key findings include: {bullet_list}.')
+            # Only convert bullets to flowing text outside of structured lists
+            if "Title:" not in cleaned and "Authors:" not in cleaned:
+                # Remove all bullet points first
+                cleaned = re.sub(r'\*\s*[^*\n]+\n*', '', cleaned)
+                # Add them back as a flowing sentence
+                bullet_list = ', '.join(point.strip() for point in bullet_points)
+                if 'Key Findings:' in cleaned:
+                    cleaned = cleaned.replace('Key Findings:', f'Key findings include: {bullet_list}.')
+                else:
+                    cleaned += f" {bullet_list}."
         
-        # Handle DOI citations - transform into clickable links
-        # Look for patterns like "Study Title (DOI: https://doi.org/...)" or variations
-        doi_patterns = [
-            r'(.*?)\s*\(DOI:\s*https?://doi\.org/([^\)]+)\)',  # (DOI: https://doi.org/...)
-            r'(.*?)\s*\(doi:\s*([^\)]+)\)',                    # (doi: ...)
-            r'(.*?)\s*\(DOI:\s*([^\)]+)\)'                     # (DOI: ...)
-        ]
-        
-        for pattern in doi_patterns:
-            def replace_doi(match):
-                title = match.group(1).strip()
-                doi = match.group(2).strip()
-                # Remove spaces in DOI URL
-                doi = doi.replace(' ', '')
-                return f'<a href="https://doi.org/{doi}">{title}</a>'
+        # Handle DOI citations - preserve the format
+        doi_pattern = r'(https?://doi\.org/[^\s]+)'
+        if re.search(doi_pattern, cleaned):
+            # Ensure DOIs are properly formatted and not broken
+            def fix_doi(match):
+                doi = match.group(1)
+                # Remove any trailing punctuation
+                doi = re.sub(r'[.,;:]$', '', doi)
+                return doi
             
-            cleaned = re.sub(pattern, replace_doi, cleaned)
-        
-        # Clean up quotation marks
-        cleaned = re.sub(r'\"([^\"]+)\"', r'\1', cleaned)
+            cleaned = re.sub(doi_pattern, fix_doi, cleaned)
         
         # Fix spacing issues
         cleaned = re.sub(r'\s+', ' ', cleaned)
@@ -84,7 +90,7 @@ class MessageHandler:
 
     async def process_stream_response(self, response_stream):
         """
-        Process the streaming response and apply formatting.
+        Process the streaming response with enhanced formatting and structure preservation.
         
         Args:
             response_stream: Async generator of response chunks
@@ -94,6 +100,10 @@ class MessageHandler:
         """
         buffer = ""
         metadata = None
+        complete_text = ""
+        in_publication_list = False
+        list_item_buffer = ""
+        list_count = 0
         
         async for chunk in response_stream:
             # Capture metadata if present but continue processing
@@ -111,16 +121,37 @@ class MessageHandler:
                 continue
                     
             buffer += text
-                
-            # Process complete sentences
-            while '.' in buffer:
-                split_idx = buffer.find('.') + 1
-                sentence = self.clean_response_text(buffer[:split_idx])
-                buffer = buffer[split_idx:].lstrip()
-                    
-                if sentence.strip():
-                    yield sentence
+            complete_text += text
             
+            # Detect and preserve publication lists
+            list_pattern = r'\d+\.\s+Title:'
+            if re.search(list_pattern, buffer) and not in_publication_list:
+                in_publication_list = True
+                list_count += 1
+                
+            # Process complete sentences or list items
+            if in_publication_list:
+                # Try to find complete list items
+                items = re.split(r'(?=\d+\.\s+Title:)', buffer)
+                if len(items) > 1:
+                    # Keep the last (potentially incomplete) item in buffer
+                    complete_items = items[:-1]
+                    buffer = items[-1]
+                    
+                    for item in complete_items:
+                        if item.strip():
+                            formatted_item = self.clean_response_text(item)
+                            yield formatted_item
+            else:
+                # Normal sentence processing
+                while '.' in buffer:
+                    split_idx = buffer.find('.') + 1
+                    sentence = self.clean_response_text(buffer[:split_idx])
+                    buffer = buffer[split_idx:].lstrip()
+                    
+                    if sentence.strip():
+                        yield sentence
+        
         # Handle remaining buffer
         if buffer.strip():
             yield self.clean_response_text(buffer)
@@ -128,7 +159,6 @@ class MessageHandler:
         # After yielding all text chunks, yield the metadata if it exists
         if metadata:
             yield metadata
-
     async def start_chat_session(self, user_id: str) -> str:
         """
         Start a new chat session.
