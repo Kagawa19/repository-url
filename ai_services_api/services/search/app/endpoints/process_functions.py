@@ -489,41 +489,132 @@ async def process_advanced_query_prediction(
                     predictions = [item[0] for item in combined_items[:limit]]
                     confidence_scores = [item[1] for item in combined_items[:limit]]
                 
-                # If predictions are empty, fall back to GoogleAutocompletePredictor
-                # but only for generating suggestions, not for final results
+                # Context-specific fallback strategies when no predictions found
                 if not predictions:
-                    logger.info(f"No index-based predictions found, using fallback for context: {context}")
+                    logger.info(f"No index-based predictions found, using context-specific fallback for: {context}")
                     
-                    # Get predictions from Google Autocomplete
-                    predictor = await get_predictor()
-                    suggestion_objects = await predictor.predict(partial_query, limit=limit)
-                    ext_predictions = [s["text"] for s in suggestion_objects]
-                    ext_confidence_scores = [s.get("score", 0.5) for s in suggestion_objects]
-                    
-                    # Apply context-specific filtering
-                    if context and callable(getattr(search_manager, f"search_experts_by_{context}", None)):
-                        # For each predicted term, try to find matching experts
-                        for i, term in enumerate(ext_predictions[:3]):  # Check top 3 predictions
-                            search_method = getattr(search_manager, f"search_experts_by_{context}")
-                            term_results = search_method(term, k=3)
+                    if context == "name":
+                        # Name-specific fallback: try more lenient name matching
+                        # 1. Try first name only or last name only search
+                        name_parts = partial_query.strip().split()
+                        
+                        if len(name_parts) == 0:
+                            # Empty query
+                            pass
+                        elif len(name_parts) == 1:
+                            # Try to match first or last name separately with lower threshold
+                            first_name_results = []
+                            try:
+                                # Direct database query for any name match
+                                conn = get_db_connection()
+                                with conn.cursor() as cur:
+                                    cur.execute("""
+                                        SELECT id, first_name, last_name
+                                        FROM experts_expert
+                                        WHERE LOWER(first_name) LIKE %s OR LOWER(last_name) LIKE %s
+                                        LIMIT 5
+                                    """, (f"%{name_parts[0].lower()}%", f"%{name_parts[0].lower()}%"))
+                                    first_name_results = cur.fetchall()
+                            except Exception as db_error:
+                                logger.error(f"Name fallback DB error: {db_error}")
+                            finally:
+                                if conn:
+                                    conn.close()
                             
-                            if term_results:
-                                # Extract the relevant field based on context
-                                for result in term_results:
-                                    if context == "name":
-                                        item = f"{result.get('first_name', '')} {result.get('last_name', '')}".strip()
-                                    else:
-                                        item = result.get(context, '')
-                                        
-                                    if item and item not in predictions:
-                                        predictions.append(item)
-                                        # Score based on position in the fallback list
-                                        confidence_scores.append(0.9 - (0.1 * i))
+                            # Process results from direct DB query
+                            for result in first_name_results:
+                                full_name = f"{result[1] or ''} {result[2] or ''}".strip()
+                                if full_name and full_name not in predictions:
+                                    predictions.append(full_name)
+                                    confidence_scores.append(0.7)  # Moderate confidence for partial matches
+                        
+                        # If still no predictions, try fuzzy vector search
+                        if not predictions:
+                            # Use more lenient vector search for name
+                            more_lenient_results = search_manager.search_experts(
+                                f"expert named {partial_query}", 
+                                k=5,
+                                min_score=0.05  # Lower threshold for semantic matches
+                            )
+                            
+                            # Extract full names
+                            for result in more_lenient_results:
+                                full_name = f"{result.get('first_name', '')} {result.get('last_name', '')}".strip()
+                                if full_name and full_name not in predictions:
+                                    predictions.append(full_name)
+                                    confidence_scores.append(float(result.get('score', 0.3)) * 0.8)  # Lower confidence
                     
-                    # If still no predictions, use the external ones directly
-                    if not predictions:
-                        predictions = ext_predictions
-                        confidence_scores = [score * 0.7 for score in ext_confidence_scores]  # Lower confidence for external results
+                    elif context == "theme":
+                        # Theme-specific fallback: try broader or related theme matching
+                        # 1. Try knowledge expertise fields instead of theme
+                        knowledge_results = search_manager.search_experts(
+                            partial_query,
+                            k=5,
+                            min_score=0.05  # Lower threshold
+                        )
+                        
+                        # Extract unique expertise areas
+                        expertise_areas = set()
+                        for result in knowledge_results:
+                            if isinstance(result.get('knowledge_expertise', []), list):
+                                for area in result.get('knowledge_expertise', []):
+                                    if area and area not in expertise_areas:
+                                        expertise_areas.add(area)
+                        
+                        # Add expertise areas as predictions
+                        for i, area in enumerate(list(expertise_areas)[:5]):
+                            predictions.append(area)
+                            confidence_scores.append(0.8 - (i * 0.1))  # Decreasing confidence
+                        
+                        # 2. If still no predictions, try semantic search with expanded query
+                        if not predictions:
+                            expanded_query = f"research on {partial_query} studies in {partial_query}"
+                            semantic_results = search_manager.search_experts(
+                                expanded_query,
+                                k=5,
+                                min_score=0.05
+                            )
+                            
+                            # Extract themes or expertise
+                            for result in semantic_results:
+                                # Try theme first
+                                theme = result.get('theme', '')
+                                if theme and theme not in predictions:
+                                    predictions.append(theme)
+                                    confidence_scores.append(0.5)  # Low confidence
+                                
+                                # If no theme, try knowledge expertise
+                                elif isinstance(result.get('knowledge_expertise', []), list):
+                                    for area in result.get('knowledge_expertise', []):
+                                        if area and area not in predictions:
+                                            predictions.append(area)
+                                            confidence_scores.append(0.4)  # Very low confidence
+                    
+                    elif context == "designation":
+                        # For designation, try Google Autocomplete as it might be helpful
+                        predictor = await get_predictor()
+                        suggestion_objects = await predictor.predict(f"{partial_query} position", limit=limit)
+                        ext_predictions = [s["text"] for s in suggestion_objects]
+                        ext_confidence_scores = [s.get("score", 0.5) * 0.7 for s in suggestion_objects]  # Lower confidence
+                        
+                        # Apply some filtering to make the results more designation-like
+                        designation_indicators = ["researcher", "professor", "director", "lead", "head", 
+                                                 "scientist", "fellow", "post-doc", "postdoctoral", 
+                                                 "assistant", "associate", "senior", "junior", "phd"]
+                        
+                        # Filter to likely job titles
+                        for i, term in enumerate(ext_predictions):
+                            term_lower = term.lower()
+                            if any(indicator in term_lower for indicator in designation_indicators):
+                                predictions.append(term)
+                                confidence_scores.append(ext_confidence_scores[i] if i < len(ext_confidence_scores) else 0.5)
+                    
+                    else:
+                        # General search - use Google Autocomplete
+                        predictor = await get_predictor()
+                        suggestion_objects = await predictor.predict(partial_query, limit=limit)
+                        predictions = [s["text"] for s in suggestion_objects]
+                        confidence_scores = [s.get("score", 0.5) * 0.7 for s in suggestion_objects]  # Lower confidence
                 
                 # Cache the results
                 if redis and predictions:
@@ -539,11 +630,11 @@ async def process_advanced_query_prediction(
             except Exception as idx_error:
                 logger.error(f"Index search error: {idx_error}", exc_info=True)
                 
-                # Fallback to GoogleAutocompletePredictor if index search fails
+                # Generic fallback if everything fails
                 predictor = await get_predictor()
                 suggestion_objects = await predictor.predict(partial_query, limit=limit)
                 predictions = [s["text"] for s in suggestion_objects]
-                confidence_scores = [s.get("score", 0.5) for s in suggestion_objects]
+                confidence_scores = [s.get("score", 0.5) * 0.6 for s in suggestion_objects]  # Very low confidence
         
         # Personalize suggestions if possible
         try:
@@ -651,7 +742,6 @@ async def process_advanced_query_prediction(
             refinements=refinements_list,
             total_suggestions=len(predictions)
         )
-
 def filter_predictions_by_context(
     predictions: List[str], 
     confidence_scores: List[float], 

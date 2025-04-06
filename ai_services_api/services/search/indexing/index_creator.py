@@ -856,148 +856,518 @@ class ExpertSearchIndexManager:
     
     def search_experts_by_name(self, name: str, k: int = 5, active_only: bool = False, min_score: float = 0.1) -> List[Dict[str, Any]]:
         """
-        Search for experts by name using semantic search with name filtering.
+        Search for experts by name using direct database prefix matching for autocomplete.
         
         Args:
-            name: Name to search for
-            k: Number of results to return
-            active_only: Whether to return only active experts
-            min_score: Minimum similarity score threshold
-            
+            name (str): Name pattern to search for
+            k (int): Number of results to return
+            active_only (bool): Whether to return only active experts (maintained for compatibility)
+            min_score (float): Minimum similarity score threshold (maintained for compatibility)
+        
         Returns:
-            List of expert matches with metadata
+            List[Dict[str, Any]]: List of matching experts
         """
         try:
-            # First get all potential matches using semantic search
-            all_results = self.search_experts(name, k*3, active_only, min_score)
-            
-            if not all_results:
+            # Split the name into parts for more flexible matching
+            name_parts = name.lower().strip().split()
+            if not name_parts:
                 return []
                 
-            # Filter results where name matches
-            filtered_results = []
-            name_lower = name.lower()
+            # Get database connection
+            conn = self.db.get_connection()
+            matching_experts = []
             
-            for result in all_results:
-                first_name = result.get('first_name', '').lower()
-                last_name = result.get('last_name', '').lower()
-                
-                # Check if name appears in either first or last name
-                if (name_lower in first_name) or (name_lower in last_name):
-                    filtered_results.append(result)
+            try:
+                with conn.cursor() as cur:
+                    # Add active_only filter if requested
+                    active_filter = "AND is_active = true" if active_only else ""
                     
-                if len(filtered_results) >= k:
-                    break
+                    # First try exact prefix match (most relevant for autocomplete)
+                    if len(name_parts) == 1:
+                        # Single word pattern - match against first or last name start
+                        cur.execute(f"""
+                            SELECT 
+                                id, first_name, last_name, knowledge_expertise
+                            FROM experts_expert
+                            WHERE 
+                                (LOWER(first_name) LIKE %s OR 
+                                LOWER(last_name) LIKE %s)
+                                {active_filter}
+                            ORDER BY 
+                                CASE 
+                                    WHEN LOWER(first_name) LIKE %s THEN 1
+                                    WHEN LOWER(last_name) LIKE %s THEN 2
+                                    ELSE 3
+                                END,
+                                first_name, last_name
+                            LIMIT %s
+                        """, (
+                            f"{name_parts[0]}%", 
+                            f"{name_parts[0]}%",
+                            f"{name_parts[0]}%", 
+                            f"{name_parts[0]}%",
+                            k
+                        ))
+                    else:
+                        # Multiple word pattern - try matching first and last name combination
+                        first_part = name_parts[0]
+                        last_part = name_parts[-1]
+                        
+                        cur.execute(f"""
+                            SELECT 
+                                id, first_name, last_name, knowledge_expertise
+                            FROM experts_expert
+                            WHERE 
+                                (LOWER(first_name) LIKE %s AND LOWER(last_name) LIKE %s)
+                                {active_filter}
+                            ORDER BY 
+                                first_name, last_name
+                            LIMIT %s
+                        """, (
+                            f"{first_part}%", 
+                            f"{last_part}%",
+                            k
+                        ))
                     
-            return filtered_results[:k]
+                    # Process results
+                    rows = cur.fetchall()
+                    
+                    # Convert results to dictionaries with calculated scores
+                    for row in rows:
+                        expert_id, first_name, last_name, knowledge_expertise = row
+                        full_name = f"{first_name or ''} {last_name or ''}".strip()
+                        
+                        # Calculate match score based on how well it matches the pattern
+                        match_score = 0.95  # High score for direct database matches
+                        
+                        matching_experts.append({
+                            'id': expert_id,
+                            'first_name': first_name or '',
+                            'last_name': last_name or '',
+                            'knowledge_expertise': self._parse_jsonb(knowledge_expertise),
+                            'score': match_score
+                        })
+                    
+                    # If no exact prefix matches found and we have at least 3 characters, try more relaxed matching
+                    if not matching_experts and len(name) >= 3:
+                        # For single-part patterns, try substring matching anywhere in name
+                        if len(name_parts) == 1:
+                            cur.execute(f"""
+                                SELECT 
+                                    id, first_name, last_name, knowledge_expertise
+                                FROM experts_expert
+                                WHERE 
+                                    (LOWER(first_name) LIKE %s OR 
+                                    LOWER(last_name) LIKE %s)
+                                    {active_filter}
+                                ORDER BY 
+                                    first_name, last_name
+                                LIMIT %s
+                            """, (
+                                f"%{name_parts[0]}%", 
+                                f"%{name_parts[0]}%",
+                                k
+                            ))
+                            
+                            rows = cur.fetchall()
+                            
+                            # Add these with lower scores
+                            for row in rows:
+                                expert_id, first_name, last_name, knowledge_expertise = row
+                                full_name = f"{first_name or ''} {last_name or ''}".strip()
+                                
+                                matching_experts.append({
+                                    'id': expert_id,
+                                    'first_name': first_name or '',
+                                    'last_name': last_name or '',
+                                    'knowledge_expertise': self._parse_jsonb(knowledge_expertise),
+                                    'score': 0.7  # Lower score for substring matches
+                                })
+            
+            finally:
+                conn.close()
+            
+            # Sort by score (most relevant first)
+            matching_experts.sort(key=lambda x: x.get('score', 0), reverse=True)
+            return matching_experts[:k]
             
         except Exception as e:
-            logger.error(f"Error searching experts by name: {e}")
+            logger.error(f"Error in name search: {e}")
+            # Fall back to vector search if database query fails
+            try:
+                return self._fallback_vector_name_search(name, k, active_only, min_score)
+            except Exception as fallback_error:
+                logger.error(f"Fallback search also failed: {fallback_error}")
+                return []
+        
+    def _fallback_vector_name_search(self, name: str, k: int, active_only: bool, min_score: float):
+        """Fallback to vector search if direct database query fails"""
+        # Original vector search implementation as backup
+        try:
+            # Load index and mapping
+            index = faiss.read_index(str(self.index_path))
+            with open(self.mapping_path, 'rb') as f:
+                id_mapping = pickle.load(f)
+            
+            # Create a name-focused query 
+            name_focused_query = f"Name: {name} Expert named {name}"
+            
+            # Generate query embedding
+            query_embedding = self.model.encode([name_focused_query], convert_to_numpy=True)
+            
+            # Search index
+            max_candidates = min(k * 5, index.ntotal)
+            distances, indices = index.search(query_embedding.astype(np.float32), max_candidates)
+            
+            # Process results
+            results = []
+            name_lower = name.lower()
+            
+            for i, idx in enumerate(indices[0]):
+                if idx < 0:
+                    continue
+                    
+                expert_id = id_mapping[idx]
+                expert_data = self.redis_binary.hgetall(f"expert:{expert_id}")
+                
+                if expert_data:
+                    try:
+                        metadata = json.loads(expert_data[b'metadata'].decode())
+                        first_name = metadata.get('first_name', '').lower()
+                        last_name = metadata.get('last_name', '').lower()
+                        
+                        # Only include results with some name relevance
+                        if name_lower in first_name or name_lower in last_name:
+                            distance = float(distances[0][i])
+                            base_score = float(1.0 / (1.0 + distance))
+                            metadata['score'] = base_score
+                            results.append(metadata)
+                            
+                    except Exception as e:
+                        continue
+            
+            sorted_results = sorted(results, key=lambda x: x.get('score', 0), reverse=True)
+            return sorted_results[:k]
+            
+        except Exception as e:
+            logger.error(f"Fallback vector search failed: {e}")
             return []
 
     def search_experts_by_theme(self, theme: str, k: int = 5, active_only: bool = False, min_score: float = 0.1) -> List[Dict[str, Any]]:
         """
-        Search for experts by theme using semantic search with theme filtering.
+        Search for experts by theme using direct database matching of expertise.
         
         Args:
-            theme: Theme to search for
-            k: Number of results to return
-            active_only: Whether to return only active experts
-            min_score: Minimum similarity score threshold
-            
+            theme (str): Theme to search for
+            k (int): Number of results to return
+            active_only (bool): Whether to return only active experts
+            min_score (float): Minimum similarity score threshold
+        
         Returns:
-            List of expert matches with metadata
+            List[Dict[str, Any]]: List of matching experts
         """
         try:
-            # First get all potential matches using semantic search
-            all_results = self.search_experts(theme, k*3, active_only, min_score)
-            
-            if not all_results:
+            # Normalize the theme search term
+            theme_lower = theme.lower().strip()
+            if not theme_lower:
                 return []
                 
-            # Filter results where theme matches
-            filtered_results = []
-            theme_lower = theme.lower()
+            # Get database connection
+            conn = self.db.get_connection()
+            matching_experts = []
             
-            for result in all_results:
-                expert_theme = result.get('theme', '').lower()
-                
-                # Check if theme matches
-                if theme_lower in expert_theme:
-                    filtered_results.append(result)
+            try:
+                with conn.cursor() as cur:
+                    # Add active_only filter if requested
+                    active_filter = "AND is_active = true" if active_only else ""
                     
-                if len(filtered_results) >= k:
-                    break
+                    # Search for theme in knowledge expertise using JSON operators
+                    # This uses PostgreSQL's JSONB capabilities to search inside the expertise
+                    cur.execute(f"""
+                        SELECT 
+                            id, first_name, last_name, knowledge_expertise, theme
+                        FROM experts_expert
+                        WHERE 
+                            (
+                                -- Check in knowledge_expertise (assuming it's JSONB array)
+                                (knowledge_expertise ? %s) OR
+                                -- Check for partial matches in expertise items
+                                (EXISTS (
+                                    SELECT FROM jsonb_array_elements_text(knowledge_expertise) 
+                                    WHERE value ILIKE %s
+                                )) OR
+                                -- Check in theme field directly (if it exists)
+                                (theme ILIKE %s)
+                            )
+                            {active_filter}
+                        LIMIT %s
+                    """, (
+                        theme_lower,  # Exact match in expertise
+                        f"%{theme_lower}%",  # Partial match in expertise
+                        f"%{theme_lower}%",  # Partial match in theme
+                        k*3  # Get more to sort better
+                    ))
                     
-            return filtered_results[:k]
+                    rows = cur.fetchall()
+                    
+                    # Process results with relevance scoring
+                    for row in rows:
+                        expert_id, first_name, last_name, knowledge_expertise, expert_theme = row
+                        expertise_list = self._parse_jsonb(knowledge_expertise)
+                        
+                        # Calculate theme match score based on where it matched
+                        match_score = 0.5  # Base score
+                        
+                        # Check direct theme match
+                        if expert_theme and theme_lower in expert_theme.lower():
+                            match_score = 0.9  # High score for theme match
+                        
+                        # Check expertise matches
+                        if isinstance(expertise_list, list):
+                            for area in expertise_list:
+                                area_lower = str(area).lower()
+                                if theme_lower == area_lower:
+                                    match_score = max(match_score, 0.95)  # Highest for exact match
+                                elif theme_lower in area_lower:
+                                    match_score = max(match_score, 0.8)   # Good for partial match
+                                
+                        matching_experts.append({
+                            'id': expert_id,
+                            'first_name': first_name or '',
+                            'last_name': last_name or '',
+                            'knowledge_expertise': expertise_list,
+                            'theme': expert_theme or '',
+                            'score': match_score
+                        })
+            
+            finally:
+                conn.close()
+            
+            # Sort by score (most relevant first)
+            matching_experts.sort(key=lambda x: x.get('score', 0), reverse=True)
+            return matching_experts[:k]
             
         except Exception as e:
-            logger.error(f"Error searching experts by theme: {e}")
+            logger.error(f"Error in theme search: {e}")
+            # Fall back to vector search if database query fails
+            try:
+                return self._fallback_vector_theme_search(theme, k, active_only, min_score)
+            except Exception as fallback_error:
+                logger.error(f"Fallback theme search also failed: {fallback_error}")
+                return []
+
+    def _fallback_vector_theme_search(self, theme: str, k: int, active_only: bool, min_score: float):
+        """Fallback to vector search if direct database query fails"""
+        # Original vector search implementation for themes
+        try:
+            # Load index and mapping
+            index = faiss.read_index(str(self.index_path))
+            with open(self.mapping_path, 'rb') as f:
+                id_mapping = pickle.load(f)
+            
+            # Create a theme-focused query
+            theme_focused_query = f"Theme: {theme} Expert specializing in {theme}"
+            
+            # Generate query embedding
+            query_embedding = self.model.encode([theme_focused_query], convert_to_numpy=True)
+            
+            # Search index
+            max_candidates = min(k * 5, index.ntotal)
+            distances, indices = index.search(query_embedding.astype(np.float32), max_candidates)
+            
+            # Process results
+            results = []
+            theme_lower = theme.lower()
+            
+            for i, idx in enumerate(indices[0]):
+                if idx < 0:
+                    continue
+                    
+                expert_id = id_mapping[idx]
+                expert_data = self.redis_binary.hgetall(f"expert:{expert_id}")
+                
+                if expert_data:
+                    try:
+                        metadata = json.loads(expert_data[b'metadata'].decode())
+                        
+                        # Check for theme relevance
+                        knowledge_areas = metadata.get('knowledge_expertise', [])
+                        
+                        if isinstance(knowledge_areas, list):
+                            for area in knowledge_areas:
+                                area_lower = str(area).lower()
+                                if theme_lower in area_lower:
+                                    distance = float(distances[0][i])
+                                    base_score = float(1.0 / (1.0 + distance))
+                                    metadata['score'] = base_score * 1.5  # Boost for expertise match
+                                    results.append(metadata)
+                                    break
+                        
+                    except Exception as e:
+                        continue
+            
+            sorted_results = sorted(results, key=lambda x: x.get('score', 0), reverse=True)
+            return sorted_results[:k]
+            
+        except Exception as e:
+            logger.error(f"Fallback vector theme search failed: {e}")
             return []
 
     def search_experts_by_designation(self, designation: str, k: int = 5, active_only: bool = False, min_score: float = 0.1) -> List[Dict[str, Any]]:
         """
-        Search for experts by designation using semantic search with designation filtering.
+        Search for experts by designation using direct database matching.
         
         Args:
-            designation: Designation to search for
-            k: Number of results to return
-            active_only: Whether to return only active experts
-            min_score: Minimum similarity score threshold
-            
+            designation (str): Designation to search for
+            k (int): Number of results to return
+            active_only (bool): Whether to return only active experts
+            min_score (float): Minimum similarity score threshold
+        
         Returns:
-            List of expert matches with metadata
+            List[Dict[str, Any]]: List of matching experts
         """
         try:
-            # First get all potential matches using semantic search
-            all_results = self.search_experts(designation, k*3, active_only, min_score)
-            
-            if not all_results:
+            # Normalize the designation search term
+            designation_lower = designation.lower().strip()
+            if not designation_lower:
                 return []
                 
-            # Filter results where designation matches
-            filtered_results = []
-            designation_lower = designation.lower()
+            # Get database connection
+            conn = self.db.get_connection()
+            matching_experts = []
             
-            for result in all_results:
-                expert_designation = result.get('designation', '').lower()
-                
-                # Check if designation matches
-                if designation_lower in expert_designation:
-                    filtered_results.append(result)
+            try:
+                with conn.cursor() as cur:
+                    # Add active_only filter if requested
+                    active_filter = "AND is_active = true" if active_only else ""
                     
-                if len(filtered_results) >= k:
-                    break
+                    # Search for designation in relevant fields
+                    # Using only the columns that actually exist in your schema
+                    cur.execute(f"""
+                        SELECT 
+                            id, first_name, last_name, knowledge_expertise, 
+                            designation, role_id, unit
+                        FROM experts_expert
+                        WHERE 
+                            (
+                                designation ILIKE %s OR
+                                search_text ILIKE %s OR
+                                CAST(role_id AS TEXT) = %s
+                            )
+                            {active_filter}
+                        LIMIT %s
+                    """, (
+                        f"%{designation_lower}%",  # Partial match in designation
+                        f"%{designation_lower}%",  # Partial match in search_text
+                        designation_lower,         # Exact match for role_id
+                        k*3                        # Get more to sort better
+                    ))
                     
-            return filtered_results[:k]
+                    rows = cur.fetchall()
+                    
+                    # Process results with relevance scoring
+                    for row in rows:
+                        expert_id, first_name, last_name, knowledge_expertise, expert_designation, role_id, unit = row
+                        
+                        # Calculate designation match score based on where it matched
+                        match_score = 0.5  # Base score
+                        
+                        # Check exact matches in different fields
+                        if expert_designation and expert_designation.lower() == designation_lower:
+                            match_score = 0.95  # Highest for exact designation match
+                        elif expert_designation and designation_lower in expert_designation.lower():
+                            match_score = 0.9   # High for partial designation match
+                        
+                        # Include role_id and unit info if they matched
+                        role_match = False
+                        if role_id and str(role_id) == designation_lower:
+                            match_score = max(match_score, 0.85)
+                            role_match = True
+                        
+                        unit_match = False
+                        if unit and designation_lower in unit.lower():
+                            match_score = max(match_score, 0.8)
+                            unit_match = True
+                                
+                        matching_experts.append({
+                            'id': expert_id,
+                            'first_name': first_name or '',
+                            'last_name': last_name or '',
+                            'knowledge_expertise': self._parse_jsonb(knowledge_expertise),
+                            'designation': expert_designation or '',
+                            'role_id': role_id,
+                            'unit': unit or '',
+                            'score': match_score
+                        })
+            
+            finally:
+                conn.close()
+            
+            # Sort by score (most relevant first)
+            matching_experts.sort(key=lambda x: x.get('score', 0), reverse=True)
+            return matching_experts[:k]
             
         except Exception as e:
-            logger.error(f"Error searching experts by designation: {e}")
-            return []
+            logger.error(f"Error in designation search: {e}")
+            # Fall back to vector search if database query fails
+            try:
+                return self._fallback_vector_designation_search(designation, k, active_only, min_score)
+            except Exception as fallback_error:
+                logger.error(f"Fallback designation search also failed: {fallback_error}")
+                return []
 
-    def _extract_expertise_areas(self, results: List[Dict]) -> List[str]:
-        """Extract unique expertise areas from results."""
-        expertise_areas = set()
-        
-        for result in results:
-            expertise = result.get('knowledge_expertise', [])
+    def _fallback_vector_designation_search(self, designation: str, k: int, active_only: bool, min_score: float):
+        """Fallback to vector search if direct database query fails"""
+        # Original vector search implementation for designation
+        try:
+            # Load index and mapping
+            index = faiss.read_index(str(self.index_path))
+            with open(self.mapping_path, 'rb') as f:
+                id_mapping = pickle.load(f)
             
-            # Normalize expertise to list
-            if expertise is None:
-                continue
+            # Create a designation-focused query
+            designation_focused_query = f"Designation: {designation} Expert with role {designation}"
             
-            if isinstance(expertise, str):
-                expertise = [expertise]
-            elif isinstance(expertise, dict):
-                expertise = list(expertise.keys())
+            # Generate query embedding
+            query_embedding = self.model.encode([designation_focused_query], convert_to_numpy=True)
             
-            # Ensure we only add non-empty strings
-            expertise = [str(e).strip() for e in expertise if e and str(e).strip()]
+            # Search index
+            max_candidates = min(k * 5, index.ntotal)
+            distances, indices = index.search(query_embedding.astype(np.float32), max_candidates)
             
-            expertise_areas.update(expertise)
-        
-        # Return top 10 unique expertise areas
-        return list(expertise_areas)[:10]
+            # Process results
+            results = []
+            designation_lower = designation.lower()
+            
+            for i, idx in enumerate(indices[0]):
+                if idx < 0:
+                    continue
+                    
+                expert_id = id_mapping[idx]
+                expert_data = self.redis_binary.hgetall(f"expert:{expert_id}")
+                
+                if expert_data:
+                    try:
+                        metadata = json.loads(expert_data[b'metadata'].decode())
+                        
+                        # Use the designation field from metadata
+                        expert_designation = metadata.get('designation', '').lower()
+                        
+                        if designation_lower in expert_designation:
+                            distance = float(distances[0][i])
+                            base_score = float(1.0 / (1.0 + distance))
+                            metadata['score'] = base_score * 1.2  # Boost for direct matches
+                            results.append(metadata)
+                            
+                    except Exception as e:
+                        continue
+            
+            sorted_results = sorted(results, key=lambda x: x.get('score', 0), reverse=True)
+            return sorted_results[:k]
+            
+        except Exception as e:
+            logger.error(f"Fallback vector designation search failed: {e}")
+            return []
 def initialize_expert_search():
     """Initialize expert search index."""
     try:
