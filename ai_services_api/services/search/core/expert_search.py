@@ -622,3 +622,330 @@ async def process_expert_designation_search(
         if conn:
             conn.close()
             logger.debug("Database connection closed")
+
+async def process_advanced_search(
+    query: Optional[str], 
+    user_id: str, 
+    active_only: bool = True, 
+    k: int = 5,
+    name: Optional[str] = None,
+    theme: Optional[str] = None, 
+    designation: Optional[str] = None,
+    publication: Optional[str] = None
+) -> SearchResponse:
+    """
+    Process advanced search with multiple optional parameters.
+    
+    Args:
+        query: General search query
+        user_id: User identifier
+        active_only: Filter for active experts only
+        k: Number of results to return
+        name: Expert name to search for
+        theme: Theme to search for
+        designation: Designation to search for
+        publication: Publication to search for
+    
+    Returns:
+        SearchResponse: Combined search results
+    """
+    logger.info(f"Processing advanced search - User: {user_id}")
+    
+    conn = None
+    session_id = str(uuid.uuid4())[:8]  # Default session ID
+    
+    try:
+        # Establish database connection
+        try:
+            conn = get_db_connection()
+            session_id = await get_or_create_session(conn, user_id)
+            logger.debug(f"Created session: {session_id}")
+        except Exception as db_error:
+            logger.error(f"Database connection error: {db_error}", exc_info=True)
+        
+        # Execute multiple searches based on provided parameters
+        start_time = datetime.utcnow()
+        all_results = []
+        
+        search_manager = ExpertSearchIndexManager()
+        
+        # Process each search parameter if provided
+        if name:
+            name_results = search_manager.search_experts_by_name(name, k=k, active_only=active_only)
+            all_results.extend(name_results)
+            
+        if theme:
+            theme_results = search_manager.search_experts_by_theme(theme, k=k, active_only=active_only)
+            all_results.extend(theme_results)
+            
+        if designation:
+            designation_results = search_manager.search_experts_by_designation(designation, k=k, active_only=active_only)
+            all_results.extend(designation_results)
+            
+        # If query parameter is provided and no specific parameters, do a general search
+        if query and not (name or theme or designation or publication):
+            query_results = search_manager.search_experts(query, k=k, active_only=active_only)
+            all_results.extend(query_results)
+        
+        # Handle publication search if implemented
+        if publication:
+            # If you have a publication search implementation
+            pass
+            
+        # If no results from specific searches but we have a general query, use it
+        if not all_results and query:
+            query_results = search_manager.search_experts(query, k=k, active_only=active_only)
+            all_results.extend(query_results)
+        
+        response_time = (datetime.utcnow() - start_time).total_seconds()
+        
+        # Remove duplicates by expert ID while preserving the highest score
+        unique_results = {}
+        for result in all_results:
+            expert_id = str(result.get('id', 'unknown'))
+            current_score = result.get('score', 0)
+            
+            if expert_id not in unique_results or current_score > unique_results[expert_id].get('score', 0):
+                unique_results[expert_id] = result
+        
+        # Convert to list and sort by score
+        final_results = list(unique_results.values())
+        final_results.sort(key=lambda x: x.get('score', 0), reverse=True)
+        final_results = final_results[:k]  # Limit to requested k results
+        
+        # Format results
+        formatted_results = []
+        try:
+            formatted_results = [
+                ExpertSearchResult(
+                    id=str(result.get('id', 'unknown')),
+                    first_name=result.get('first_name', ''),
+                    last_name=result.get('last_name', ''),
+                    designation=result.get('designation', ''),
+                    theme=result.get('theme', ''),
+                    unit=result.get('unit', ''),
+                    contact=result.get('contact', ''),
+                    is_active=result.get('is_active', True),
+                    score=result.get('score'),
+                    bio=result.get('bio'),
+                    knowledge_expertise=result.get('knowledge_expertise', [])
+                ) for result in final_results
+            ]
+        except Exception as format_error:
+            logger.error(f"Result formatting error: {format_error}", exc_info=True)
+        
+        # Record search analytics if we have a connection
+        if conn and final_results:
+            try:
+                # Construct a composite query string for analytics
+                composite_query = []
+                if query:
+                    composite_query.append(f"query:{query}")
+                if name:
+                    composite_query.append(f"name:{name}")
+                if theme:
+                    composite_query.append(f"theme:{theme}")
+                if designation:
+                    composite_query.append(f"designation:{designation}")
+                if publication:
+                    composite_query.append(f"publication:{publication}")
+                
+                analytics_query = " | ".join(composite_query)
+                
+                await record_search(conn, session_id, user_id, analytics_query, final_results, response_time)
+            except Exception as record_error:
+                logger.error(f"Error recording search: {record_error}", exc_info=True)
+        
+        # Generate refinement suggestions
+        refinements = {}
+        try:
+            # Use the refinement generation method with appropriate context
+            # Prioritize which search_type to use for refinements
+            if name:
+                search_type = 'name'
+            elif theme:
+                search_type = 'theme'
+            elif designation:
+                search_type = 'designation'
+            elif publication:
+                search_type = 'publication'
+            else:
+                search_type = 'general'
+                
+            refinements = await search_manager.generate_advanced_search_refinements(
+                search_type=search_type,
+                query=query or name or theme or designation or publication,
+                user_id=user_id,
+                results=final_results
+            )
+        except Exception as refine_error:
+            logger.error(f"Refinements generation error: {refine_error}", exc_info=True)
+            refinements = {
+                "filters": [],
+                "related_queries": [],
+                "expertise_areas": []
+            }
+        
+        # Prepare response
+        response = SearchResponse(
+            total_results=len(formatted_results),
+            experts=formatted_results,
+            user_id=user_id,
+            session_id=session_id,
+            refinements=refinements
+        )
+        
+        return response
+        
+    except Exception as e:
+        # Catch-all for unexpected errors
+        logger.error(f"Critical error in advanced search: {e}", exc_info=True)
+        
+        # Always return a valid response
+        return SearchResponse(
+            total_results=0,
+            experts=[],
+            user_id=user_id,
+            session_id=session_id,
+            refinements={
+                "filters": [],
+                "related_queries": [],
+                "expertise_areas": []
+            }
+        )
+    finally:
+        # Always close connection if opened
+        if conn:
+            conn.close()
+            logger.debug("Database connection closed")
+
+async def process_publication_search(
+    publication: str, 
+    user_id: str, 
+    k: int = 5
+) -> SearchResponse:
+    """
+    Process search for experts by publication.
+    
+    Args:
+        publication: Publication to search for
+        user_id: User identifier
+        k: Number of results to return
+    
+    Returns:
+        SearchResponse: Search results
+    """
+    logger.info(f"Processing publication search - Publication: {publication}, User: {user_id}")
+    
+    conn = None
+    session_id = str(uuid.uuid4())[:8]  # Default session ID
+    
+    try:
+        # Establish database connection
+        try:
+            conn = get_db_connection()
+            session_id = await get_or_create_session(conn, user_id)
+            logger.debug(f"Created session: {session_id}")
+        except Exception as db_error:
+            logger.error(f"Database connection error: {db_error}", exc_info=True)
+        
+        # Execute search with timing
+        start_time = datetime.utcnow()
+        results = []
+        
+        # Here you would implement the actual publication search logic
+        # This is a placeholder implementation - modify with your actual search logic
+        try:
+            search_manager = ExpertSearchIndexManager()
+            # Assuming there's a method for searching by publication
+            # If not available, fall back to standard search
+            if hasattr(search_manager, 'search_experts_by_publication'):
+                results = search_manager.search_experts_by_publication(publication, k=k)
+            else:
+                # Fallback to general search with publication focused query
+                results = search_manager.search_experts(f"publication {publication}", k=k)
+            
+            logger.info(f"Publication search found {len(results)} results")
+        except Exception as search_error:
+            logger.error(f"Search execution error: {search_error}", exc_info=True)
+        
+        response_time = (datetime.utcnow() - start_time).total_seconds()
+        
+        # Format results - handle empty results gracefully
+        formatted_results = []
+        try:
+            formatted_results = [
+                ExpertSearchResult(
+                    id=str(result.get('id', 'unknown')),
+                    first_name=result.get('first_name', ''),
+                    last_name=result.get('last_name', ''),
+                    designation=result.get('designation', ''),
+                    theme=result.get('theme', ''),
+                    unit=result.get('unit', ''),
+                    contact=result.get('contact', ''),
+                    is_active=result.get('is_active', True),
+                    score=result.get('score'),
+                    bio=result.get('bio'),
+                    knowledge_expertise=result.get('knowledge_expertise', [])
+                ) for result in results
+            ]
+        except Exception as format_error:
+            logger.error(f"Result formatting error: {format_error}", exc_info=True)
+        
+        # Record search analytics if we have a connection
+        if conn and results:
+            try:
+                await record_search(conn, session_id, user_id, f"publication:{publication}", results, response_time)
+            except Exception as record_error:
+                logger.error(f"Error recording search: {record_error}", exc_info=True)
+        
+        # Generate refinement suggestions
+        refinements = {}
+        try:
+            # Use the publication-specific refinement generation if available
+            refinements = await search_manager.generate_advanced_search_refinements(
+                search_type='publication',  
+                query=publication, 
+                user_id=user_id, 
+                results=results
+            )
+        except Exception as refine_error:
+            logger.error(f"Refinements generation error: {refine_error}", exc_info=True)
+            refinements = {
+                "filters": [],
+                "related_queries": [],
+                "expertise_areas": []
+            }
+        
+        # Prepare response
+        response = SearchResponse(
+            total_results=len(formatted_results),
+            experts=formatted_results,
+            user_id=user_id,
+            session_id=session_id,
+            refinements=refinements
+        )
+        
+        return response
+        
+    except Exception as e:
+        # Catch-all for unexpected errors
+        logger.error(f"Critical error in publication search: {e}", exc_info=True)
+        
+        # Always return a valid response
+        return SearchResponse(
+            total_results=0,
+            experts=[],
+            user_id=user_id,
+            session_id=session_id,
+            refinements={
+                "filters": [],
+                "related_queries": [],
+                "expertise_areas": []
+            }
+        )
+    finally:
+        # Always close connection if opened
+        if conn:
+            conn.close()
+            logger.debug("Database connection closed")

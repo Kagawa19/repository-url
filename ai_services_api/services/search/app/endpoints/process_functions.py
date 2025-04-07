@@ -328,6 +328,62 @@ async def process_query_prediction(
             refinements=refinements_list,
             total_suggestions=len(predictions)
         )
+
+def is_publication_title(suggestion: str, partial_query: str) -> bool:
+    """
+    Check if suggestion appears to be a publication title.
+    Publication titles tend to:
+    - Be longer phrases
+    - Often contain research-related terms
+    - Have proper capitalization patterns
+    
+    Args:
+        suggestion: The suggestion text to check
+        partial_query: The partial query being typed
+        
+    Returns:
+        Boolean indicating if the suggestion looks like a publication title
+    """
+    # Convert partial query and suggestion to lowercase for comparison
+    partial_query_lower = partial_query.lower()
+    suggestion_lower = suggestion.lower()
+    
+    # First, check if partial query is in the suggestion
+    if partial_query_lower not in suggestion_lower:
+        return False
+    
+    # Publication indicators - common in academic paper titles
+    pub_indicators = [
+        "study", "research", "analysis", "review", "survey", 
+        "approach", "framework", "method", "evaluation", "assessment",
+        "impact", "effect", "comparison", "investigation", "development"
+    ]
+    
+    # Check for publication indicators
+    has_indicator = any(indicator in suggestion_lower for indicator in pub_indicators)
+    
+    # Check length - publications titles are usually longer
+    word_count = len(suggestion.split())
+    good_length = word_count >= 3 and word_count <= 20
+    
+    # Check for patterns like "Title: Subtitle" or quotes
+    has_title_pattern = ":" in suggestion or '"' in suggestion or "'" in suggestion
+    
+    # Publications often have proper nouns (capitalized words not at start)
+    words = suggestion.split()
+    has_mid_capitals = any(word[0].isupper() for word in words[1:] if len(word) > 2)
+    
+    # Check for common paper title ending patterns
+    has_paper_ending = any(suggestion_lower.endswith(end) for end in 
+                          [" study", " analysis", " review", " approach", " framework"])
+    
+    # Combine factors - need at least two positive indicators
+    indicators = [has_indicator, good_length, has_title_pattern, has_mid_capitals, has_paper_ending]
+    score = sum(1 for indicator in indicators if indicator)
+    
+    return score >= 2
+
+
 async def process_advanced_query_prediction(
     partial_query: str, 
     user_id: str, 
@@ -751,24 +807,48 @@ def filter_predictions_by_context(
     """
     Strictly filter predictions based on context type.
     For 'name' context, only return person name suggestions.
+    For 'publication' context, prioritize publication-like suggestions.
+    
+    Args:
+        predictions: List of predicted query completions
+        confidence_scores: Corresponding confidence scores for each prediction
+        partial_query: The partial query being typed
+        context: Context type ('name', 'theme', 'designation', 'publication')
+        
+    Returns:
+        Tuple of filtered predictions and their confidence scores
     """
-    if context != "name":
-        # For non-name contexts, return original predictions
+    if context != "name" and context != "publication":
+        # For other contexts, return original predictions
         return predictions, confidence_scores
     
     filtered_predictions = []
     filtered_scores = []
     
-    for i, pred in enumerate(predictions):
-        original_score = confidence_scores[i] if i < len(confidence_scores) else 0.5
+    if context == "name":
+        for i, pred in enumerate(predictions):
+            original_score = confidence_scores[i] if i < len(confidence_scores) else 0.5
+            
+            if is_person_name(pred, partial_query):
+                filtered_predictions.append(pred)
+                filtered_scores.append(original_score * 1.2)  # Boost name matches
         
-        if is_person_name(pred, partial_query):
-            filtered_predictions.append(pred)
-            filtered_scores.append(original_score * 1.2)  # Boost name matches
+        # Fallback suggestions when no perfect matches exist
+        if not filtered_predictions:
+            return generate_name_fallback_suggestions(partial_query)
     
-    # Fallback suggestions when no perfect matches exist
-    if not filtered_predictions:
-        return generate_name_fallback_suggestions(partial_query)
+    elif context == "publication":
+        # Publication filtering logic
+        for i, pred in enumerate(predictions):
+            original_score = confidence_scores[i] if i < len(confidence_scores) else 0.5
+            
+            if is_publication_title(pred, partial_query):
+                filtered_predictions.append(pred)
+                filtered_scores.append(original_score * 1.2)  # Boost publication matches
+        
+        # If no matches, return original predictions for publication context
+        if not filtered_predictions:
+            return predictions, confidence_scores
     
     return filtered_predictions, filtered_scores
 

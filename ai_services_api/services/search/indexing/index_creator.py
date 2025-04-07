@@ -681,7 +681,7 @@ class ExpertSearchIndexManager:
         Generate advanced search refinements based on search type.
         
         Args:
-            search_type (str): Type of search ('name', 'theme', 'designation')
+            search_type (str): Type of search ('name', 'theme', 'designation', 'publication', 'general')
             query (str): Original search query
             user_id (str): User identifier
             results (List[Dict[str, Any]], optional): Current search results
@@ -701,7 +701,19 @@ class ExpertSearchIndexManager:
             try:
                 # Use GoogleAutocompletePredictor to get related queries
                 gemini_predictor = GoogleAutocompletePredictor()
-                suggestion_objects = await gemini_predictor.predict(query, limit=5)
+                
+                # Include context in the query for better suggestions
+                context_query = query
+                if search_type == 'name':
+                    context_query = f"expert named {query}"
+                elif search_type == 'theme':
+                    context_query = f"research theme {query}"
+                elif search_type == 'designation':
+                    context_query = f"job role {query}"
+                elif search_type == 'publication':
+                    context_query = f"publication on {query}"
+                
+                suggestion_objects = await gemini_predictor.predict(context_query, limit=5)
                 related_queries = [s["text"] for s in suggestion_objects]
                 
                 # Extract potential expertise areas
@@ -716,9 +728,45 @@ class ExpertSearchIndexManager:
                 if len(expertise_areas) < 3:
                     expertise_areas.add(query.capitalize())
                 
+                # Build enhanced refinements with search type specific filters
+                filters = []
+                
+                # Add search type specific filters
+                if search_type == 'name':
+                    filters.append({
+                        "type": "expertise_filter",
+                        "label": "Expert Expertise",
+                        "values": list(expertise_areas)[:3]
+                    })
+                elif search_type == 'theme':
+                    filters.append({
+                        "type": "theme_filter",
+                        "label": "Research Areas",
+                        "values": list(expertise_areas)[:3]
+                    })
+                elif search_type == 'designation':
+                    filters.append({
+                        "type": "role_filter",
+                        "label": "Job Roles",
+                        "values": [f"{query.capitalize()} Specialist", f"Senior {query.capitalize()}", f"Junior {query.capitalize()}"]
+                    })
+                elif search_type == 'publication':
+                    filters.append({
+                        "type": "publication_filter",
+                        "label": "Publication Types",
+                        "values": ["Journal Articles", "Conference Papers", "Book Chapters", "Reports"]
+                    })
+                # For general searches, include multiple filter types
+                else:
+                    filters.append({
+                        "type": "search_type",
+                        "label": "Search Categories",
+                        "values": ["Experts", "Publications", "Research Areas"]
+                    })
+                
                 # Build enhanced refinements
                 refinements = {
-                    "filters": [],
+                    "filters": filters,
                     "related_queries": related_queries,
                     "expertise_areas": list(expertise_areas)[:5]
                 }
@@ -743,7 +791,7 @@ class ExpertSearchIndexManager:
                 "related_queries": [],
                 "expertise_areas": []
             }
-        
+            
     
     def get_search_refinements(self, query: str, current_results: List[Dict]) -> Dict:
         """

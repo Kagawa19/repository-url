@@ -12,7 +12,7 @@ services:
       - ./:/app:rw
       - ./logs/api:/app/logs:rw
       - ./ai_services_api/services/search/models:/app/ai_services_api/services/search/models:rw
-      - ./models:/app/models:rw
+      - ./.model_cache:/app/.model_cache:rw 
       - ./scripts/init-script.sh:/app/scripts/init-script.sh:ro
       - /dev/shm:/dev/shm:rw
       - chrome_data:/tmp/chrome-data

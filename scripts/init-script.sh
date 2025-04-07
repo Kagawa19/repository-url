@@ -1,11 +1,12 @@
 #!/bin/bash
 set -e
 
-# Environment setup
+# Environment setup 
 INIT_MARKER="/app/.initialization_complete/init.done"
 LOG_DIR="/app/logs"
 mkdir -p "$LOG_DIR"
-mkdir -p "/app/.initialization_complete"
+mkdir -p "/app/.initialization_complete" 
+mkdir -p /app/.model_cache
 
 # Logging setup
 exec 1> >(tee -a "${LOG_DIR}/init.log") 2>&1
@@ -14,7 +15,7 @@ echo "[$(date)] Starting initialization..."
 # Function to wait for service availability
 wait_for_service() {
     local service=$1
-    local host=$2
+    local host=$2 
     local port=$3
     local max_attempts=${4:-30}
     local attempt=0
@@ -45,7 +46,6 @@ run_setup() {
     local setup_args=""
     
     # Build setup arguments from environment variables
-    # Removed "EXPERTS" from the list of flags
     for flag in DATABASE OPENALEX PUBLICATIONS GRAPH SEARCH REDIS SCRAPING CLASSIFICATION; do
         skip_var="SKIP_${flag}"  # Construct the dynamic variable name
         if [ "${!skip_var:-false}" = "true" ]; then  # Use indirect expansion
@@ -75,14 +75,14 @@ initialize() {
     
     # Wait for required services
     if ! wait_for_services; then
-        echo "[$(date)] Required services not available"
+        echo "[$(date)] Required services not available" 
         return 1
     fi
     
     # Run setup
     if ! run_setup; then
         echo "[$(date)] Setup failed"
-        return 1
+        return 1 
     fi
     
     # Create initialization marker

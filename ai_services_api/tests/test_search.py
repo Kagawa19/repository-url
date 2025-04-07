@@ -10,6 +10,7 @@ client = TestClient(router)
 TEST_USER = "test_user_789"
 TEST_QUERY = "health research"
 TEST_EXPERT_ID = "123"
+TEST_PUBLICATION = "Health outcomes research"
 
 @pytest.fixture
 def auth_headers():
@@ -72,6 +73,31 @@ def test_predict_query(auth_headers):
     assert data["user_id"] == TEST_USER
     assert len(data["predictions"]) == len(data["confidence_scores"])
 
+def test_advanced_predict_query(auth_headers):
+    """Test advanced query prediction endpoint"""
+    partial_query = "hea"
+    
+    # Test with different contexts
+    contexts = ["name", "theme", "designation", "publication", None]
+    
+    for context in contexts:
+        params = {"search_type": context} if context else {}
+        response = client.get(
+            f"/experts/advanced_predict/{partial_query}",
+            headers=auth_headers,
+            params=params
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert all(key in data for key in ["predictions", "confidence_scores", "user_id"])
+        assert data["user_id"] == TEST_USER
+        assert len(data["predictions"]) == len(data["confidence_scores"])
+        
+        # If context was provided, it should be returned in the response
+        if context:
+            assert data.get("search_context") == context
+
 def test_train_predictor(auth_headers):
     """Test ML predictor training endpoint"""
     sample_queries = ["health research", "medical studies", "public health"]
@@ -85,6 +111,121 @@ def test_train_predictor(auth_headers):
     data = response.json()
     assert data["message"] == "Predictor training initiated"
     assert data["user_id"] == TEST_USER
+
+def test_advanced_search(auth_headers):
+    """Test the new advanced search endpoint with various parameter combinations"""
+    
+    # Test with only query parameter
+    response = client.get(
+        "/advanced_search",
+        params={"query": TEST_QUERY},
+        headers=auth_headers
+    )
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert "total_results" in data
+    assert "experts" in data
+    assert data["user_id"] == TEST_USER
+    
+    # Test with search_type parameter
+    search_types = ["name", "theme", "designation", "publication"]
+    for search_type in search_types:
+        response = client.get(
+            "/advanced_search",
+            params={"query": TEST_QUERY, "search_type": search_type},
+            headers=auth_headers
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert "total_results" in data
+        assert "experts" in data
+        
+    # Test with specific parameters
+    response = client.get(
+        "/advanced_search",
+        params={"name": "John Doe"},
+        headers=auth_headers
+    )
+    
+    assert response.status_code == 200
+    
+    # Test with theme parameter
+    response = client.get(
+        "/advanced_search",
+        params={"theme": "Health"},
+        headers=auth_headers
+    )
+    
+    assert response.status_code == 200
+    
+    # Test with designation parameter
+    response = client.get(
+        "/advanced_search",
+        params={"designation": "Research Lead"},
+        headers=auth_headers
+    )
+    
+    assert response.status_code == 200
+    
+    # Test with publication parameter
+    response = client.get(
+        "/advanced_search",
+        params={"publication": TEST_PUBLICATION},
+        headers=auth_headers
+    )
+    
+    assert response.status_code == 200
+    
+    # Test with multiple parameters
+    response = client.get(
+        "/advanced_search",
+        params={
+            "name": "John", 
+            "theme": "Health", 
+            "designation": "Lead"
+        },
+        headers=auth_headers
+    )
+    
+    assert response.status_code == 200
+    
+    # Test with all parameters
+    response = client.get(
+        "/advanced_search",
+        params={
+            "query": TEST_QUERY,
+            "search_type": "name",
+            "name": "John",
+            "theme": "Health",
+            "designation": "Lead", 
+            "publication": TEST_PUBLICATION
+        },
+        headers=auth_headers
+    )
+    
+    assert response.status_code == 200
+
+def test_advanced_search_errors(auth_headers):
+    """Test error cases for advanced search"""
+    
+    # Test with no parameters (should fail)
+    response = client.get(
+        "/advanced_search",
+        headers=auth_headers
+    )
+    
+    assert response.status_code == 400
+    
+    # Test with invalid search_type
+    response = client.get(
+        "/advanced_search",
+        params={"query": TEST_QUERY, "search_type": "invalid_type"},
+        headers=auth_headers
+    )
+    
+    assert response.status_code == 400
 
 def test_similar_experts(auth_headers, sample_expert):
     """Test finding similar experts"""
@@ -172,6 +313,23 @@ def test_different_queries(auth_headers, query):
     assert "total_results" in data
     assert "experts" in data
 
+def test_track_suggestion(auth_headers):
+    """Test suggestion tracking endpoint"""
+    payload = {
+        "partial_query": "hea",
+        "selected_suggestion": "health research"
+    }
+    response = client.post(
+        "/experts/track-suggestion",
+        headers=auth_headers,
+        json=payload
+    )
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    assert "message" in data
+
 def test_error_cases(auth_headers):
     """Test various error scenarios"""
     # Test invalid expert ID
@@ -213,12 +371,52 @@ def test_concurrent_searches(auth_headers):
         data = response.json()
         assert data["user_id"] == TEST_USER
 
+def test_concurrent_advanced_searches(auth_headers):
+    """Test multiple concurrent advanced searches"""
+    search_params = [
+        {"query": "health"},
+        {"name": "John"},
+        {"theme": "Research"},
+        {"designation": "Lead"},
+        {"publication": "Health outcomes"}
+    ]
+    
+    responses = []
+    for params in search_params:
+        response = client.get(
+            "/advanced_search",
+            params=params,
+            headers=auth_headers
+        )
+        responses.append(response)
+    
+    assert all(r.status_code == 200 for r in responses)
+    for response in responses:
+        data = response.json()
+        assert data["user_id"] == TEST_USER
+
 # Database verification tests
 def test_search_analytics(auth_headers):
     """Test analytics recording for searches"""
     # Perform a search
     search_response = client.get(
         f"/experts/search/{TEST_QUERY}",
+        headers=auth_headers
+    )
+    assert search_response.status_code == 200
+    
+    # Verify analytics were recorded
+    analytics_response = client.get("/test/analytics/metrics")
+    assert analytics_response.status_code == 200
+    data = analytics_response.json()
+    assert "search_metrics" in data
+
+def test_advanced_search_analytics(auth_headers):
+    """Test analytics recording for advanced searches"""
+    # Perform an advanced search
+    search_response = client.get(
+        "/advanced_search",
+        params={"query": TEST_QUERY, "search_type": "theme"},
         headers=auth_headers
     )
     assert search_response.status_code == 200
@@ -243,6 +441,15 @@ def test_prediction_analytics(auth_headers):
     assert analytics_response.status_code == 200
     data = analytics_response.json()
     assert "performance_metrics" in data
+
+def test_health_check():
+    """Test health check endpoint"""
+    response = client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "timestamp" in data
+    assert "components" in data
 
 if __name__ == "__main__":
     pytest.main(["-v"])

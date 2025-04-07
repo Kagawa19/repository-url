@@ -81,40 +81,92 @@ async def predict_query(
 
 # Add these to your router file (search.py)
 
-@router.get("/advanced_search/{query}")
+@router.get("/advanced_search")
 async def advanced_search(
-    query: str, 
-    search_type: str, 
+    query: Optional[str] = None, 
+    search_type: Optional[str] = None,  # Make search_type optional
     request: Request,
     user_id: str = Depends(get_user_id),
     active_only: bool = True, 
-    k: int = 5
+    k: int = 5,
+    # Add additional parameters for broader search
+    name: Optional[str] = None,
+    theme: Optional[str] = None,
+    designation: Optional[str] = None,
+    publication: Optional[str] = None
 ):
     """
-    Advanced search endpoint to search experts based on different criteria.
+    Advanced search endpoint to search experts and resources based on multiple criteria.
     
-    Allows searching experts by name, theme, or designation with optional filtering.
+    Allows searching by:
+    - Experts (name, theme, designation)
+    - Publications
+    - Flexible combination of search parameters
     """
-    logger.info(f"Advanced search request - Type: {search_type}, Query: {query}, User: {user_id}")
+    logger.info(f"Advanced search request - User: {user_id}")
     
-    # Validate search type with clear error message
-    valid_search_types = ["name", "theme", "designation"]
-    if search_type not in valid_search_types:
+    # Validate search parameters
+    search_params = [search_type, name, theme, designation, publication]
+    if all(param is None for param in search_params):
         raise HTTPException(
             status_code=400, 
-            detail=f"Invalid search type. Must be one of: {', '.join(valid_search_types)}"
+            detail="At least one search parameter must be provided"
         )
     
+    # Determine search type priority
+    if search_type:
+        valid_search_types = ["name", "theme", "designation", "publication"]
+        if search_type not in valid_search_types:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid search type. Must be one of: {', '.join(valid_search_types)}"
+            )
+    
     try:
-        # Route to appropriate search method based on type
-        if search_type == "name":
-            return await process_expert_name_search(query, user_id, active_only, k)
+        # Flexible routing based on available parameters
+        if search_type == "name" or name:
+            return await process_expert_name_search(
+                query or name, 
+                user_id, 
+                active_only, 
+                k
+            )
         
-        elif search_type == "theme":
-            return await process_expert_theme_search(query, user_id, active_only, k)
+        elif search_type == "theme" or theme:
+            return await process_expert_theme_search(
+                query or theme, 
+                user_id, 
+                active_only, 
+                k
+            )
         
-        elif search_type == "designation":
-            return await process_expert_designation_search(query, user_id, active_only, k)
+        elif search_type == "designation" or designation:
+            return await process_expert_designation_search(
+                query or designation, 
+                user_id, 
+                active_only, 
+                k
+            )
+        
+        elif search_type == "publication" or publication:
+            # Assuming you have a similar function for publication search
+            return await process_publication_search(
+                query or publication, 
+                user_id, 
+                k
+            )
+        
+        # Fallback to a general search if no specific type is matched
+        return await process_advanced_search(
+            query, 
+            user_id, 
+            active_only, 
+            k,
+            name=name,
+            theme=theme,
+            designation=designation,
+            publication=publication
+        )
     
     except Exception as e:
         logger.error(f"Error in advanced search: {e}", exc_info=True)
@@ -122,7 +174,6 @@ async def advanced_search(
             status_code=500, 
             detail="An error occurred while processing the advanced search"
         )
-
 
 @router.get("/test/experts/search/{query}")
 async def test_search_experts(
