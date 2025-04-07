@@ -94,6 +94,7 @@ class MessageHandler:
         
         return cleaned
     
+    
     async def process_stream_response(self, response_stream):
         """
         Process the streaming response with enhanced formatting, structure preservation, and metadata handling.
@@ -203,6 +204,31 @@ class MessageHandler:
             # If metadata was captured but not yet yielded, yield it now
             if metadata and not isinstance(metadata, dict):
                 yield {'is_metadata': True, 'metadata': metadata}
+
+    async def _create_error_metadata(self, start_time: float, error_type: str) -> Dict:
+        """Create standardized error metadata."""
+        return {
+            'metrics': {
+                'response_time': time.time() - start_time,
+                'intent': {'type': 'error', 'confidence': 0.0},
+                'sentiment': {
+                    'sentiment_score': 0.0,
+                    'emotion_labels': ['error'],
+                    'aspects': {
+                        'satisfaction': 0.0,
+                        'urgency': 0.0,
+                        'clarity': 0.0
+                    }
+                },
+                'content_matches': [],
+                'content_types': {
+                    'navigation': 0,
+                    'publication': 0
+                },
+                'error_type': error_type
+            },
+            'error_occurred': True
+        }
 
     
     async def start_chat_session(self, user_id: str) -> str:
@@ -427,6 +453,30 @@ class MessageHandler:
             logger.info("Async message processing concluded")
             total_time = time.time() - start_time
             logger.debug(f"Total method execution time: {total_time:.2f} seconds")
+
+    async def _cache_response(self, message: str, user_id: str, response: str):
+        """Cache response for future use during rate limiting."""
+        try:
+            # Get Redis client
+            from ai_services_api.services.chatbot.utils.redis_connection import redis_pool
+            redis_client = await redis_pool.get_redis()
+            
+            # Generate cache key
+            redis_key = f"chat:{user_id}:{message}"
+            
+            # Prepare data with timestamp
+            chat_data = {
+                "response": response,
+                "timestamp": datetime.utcnow().isoformat(),
+                "user_id": user_id,
+                "cached_for_rate_limit": True
+            }
+            
+            # Cache for 24 hours
+            await redis_client.setex(redis_key, 86400, json.dumps(chat_data))
+            logger.debug(f"Cached response for potential rate limit situations: {redis_key}")
+        except Exception as e:
+            logger.error(f"Error caching response: {e}")
     async def _check_response_cache(self, message: str, user_id: str) -> str:
         """Check for cached similar responses during rate limiting."""
         try:
@@ -658,7 +708,6 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"Error updating session stats: {e}", exc_info=True)
             raise
-
     async def _create_error_metadata(self, start_time: float, error_type: str) -> Dict:
         """Create standardized error metadata."""
         return {
@@ -737,9 +786,32 @@ class MessageHandler:
     async def flush_conversation_cache(self, conversation_id: str):
         """Clears the conversation history stored in the memory."""
         try:
-            memory = self.llm_manager.create_memory()
-            memory.clear()
-            logger.info(f"Successfully flushed conversation cache for ID: {conversation_id}")
+            # Check if LLM manager has a conversation history attribute
+            if hasattr(self.llm_manager, 'context_window'):
+                # Clear the context window
+                self.llm_manager.context_window = []
+                logger.info(f"Successfully flushed conversation context for ID: {conversation_id}")
+            elif hasattr(self.llm_manager, 'conversation_history'):
+                # Alternative attribute name
+                self.llm_manager.conversation_history = []
+                logger.info(f"Successfully flushed conversation history for ID: {conversation_id}")
+            else:
+                # If no direct memory attribute exists, try to find a method to clear it
+                if hasattr(self.llm_manager, 'clear_history'):
+                    await self.llm_manager.clear_history()
+                    logger.info(f"Successfully cleared conversation history using clear_history() for ID: {conversation_id}")
+                else:
+                    logger.warning(f"No known method to clear conversation history for ID: {conversation_id}")
+                    
+            # Also clear any local cache in the MessageHandler if it exists
+            if hasattr(self, 'cached_responses'):
+                self.cached_responses = {}
+            
+            # Clear metadata from previous interactions
+            self.metadata = None
+            
+            logger.info(f"Successfully flushed all conversation data for ID: {conversation_id}")
+            
         except Exception as e:
-            logger.error(f"Error while flushing conversation cache for ID {conversation_id}: {e}")
+            logger.error(f"Error while flushing conversation data for ID {conversation_id}: {e}")
             raise RuntimeError(f"Failed to clear conversation history: {str(e)}")
