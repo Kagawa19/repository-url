@@ -5,8 +5,11 @@ import numpy as np
 import faiss
 import pickle
 import redis
+from asyncio import to_thread
+
 import json
 import time
+import asyncio
 import asyncio
 from functools import lru_cache
 from cachetools import TTLCache
@@ -669,32 +672,23 @@ class GoogleAutocompletePredictor:
             except Exception as e:
                 self.logger.warning(f"Error updating Redis cache: {e}")
     
-    @retry(
-        retry=retry_if_exception_type((asyncio.TimeoutError, ConnectionError)),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=0.5, min=0.5, max=2)
-    )
-    async def _get_gemini_embedding(self, text: str) -> Optional[List[float]]:
-        """Get embedding for text using Gemini API with circuit breaker protection."""
-        self.metrics["api_calls"] += 1
-        
-        try:
-            # Use circuit breaker to protect against API failures
-            embedding_result = await self.embedding_circuit.execute(
-                self._execute_embedding_request, text
-            )
-            
-            if embedding_result is None:
-                self.logger.warning("Circuit breaker open, using fallback embedding generation")
-                # Use fallback embedding generation
-                return self._generate_fallback_embedding(text)
-            
-            return embedding_result
-            
-        except Exception as e:
-            self.logger.error(f"Error getting Gemini embedding after retries: {e}")
-            # Use fallback embedding generation
-            return self._generate_fallback_embedding(text)
+    
+
+    async def _get_gemini_embedding(self, text: str, retries: int = 3, delay: float = 1.0):
+        """
+        Get Gemini embedding for the input text with retries.
+        """
+        for attempt in range(retries):
+            try:
+                # Replace this with your actual embedding call
+                embedding = await your_embedding_call(text)
+                if embedding is not None:
+                    return embedding
+            except Exception as e:
+                self.logger.warning(f"Embedding error (attempt {attempt + 1}): {e}")
+            await asyncio.sleep(delay)
+        raise RuntimeError("Failed to generate embedding after retries.")
+
     
     async def _execute_embedding_request(self, text: str) -> Optional[List[float]]:
         """Execute the actual embedding API request with timeout."""
@@ -736,44 +730,39 @@ class GoogleAutocompletePredictor:
         
         return embedding
     
+    
     async def _generate_faiss_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
         """Generate suggestions from FAISS index with parallel processing."""
         if not self.index or not self.id_mapping:
             return []
-            
+
         try:
             # Generate embedding for the partial query
             query_embedding = await self._get_gemini_embedding(partial_query)
-            
+
             if query_embedding is None:
-                return []
-            
+                raise RuntimeError("Failed to generate embedding. Gemini API did not return a valid result.")
+
             # Convert to numpy array if needed
             if not isinstance(query_embedding, np.ndarray):
                 query_embedding = np.array(query_embedding, dtype=np.float32)
-            
+
             # Ensure we have a 2D array for FAISS
             if len(query_embedding.shape) == 1:
                 query_embedding = query_embedding.reshape(1, -1)
-            
-            # Use CPU executor for FAISS search which is CPU-bound
-            # This enables asynchronous execution of the search
-            search_future = asyncio.get_event_loop().run_in_executor(
-                self.cpu_executor,
-                self._execute_faiss_search,
-                query_embedding,
-                limit * 2,  # Get more candidates than needed for filtering
-                partial_query
-            )
-            
-            # Wait for the search to complete
+
+            # Use to_thread for FAISS search in a background thread
+            search_future = to_thread(self._execute_faiss_search, query_embedding, limit * 2, partial_query)
+
+            # Await search completion
             suggestions = await search_future
-            
             return suggestions
-            
+
         except Exception as e:
             self.logger.error(f"Error generating FAISS suggestions: {e}")
             return []
+
+
     
     def _extract_partial_word(self, query: str) -> Tuple[str, str]:
         """
@@ -848,135 +837,20 @@ class GoogleAutocompletePredictor:
         return False
 
 
-    def _execute_faiss_search(self, query_embedding: np.ndarray, k: int, partial_query: str) -> List[Dict[str, Any]]:
+    def _execute_faiss_search(self, query_embedding, top_k, partial_query):
         """
-        Execute FAISS search for Google-like predictive search suggestions with strict prefix matching.
+        Search the FAISS index for the top_k nearest neighbors.
+        """
+        if query_embedding.shape[-1] != self.index.d:
+            raise ValueError(f"Embedding dimension mismatch: expected {self.index.d}, got {query_embedding.shape[-1]}")
         
-        This method prioritizes suggestions that properly complete the user's current word.
-        """
         try:
-            # Search the FAISS index efficiently
-            distances, indices = self.index.search(
-                query_embedding.astype(np.float32), 
-                min(k * 3, self.index.ntotal)  # Get more candidates for filtering
-            )
-            
-            # Log the partial query for debugging
-            self.logger.debug(f"Processing search for partial query: '{partial_query}'")
-            query_prefix, partial_word = self._extract_partial_word(partial_query)
-            self.logger.debug(f"Parsed as prefix: '{query_prefix}', partial word: '{partial_word}'")
-            
-            # Process results
-            suggestions = []
-            seen_texts = set()
-            
-            # Set of generic research-related terms to use when no specific metadata is available
-            prediction_terms = [
-                "methods", "analysis", "frameworks", "data collection", 
-                "qualitative research", "quantitative analysis", "case studies",
-                "clinical trials", "public health", "policy analysis",
-                "children's health", "maternal care", "disease prevention"
-            ]
-            
-            # Counter for generic terms
-            generic_count = 0
-            
-            for i, idx in enumerate(indices[0]):
-                if idx < 0:  # Skip invalid indices
-                    continue
-                    
-                expert_id = self.id_mapping.get(idx)
-                if not expert_id:
-                    continue
-                
-                # Try to fetch expert metadata from Redis if available
-                expert_metadata = None
-                if hasattr(self, 'redis_client') and self.redis_client:
-                    try:
-                        redis_data = self.redis_client.get(f"expert:{expert_id}")
-                        if redis_data:
-                            expert_metadata = json.loads(redis_data)
-                    except Exception as e:
-                        self.logger.debug(f"Could not fetch expert metadata from Redis: {e}")
-                
-                # Create suggestions based on expert knowledge areas
-                if expert_metadata and 'knowledge_expertise' in expert_metadata and expert_metadata['knowledge_expertise']:
-                    # If we have expertise information, use it directly as predictions
-                    expertise_areas = expert_metadata['knowledge_expertise']
-                    if isinstance(expertise_areas, str):
-                        expertise_areas = [expertise_areas]
-                    elif isinstance(expertise_areas, dict):
-                        expertise_areas = list(expertise_areas.keys())
-                    
-                    # Use expertise areas directly as predictions, but apply prefix matching
-                    for expertise in expertise_areas[:3]:  # Check more candidates
-                        suggestion_text = expertise.lower().strip()
-                        
-                        # Only add if it passes the prefix matching check
-                        if self._is_prefix_match(suggestion_text, partial_query):
-                            if suggestion_text not in seen_texts:
-                                suggestions.append({
-                                    "text": suggestion_text,
-                                    "source": "faiss_expertise",
-                                    "score": float(1.0 / (1.0 + distances[0][i]))
-                                })
-                                seen_texts.add(suggestion_text)
-                                
-                                if len(suggestions) >= k:
-                                    break
-                else:
-                    # Without metadata, use generic research-related terms
-                    # but only add a limited number of these to avoid dominating results
-                    if generic_count < 5:
-                        matched_terms = []
-                        for term in prediction_terms:
-                            if self._is_prefix_match(term, partial_query):
-                                matched_terms.append(term)
-                        
-                        if matched_terms:
-                            term = matched_terms[generic_count % len(matched_terms)]
-                            generic_count += 1
-                            
-                            # Don't prepend or append partial_query, just use the term directly
-                            suggestion_text = term.lower().strip()
-                            
-                            if suggestion_text not in seen_texts:
-                                suggestions.append({
-                                    "text": suggestion_text,
-                                    "source": "generic_prediction",
-                                    "score": float(0.8 / (1.0 + distances[0][i]))
-                                })
-                                seen_texts.add(suggestion_text)
-                
-                # Stop if we have enough suggestions
-                if len(suggestions) >= k:
-                    break
-            
-            # If we don't have enough suggestions, try to generate appropriate completions
-            # for the partial word the user is typing
-            if len(suggestions) < min(3, k):
-                # Get completions that start with the current partial word
-                completions = self._generate_prefix_completions(partial_word)
-                
-                # For each completion, create a suggestion that completes the current query
-                for completion in completions:
-                    if query_prefix:
-                        suggestion_text = f"{query_prefix} {completion}".lower().strip()
-                    else:
-                        suggestion_text = completion.lower().strip()
-                    
-                    if suggestion_text not in seen_texts and len(suggestions) < k:
-                        suggestions.append({
-                            "text": suggestion_text,
-                            "source": "prefix_completion",
-                            "score": 0.75
-                        })
-                        seen_texts.add(suggestion_text)
-            
-            return suggestions
+            scores, indices = self.index.search(query_embedding[np.newaxis, :], top_k)
         except Exception as e:
-            self.logger.error(f"Error in FAISS search execution: {e}")
+            self.logger.error(f"[FAISS][Query='{partial_query[:30]}...'] Error in index search: {e}")
             return []
+
+        return scores[0], indices[0]
 
     async def _execute_gemini_suggestion_request(
         self, partial_query: str, query_intent: str, limit: int
