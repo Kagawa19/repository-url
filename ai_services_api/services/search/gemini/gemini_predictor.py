@@ -249,7 +249,366 @@ class GoogleAutocompletePredictor:
     def _normalize_text(self, text: str) -> str:
         """Normalize text for comparison and caching."""
         return str(text).lower().strip()
-    
+
+    def _classify_suggestion_types(self, suggestions: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+        """
+        Classify suggestions into different content types for multi-modal display.
+        
+        Args:
+            suggestions: List of suggestion dictionaries
+            query: Original query for context
+            
+        Returns:
+            List of suggestions with content_type field added
+        """
+        classified = []
+        
+        # Content type detection patterns
+        person_patterns = ["professor", "dr.", "researcher", "expert in"]
+        publication_patterns = ["paper", "article", "journal", "conference", "proceedings"]
+        dataset_patterns = ["dataset", "data on", "database", "statistics", "survey data"]
+        
+        for suggestion in suggestions:
+            text = suggestion.get("text", "").lower()
+            source = suggestion.get("source", "")
+            intent = suggestion.get("intent", "")
+            
+            # Default content type
+            content_type = "general"
+            
+            # Check for existing intent classification
+            if intent in ["person", "publication", "theme", "designation"]:
+                content_type = intent
+            # Check source-based classification
+            elif source == "trending":
+                content_type = "trending"
+            # Check pattern-based classification
+            elif any(pattern in text for pattern in person_patterns):
+                content_type = "person"
+            elif any(pattern in text for pattern in publication_patterns):
+                content_type = "publication"
+            elif any(pattern in text for pattern in dataset_patterns):
+                content_type = "dataset"
+            elif self._is_publication_title(text):
+                content_type = "publication"
+            # Check if likely to be a person name (simplified)
+            elif len(text.split()) <= 3 and all(word.istitle() for word in text.split()):
+                content_type = "person"
+            
+            # Add content type to suggestion
+            suggestion_copy = suggestion.copy()
+            suggestion_copy["content_type"] = content_type
+            classified.append(suggestion_copy)
+        
+        return classified
+
+    def _apply_hybrid_ranking(
+        self, suggestions: List[Dict[str, Any]], 
+        popularity_weights: Dict[str, float], 
+        query: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Apply hybrid ranking to classified suggestions.
+        
+        Args:
+            suggestions: List of classified suggestion dictionaries
+            popularity_weights: Dictionary of popularity weights
+            query: Original query for relevance calculation
+            
+        Returns:
+            List of ranked suggestions
+        """
+        if not suggestions:
+            return []
+        
+        # Deduplicate suggestions
+        seen_texts = set()
+        unique_suggestions = []
+        
+        for suggestion in suggestions:
+            text = suggestion.get("text", "").lower()
+            if text in seen_texts:
+                continue
+            
+            seen_texts.add(text)
+            unique_suggestions.append(suggestion)
+        
+        # Apply hybrid ranking
+        for suggestion in unique_suggestions:
+            text = suggestion.get("text", "").lower()
+            base_score = suggestion.get("score", 0.5)
+            content_type = suggestion.get("content_type", "general")
+            
+            # Calculate relevance components
+            exact_match_score = 1.0 if query == text else 0.0
+            prefix_match_score = 0.8 if text.startswith(query) else 0.0
+            substring_match_score = 0.4 if query in text else 0.0
+            popularity_score = popularity_weights.get(text, 0.0)
+            
+            # Length normalization (slightly prefer shorter suggestions)
+            length_score = max(0.0, 1.0 - (len(text.split()) / 20))
+            
+            # Content type boosting (for diversity)
+            type_boost = {
+                "person": 0.05,          # Slight boost for people
+                "publication": 0.05,     # Slight boost for publications
+                "trending": 0.10,        # Higher boost for trending
+                "dataset": 0.03,         # Small boost for datasets
+                "general": 0.00          # No boost for general
+            }.get(content_type, 0.0)
+            
+            # Combine scores with appropriate weights
+            hybrid_score = (
+                base_score * 0.5 +              # Base relevance score (50%)
+                exact_match_score * 0.15 +      # Exact match bonus (15%)
+                prefix_match_score * 0.15 +     # Prefix match (15%)
+                substring_match_score * 0.05 +  # Contains query (5%)
+                popularity_score * 0.1 +        # Historical popularity (10%)
+                length_score * 0.05 +           # Length normalization (5%)
+                type_boost                      # Content type boost
+            )
+            
+            # Update suggestion score
+            suggestion["score"] = min(1.0, hybrid_score)
+        
+        # Sort by score
+        unique_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+        return unique_suggestions
+
+    def _ensure_content_diversity(
+        self, suggestions: List[Dict[str, Any]], limit: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Ensure diversity of content types in top suggestions.
+        
+        Args:
+            suggestions: List of scored suggestion dictionaries
+            limit: Maximum number of suggestions to return
+            
+        Returns:
+            List of diverse suggestions
+        """
+        if not suggestions:
+            return []
+        
+        # If we have very few suggestions, return all
+        if len(suggestions) <= limit / 2:
+            return suggestions
+        
+        # Group by content type
+        grouped = {}
+        for suggestion in suggestions:
+            content_type = suggestion.get("content_type", "general")
+            if content_type not in grouped:
+                grouped[content_type] = []
+            grouped[content_type].append(suggestion)
+        
+        # Ensure diversity by interleaving content types
+        diverse_results = []
+        remaining_slots = limit
+        
+        # First, pick top item from each group (if available)
+        for content_type in grouped:
+            if grouped[content_type] and remaining_slots > 0:
+                diverse_results.append(grouped[content_type][0])
+                grouped[content_type] = grouped[content_type][1:]
+                remaining_slots -= 1
+        
+        # Then fill remaining slots based on score
+        all_remaining = []
+        for content_type in grouped:
+            all_remaining.extend(grouped[content_type])
+        
+        # Sort remaining by score
+        all_remaining.sort(key=lambda x: x.get("score", 0), reverse=True)
+        
+        # Add until limit reached
+        diverse_results.extend(all_remaining[:remaining_slots])
+        
+        # Final sort by score
+        diverse_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+        
+        return diverse_results
+
+    def _is_publication_title(self, text: str) -> bool:
+        """
+        Check if text is likely a publication title.
+        
+        Args:
+            text: Text to check
+            
+        Returns:
+            Boolean indicating if text is likely a publication title
+        """
+        # Publication indicators
+        indicators = ["study", "analysis", "review", "survey", "approach", 
+                    "framework", "method", "evaluation", "assessment"]
+        
+        # Check for indicators
+        if any(indicator in text.lower() for indicator in indicators):
+            return True
+        
+        # Check if has title pattern (capitalized words, length)
+        words = text.split()
+        if len(words) >= 4 and any(word[0].isupper() for word in words[1:] if len(word) > 2):
+            return True
+        
+        return False
+
+    async def _detect_query_intent(self, partial_query: str) -> str:
+        """
+        Detect the intent behind a user query.
+        
+        Args:
+            partial_query: The partial query to analyze
+            
+        Returns:
+            String representing the detected intent
+        """
+        # Default intent
+        default_intent = "general"
+        
+        try:
+            # Check cache for this query intent
+            cache_key = f"intent:{self._normalize_text(partial_query)}"
+            
+            if self.redis_client:
+                cached_intent = self.redis_client.get(cache_key)
+                if cached_intent:
+                    return cached_intent.decode() if isinstance(cached_intent, bytes) else cached_intent
+            
+            # Simple rule-based intent detection for common patterns
+            query_lower = partial_query.lower()
+            
+            # Intent detection patterns
+            intent_patterns = {
+                "person": ["who is", "researcher", "expert named", "dr. ", "professor"],
+                "publication": ["paper on", "research paper", "publication", "journal", "article about"],
+                "theme": ["research on", "research in", "studies on", "field of", "research area"],
+                "designation": ["position", "role", "job title", "professor of", "head of"]
+            }
+            
+            # Check each intent pattern
+            for intent, patterns in intent_patterns.items():
+                for pattern in patterns:
+                    if pattern in query_lower:
+                        # Cache this intent if Redis available
+                        if self.redis_client:
+                            self.redis_client.setex(cache_key, 3600, intent)
+                        return intent
+            
+            # Fallback to default
+            return default_intent
+            
+        except Exception as e:
+            self.logger.error(f"Error detecting query intent: {e}")
+            return default_intent
+
+
+
+    async def _get_query_popularity_weights(self, query: str) -> Dict[str, float]:
+        """Get popularity weights for queries similar to the input query"""
+        try:
+            # Initialize with empty weights
+            weights = {}
+            
+            # If Redis is available, try to get popularity data
+            if self.redis_client:
+                # Try to get exact matches first
+                popularity_key = f"query_popularity:{query}"
+                popularity_data = self.redis_client.get(popularity_key)
+                
+                if popularity_data:
+                    weights = json.loads(popularity_data)
+                else:
+                    # Try prefix matching for partial queries
+                    query_prefix = query[:min(len(query), 3)]
+                    keys = self.redis_client.keys(f"query_popularity:{query_prefix}*")
+                    
+                    # Combine data from up to 5 similar keys
+                    for key in keys[:5]:
+                        try:
+                            key_data = self.redis_client.get(key)
+                            if key_data:
+                                key_weights = json.loads(key_data)
+                                weights.update(key_weights)
+                        except:
+                            continue
+            
+            return weights
+        except Exception as e:
+            self.logger.error(f"Error getting query popularity weights: {e}")
+            return {}
+
+    def _fuzzy_match(self, str1: str, str2: str, max_distance: int = 1) -> bool:
+        """
+        Determine if two strings match within a maximum edit distance.
+        Uses a simplified Levenshtein distance calculation.
+        
+        Args:
+            str1: First string to compare
+            str2: Second string to compare
+            max_distance: Maximum edit distance allowed
+            
+        Returns:
+            Boolean indicating if strings match within the maximum distance
+        """
+        # Handle empty strings
+        if not str1 and not str2:
+            return True
+        if not str1 or not str2:
+            return False
+        
+        # Simple length check first
+        if abs(len(str1) - len(str2)) > max_distance:
+            return False
+        
+        # For very short strings, check if one is prefix of the other
+        if min(len(str1), len(str2)) <= 2:
+            return str1.startswith(str2) or str2.startswith(str1)
+            
+        # For longer strings with 1 max distance, we can use a simplified approach
+        if max_distance == 1:
+            # Check character by character with at most one difference
+            differences = 0
+            if len(str1) == len(str2):
+                # Same length - check for character substitutions
+                for c1, c2 in zip(str1, str2):
+                    if c1 != c2:
+                        differences += 1
+                        if differences > max_distance:
+                            return False
+                return True
+            elif len(str1) == len(str2) + 1:
+                # str1 is longer by 1 - check for insertion
+                i, j = 0, 0
+                while i < len(str1) and j < len(str2):
+                    if str1[i] != str2[j]:
+                        i += 1
+                        differences += 1
+                        if differences > max_distance:
+                            return False
+                    else:
+                        i += 1
+                        j += 1
+                return True
+            elif len(str2) == len(str1) + 1:
+                # str2 is longer by 1 - check for deletion
+                i, j = 0, 0
+                while i < len(str1) and j < len(str2):
+                    if str1[i] != str2[j]:
+                        j += 1
+                        differences += 1
+                        if differences > max_distance:
+                            return False
+                    else:
+                        i += 1
+                        j += 1
+                return True
+        
+        # Fall back to prefix matching for other cases
+        return str1.startswith(str2) or str2.startswith(str1)
+        
     async def _check_cache(self, query: str) -> Optional[List[Dict[str, Any]]]:
         """
         Check if suggestions for this query are in cache.
@@ -437,7 +796,8 @@ class GoogleAutocompletePredictor:
 
     def _is_prefix_match(self, suggestion: str, partial_query: str) -> bool:
         """
-        Check if suggestion matches the partial query with proper prefix matching.
+        Check if suggestion matches the partial query with proper prefix matching
+        and typo tolerance.
         
         Args:
             suggestion: The suggestion text to check
@@ -463,17 +823,30 @@ class GoogleAutocompletePredictor:
             suggestion_prefix = " ".join(suggestion_words[:len(prefix_pattern.split())])
             
             # If the prefix doesn't match, reject the suggestion
-            if not suggestion_prefix.startswith(prefix_pattern):
-                return False
+            # Allow for typo tolerance in longer prefixes
+            if len(prefix_pattern) > 5:
+                # For longer prefixes, use edit distance
+                if not self._fuzzy_match(suggestion_prefix, prefix_pattern, max_distance=1):
+                    return False
+            else:
+                # For shorter prefixes, require exact match
+                if not suggestion_prefix.startswith(prefix_pattern):
+                    return False
         
         # Find the word in the suggestion that should complete the partial word
         # This handles cases where suggestion might have a different word structure
         for suggestion_word in suggestion_words:
+            # Check exact prefix match first (most common case)
             if suggestion_word.startswith(partial_word.lower()):
+                return True
+                
+            # For longer partial words (>3 chars), allow for typo tolerance
+            if len(partial_word) >= 3 and self._fuzzy_match(suggestion_word, partial_word, max_distance=1):
                 return True
         
         # No matching prefix found
         return False
+
 
     def _execute_faiss_search(self, query_embedding: np.ndarray, k: int, partial_query: str) -> List[Dict[str, Any]]:
         """
@@ -605,6 +978,117 @@ class GoogleAutocompletePredictor:
             self.logger.error(f"Error in FAISS search execution: {e}")
             return []
 
+    async def _execute_gemini_suggestion_request(
+        self, partial_query: str, query_intent: str, limit: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute the actual Gemini suggestion request with intent awareness.
+        
+        Args:
+            partial_query: The partial query text
+            query_intent: The detected query intent
+            limit: Maximum number of suggestions
+            
+        Returns:
+            List of suggestion dictionaries
+        """
+        # Create intent-specific prompt
+        prompt_templates = {
+            "person": f"""Generate {limit} search suggestions for "{partial_query}" focused on people (researchers, experts, professors).
+            
+            IMPORTANT:
+            - Each suggestion must be on its own line
+            - No numbering, no arrows, no bullet points
+            - Focus on researcher names and titles
+            - Keep each suggestion under 10 words
+            - No explanations
+            
+            Suggestions:""",
+            
+            "publication": f"""Generate {limit} search suggestions for "{partial_query}" focused on research publications.
+            
+            IMPORTANT:
+            - Each suggestion must be on its own line
+            - No numbering or bullet points
+            - Focus on paper titles and research topics
+            - Keep each suggestion under 10 words
+            - No explanations
+            
+            Suggestions:""",
+            
+            "theme": f"""Generate {limit} search suggestions for "{partial_query}" focused on research themes and disciplines.
+            
+            IMPORTANT:
+            - Each suggestion must be on its own line
+            - No numbering or bullet points
+            - Focus on research fields and topics
+            - Keep each suggestion under 10 words
+            - No explanations
+            
+            Suggestions:""",
+            
+            "designation": f"""Generate {limit} search suggestions for "{partial_query}" focused on academic and research positions.
+            
+            IMPORTANT:
+            - Each suggestion must be on its own line
+            - No numbering or bullet points
+            - Focus on job titles and roles
+            - Keep each suggestion under 10 words
+            - No explanations
+            
+            Suggestions:""",
+            
+            "general": f"""Generate {limit} single-line search suggestions for "{partial_query}" in a research context.
+            
+            IMPORTANT:
+            - Each suggestion must be on its own line
+            - No numbering, no arrows, no bullet points
+            - Keep each suggestion under 10 words
+            - Include relevant research terms
+            - No explanations, just the suggestions
+            - Prioritize common completions
+            
+            Suggestions:"""
+        }
+        
+        # Use the right prompt for the detected intent
+        prompt = prompt_templates.get(query_intent, prompt_templates["general"])
+        
+        # Generate with timeout
+        response = await asyncio.wait_for(
+            self.model.generate_content_async(prompt),
+            timeout=3.0  # 3 second timeout
+        )
+        
+        # Parse simple suggestions
+        suggestions = []
+        if response and hasattr(response, 'text'):
+            # Split into lines and clean
+            lines = [line.strip() for line in response.text.split('\n') if line.strip()]
+            
+            for i, line in enumerate(lines):
+                if i >= limit:
+                    break
+                
+                # Remove any numbers, bullets or arrows that might have been added
+                clean_line = line
+                for prefix in ['•', '-', '→', '*']:
+                    if clean_line.startswith(prefix):
+                        clean_line = clean_line[1:].strip()
+                
+                # Remove numbering like "1. ", "2. "
+                if len(clean_line) > 3 and clean_line[0].isdigit() and clean_line[1:3] in ['. ', ') ']:
+                    clean_line = clean_line[3:].strip()
+                
+                suggestions.append({
+                    "text": clean_line,
+                    "source": f"gemini_{query_intent}",
+                    "score": 0.85 - (i * 0.03),
+                    "intent": query_intent
+                })
+            
+        return suggestions
+
     def _generate_prefix_completions(self, partial_word: str) -> List[str]:
         """
         Generate completions for a partial word.
@@ -691,19 +1175,32 @@ class GoogleAutocompletePredictor:
         return intersection / union if union > 0 else 0
     
     @retry(
-        retry=retry_if_exception_type((asyncio.TimeoutError, ConnectionError)),
-        stop=stop_after_attempt(2),
-        wait=wait_exponential(multiplier=0.5, min=0.5, max=1.5)
+    retry=retry_if_exception_type((asyncio.TimeoutError, ConnectionError)),
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=0.5, min=0.5, max=1.5)
     )
     async def _generate_simplified_gemini_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
-        """Generate simplified Gemini suggestions with circuit breaker protection."""
+        """
+        Generate simplified Gemini suggestions with query intent classification.
+        
+        Args:
+            partial_query: Partial query to get suggestions for
+            limit: Maximum number of suggestions
+            
+        Returns:
+            List of suggestion dictionaries
+        """
         self.metrics["api_calls"] += 1
         
         try:
+            # First detect query intent
+            query_intent = await self._detect_query_intent(partial_query)
+            
             # Use circuit breaker
             suggestions = await self.generation_circuit.execute(
                 self._execute_gemini_suggestion_request,
                 partial_query,
+                query_intent,
                 limit
             )
             
@@ -717,7 +1214,6 @@ class GoogleAutocompletePredictor:
             self.logger.error(f"Error generating Gemini suggestions after retries: {e}")
             self.metrics["fallbacks_used"] += 1
             return self._generate_pattern_suggestions(partial_query, limit)
-    
     async def _execute_gemini_suggestion_request(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
         """Execute the actual Gemini suggestion request with timeout."""
         # Simple and direct prompt focused on speed
@@ -807,7 +1303,7 @@ class GoogleAutocompletePredictor:
     
     async def predict(self, partial_query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
-        Generate search suggestions with Google-like experience.
+        Generate search suggestions with Google-like experience using hybrid ranking.
         
         Args:
             partial_query: The partial query to get suggestions for
@@ -843,22 +1339,53 @@ class GoogleAutocompletePredictor:
                 gemini_future
             )
             
-            # Combine suggestions, prioritizing FAISS results
+            # New: Get historical popularity data for weighting
+            popularity_weights = await self._get_query_popularity_weights(normalized_query)
+            
+            # Combine suggestions with hybrid ranking approach
             combined_suggestions = []
             seen_texts = set()
             
-            # Add FAISS suggestions first (higher priority)
-            for suggestion in faiss_suggestions:
-                if suggestion["text"] not in seen_texts:
-                    combined_suggestions.append(suggestion)
-                    seen_texts.add(suggestion["text"])
-            
-            # Add Gemini suggestions to fill any remaining spots
-            remaining_slots = limit - len(combined_suggestions)
-            for suggestion in gemini_suggestions[:remaining_slots]:
-                if suggestion["text"] not in seen_texts:
-                    combined_suggestions.append(suggestion)
-                    seen_texts.add(suggestion["text"])
+            # Process each suggestion with hybrid scoring
+            all_suggestions = faiss_suggestions + gemini_suggestions
+            for suggestion in all_suggestions:
+                text = suggestion["text"]
+                if text in seen_texts:
+                    continue
+                
+                seen_texts.add(text)
+                
+                # Base score from original source
+                base_score = suggestion.get("score", 0.5)
+                
+                # Calculate additional scores for hybrid ranking
+                exact_match_score = 1.0 if normalized_query == self._normalize_text(text) else 0.0
+                prefix_match_score = 0.8 if text.lower().startswith(normalized_query) else 0.0
+                substring_match_score = 0.4 if normalized_query in text.lower() else 0.0
+                
+                # Semantic relevance already captured in base_score for FAISS results
+                popularity_score = popularity_weights.get(self._normalize_text(text), 0.0)
+                
+                # Length normalization (slightly prefer shorter suggestions)
+                length_score = max(0.0, 1.0 - (len(text.split()) / 20))
+                
+                # Combine scores with appropriate weights
+                hybrid_score = (
+                    base_score * 0.5 +              # Base relevance score (50%)
+                    exact_match_score * 0.15 +      # Exact match bonus (15%)
+                    prefix_match_score * 0.15 +     # Prefix match (15%)
+                    substring_match_score * 0.05 +  # Contains query (5%)
+                    popularity_score * 0.1 +        # Historical popularity (10%)
+                    length_score * 0.05             # Length normalization (5%)
+                )
+                
+                # Add to combined results with hybrid score
+                combined_suggestions.append({
+                    "text": text,
+                    "source": suggestion.get("source", "hybrid"),
+                    "score": min(1.0, hybrid_score),  # Cap at 1.0
+                    "original_score": base_score
+                })
             
             # Fallback to pattern suggestions if we still don't have enough
             if not combined_suggestions:
@@ -868,7 +1395,7 @@ class GoogleAutocompletePredictor:
             # Update cache with new results
             await self._update_cache(normalized_query, combined_suggestions)
             
-            # Sort by score for best results first
+            # Sort by hybrid score for best results first
             combined_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
             
             processing_time = time.time() - start_time
