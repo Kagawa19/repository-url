@@ -13,7 +13,6 @@ services:
       - ./logs/api:/app/logs:rw
       - ./ai_services_api/services/search/models:/app/ai_services_api/services/search/models:rw
       - ./models:/app/models:rw
-      - ./cache:/app/cache:rw
       - ./scripts/init-script.sh:/app/scripts/init-script.sh:ro
       - /dev/shm:/dev/shm:rw
       - chrome_data:/tmp/chrome-data
@@ -32,9 +31,9 @@ services:
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password123456789!}
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
       - DOCKER_ENV=true
-      - TRANSFORMERS_CACHE=/app/cache
-      - HF_HOME=/app/cache
-      - MODEL_PATH=/app/models/search
+      - TRANSFORMERS_CACHE=/app/models
+      - HF_HOME=/app/models
+      - MODEL_PATH=/app/models
       - BASE_DIR=/app
       - SKIP_OPENALEX=${SKIP_OPENALEX:-false}
       - SKIP_PUBLICATIONS=${SKIP_PUBLICATIONS:-false}

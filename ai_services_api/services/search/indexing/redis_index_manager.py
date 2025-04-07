@@ -9,7 +9,6 @@ import time
 import json
 from src.utils.db_utils import DatabaseConnector
 
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s: %(message)s',
@@ -19,34 +18,34 @@ logger = logging.getLogger(__name__)
 
 class ExpertRedisIndexManager:
     def __init__(self):
-        """Initialize Redis index manager for experts with offline fallback."""
+        """Initialize Redis index manager for experts with robust model loading."""
         try:
             self.db = DatabaseConnector()  # Initialize the database connector
             load_dotenv()
             
-            # Initialize embedding model with offline handling
+            # Explicitly set model path to pre-downloaded location
             model_name = os.getenv('EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
-            try:
-                # First try loading with standard mode
-                logger.info(f"Attempting to load model: {model_name}")
-                self.embedding_model = SentenceTransformer(model_name)
-            except (OSError, IOError) as e:
-                logger.warning(f"Failed to load model online: {e}. Trying offline mode...")
-                try:
-                    # Try with local_files_only=True (offline)
-                    self.embedding_model = SentenceTransformer(model_name, local_files_only=True)
-                except Exception as offline_error:
-                    logger.error(f"Failed to load model in offline mode: {offline_error}")
-                    # Fallback to simple embedding approach
-                    logger.warning("Using fallback text encoding method")
-                    self.embedding_model = None
+            model_cache_dir = '/app/models'  # Use the pre-downloaded model directory
             
+            try:
+                logger.info(f"Attempting to load model from {model_cache_dir}")
+                self.embedding_model = SentenceTransformer(
+                    model_name, 
+                    cache_folder=model_cache_dir,
+                    local_files_only=True  # Force local files
+                )
+            except Exception as e:
+                logger.error(f"Failed to load model: {e}")
+                logger.warning("Falling back to None and using manual embedding")
+                self.embedding_model = None
+            
+            # Setup Redis connections
             self.setup_redis_connections()
+            
             logger.info("ExpertRedisIndexManager initialized successfully")
         except Exception as e:
             logger.error(f"Error initializing ExpertRedisIndexManager: {e}")
             raise
-
 
     def setup_redis_connections(self):
         """Setup Redis connections with retry logic."""
@@ -95,7 +94,6 @@ class ExpertRedisIndexManager:
         if norm > 0:
             embedding = embedding / norm
         return embedding
-
     def _parse_jsonb(self, data):
         """Parse JSONB data safely."""
         if not data:
@@ -760,6 +758,7 @@ class ExpertRedisIndexManager:
             logger.error(f"Error retrieving expert embedding: {e}")
             return None
 
+    
     def close(self):
         """Close Redis connections."""
         try:
@@ -774,3 +773,8 @@ class ExpertRedisIndexManager:
     def __del__(self):
         """Ensure connections are closed on deletion."""
         self.close()
+
+    
+
+    
+    
