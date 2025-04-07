@@ -210,7 +210,8 @@ async def advanced_predict_query(
     logger.info(f"Received advanced query prediction request - Partial query: {partial_query}, Search Type: {search_type}")
     
     # Validate search type
-    valid_search_types = ["name", "theme", "designation", None]
+    # Validate search type
+    valid_search_types = ["name", "theme", "designation", "publication", None]
     if search_type and search_type not in valid_search_types[:-1]:
         raise HTTPException(
             status_code=400, 
@@ -363,12 +364,13 @@ async def public_advanced_predict_query(
     logger.info(f"Received public advanced query prediction request - Partial query: {partial_query}, Search Type: {search_type}")
     
     # Validate search type
-    valid_search_types = ["name", "theme", "designation", None]
+    # Validate search type
+    valid_search_types = ["name", "theme", "designation", "publication", None]
     if search_type and search_type not in valid_search_types[:-1]:
         raise HTTPException(
             status_code=400, 
             detail=f"Invalid search type. Must be one of: {', '.join(valid_search_types[:-1])}"
-        )
+    )
     
     try:
         # Use a generic user ID for public predictions

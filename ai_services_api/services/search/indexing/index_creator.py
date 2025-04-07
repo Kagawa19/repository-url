@@ -1285,6 +1285,7 @@ class ExpertSearchIndexManager:
                     active_filter = "AND e.is_active = true" if active_only else ""
                     
                     # Search for publications matching the query and get linked experts
+                    # Cast JSONB fields to text before using ILIKE
                     cur.execute(f"""
                         SELECT 
                             e.id,
@@ -1293,14 +1294,14 @@ class ExpertSearchIndexManager:
                             e.knowledge_expertise,
                             erl.confidence_score,
                             r.title,
-                            r.authors
+                            r.authors::text
                         FROM expert_resource_links erl
                         JOIN experts_expert e ON erl.expert_id = e.id
                         JOIN resources_resource r ON erl.resource_id = r.id
                         WHERE 
                             (
                                 r.title ILIKE %s OR
-                                r.authors ILIKE %s OR
+                                r.authors::text ILIKE %s OR
                                 r.abstract ILIKE %s OR
                                 r.summary ILIKE %s
                             )
@@ -1365,7 +1366,6 @@ class ExpertSearchIndexManager:
             except Exception as fallback_error:
                 logger.error(f"Fallback publication search also failed: {fallback_error}")
                 return []
-
     def _fallback_vector_publication_search(self, publication: str, k: int, active_only: bool, min_score: float):
         """Fallback to vector search if direct database query fails"""
         try:

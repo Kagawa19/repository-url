@@ -70,6 +70,36 @@ async def get_or_create_session(conn, user_id: str) -> str:
     finally:
         cur.close()
 
+async def _record_prediction_async(conn, session_id: str, user_id: str, partial_query: str, predictions: List[str], confidence_scores: List[float]):
+    """Asynchronous helper for recording predictions in the database."""
+    logger.info(f"Recording predictions for user {user_id}, session {session_id}")
+    
+    # Create a new cursor for this async task to avoid connection issues
+    try:
+        cur = conn.cursor()
+        try:
+            for pred, conf in zip(predictions, confidence_scores):
+                cur.execute("""
+                    INSERT INTO query_predictions
+                        (partial_query, predicted_query, confidence_score, 
+                        user_id, timestamp)
+                    VALUES 
+                        (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                """, (partial_query, pred, conf, user_id))
+            
+            conn.commit()
+            logger.info("Successfully recorded all predictions")
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error recording prediction: {str(e)}", exc_info=True)
+        finally:
+            cur.close()
+    except Exception as conn_error:
+        logger.error(f"Connection error in record_prediction: {conn_error}")
+    # Note: Don't close the connection here as it might be used elsewhere
+
+
+
 async def record_prediction(conn, session_id: str, user_id: str, partial_query: str, predictions: List[str], confidence_scores: List[float]):
     """Record prediction in database for analytics."""
     try:
@@ -80,28 +110,7 @@ async def record_prediction(conn, session_id: str, user_id: str, partial_query: 
     except Exception as e:
         logger.error(f"Failed to create background task for recording prediction: {e}")
 
-async def _record_prediction_async(conn, session_id: str, user_id: str, partial_query: str, predictions: List[str], confidence_scores: List[float]):
-    """Asynchronous helper for recording predictions in the database."""
-    logger.info(f"Recording predictions for user {user_id}, session {session_id}")
-    
-    cur = conn.cursor()
-    try:
-        for pred, conf in zip(predictions, confidence_scores):
-            cur.execute("""
-                INSERT INTO query_predictions
-                    (partial_query, predicted_query, confidence_score, 
-                    user_id, timestamp)
-                VALUES 
-                    (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-            """, (partial_query, pred, conf, user_id))
-        
-        conn.commit()
-        logger.info("Successfully recorded all predictions")
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"Error recording prediction: {str(e)}", exc_info=True)
-    finally:
-        cur.close()
+
 
 def generate_predictive_refinements(partial_query: str, predictions: List[str]) -> Dict[str, Any]:
     """Generate refinement suggestions based on partial query and predictions."""
@@ -398,7 +407,7 @@ async def process_advanced_query_prediction(
     Args:
         partial_query: Partial query to predict
         user_id: User identifier
-        context: Optional context for prediction (name, theme, designation)
+        context: Optional context for prediction (name, theme, designation, publication)
         limit: Maximum number of predictions
     
     Returns:
@@ -408,7 +417,7 @@ async def process_advanced_query_prediction(
     
     try:
         # Validate context
-        valid_contexts = ["name", "theme", "designation", None]
+        valid_contexts = ["name", "theme", "designation", "publication", None]
         if context and context not in valid_contexts[:-1]:
             raise ValueError(f"Invalid context. Must be one of {', '.join(valid_contexts[:-1])}")
         
@@ -420,6 +429,7 @@ async def process_advanced_query_prediction(
         predictions = []
         confidence_scores = []
         cache_key = f"advanced_idx_predict:{context or ''}:{partial_query}"
+        error_occurred = False
         
         if redis:
             try:
@@ -505,6 +515,36 @@ async def process_advanced_query_prediction(
                     predictions = predictions[:limit]
                     confidence_scores = confidence_scores[:limit]
                 
+                elif context == "publication":
+                    # Use publication-specific search
+                    try:
+                        # Use the publication search if available
+                        results = search_manager.search_experts_by_publication(
+                            partial_query,
+                            k=limit*3,
+                            min_score=0.1
+                        )
+                        
+                        # Extract publication titles from matches
+                        unique_publications = {}
+                        for result in results:
+                            if 'publication_match' in result and result['publication_match']:
+                                title = result['publication_match'].get('title', '')
+                                if title and title not in unique_publications:
+                                    unique_publications[title] = float(result.get('score', 0.5))
+                        
+                        # Convert to lists
+                        predictions = list(unique_publications.keys())
+                        confidence_scores = list(unique_publications.values())
+                        
+                        # Limit to top results
+                        predictions = predictions[:limit]
+                        confidence_scores = confidence_scores[:limit]
+                    
+                    except Exception as pub_error:
+                        logger.error(f"Publication search error: {pub_error}", exc_info=True)
+                        error_occurred = True
+                    
                 else:
                     # No specific context, use general expert search
                     results = search_manager.search_experts(
@@ -664,6 +704,70 @@ async def process_advanced_query_prediction(
                             if any(indicator in term_lower for indicator in designation_indicators):
                                 predictions.append(term)
                                 confidence_scores.append(ext_confidence_scores[i] if i < len(ext_confidence_scores) else 0.5)
+
+                    elif context == "publication":
+                        # Publication-specific fallback when no results found
+                        try:
+                            # Direct database query for publication titles
+                            conn = get_db_connection()
+                            publication_suggestions = []
+                            publication_conf_scores = []
+                            
+                            try:
+                                with conn.cursor() as cur:
+                                    cur.execute("""
+                                        SELECT 
+                                            title
+                                        FROM resources_resource
+                                        WHERE title ILIKE %s
+                                        ORDER BY publication_year DESC NULLS LAST
+                                        LIMIT %s
+                                    """, (f"%{partial_query}%", limit))
+                                    
+                                    for row in cur.fetchall():
+                                        if row[0]:  # Ensure title is not None
+                                            publication_suggestions.append(row[0])
+                                            publication_conf_scores.append(0.8)  # Default confidence
+                                    
+                                    # If still not enough results, try broader match
+                                    if len(publication_suggestions) < limit:
+                                        remaining = limit - len(publication_suggestions)
+                                        cur.execute("""
+                                            SELECT 
+                                                title
+                                            FROM resources_resource
+                                            WHERE 
+                                                title IS NOT NULL
+                                                AND title NOT IN %s
+                                                AND (
+                                                    abstract ILIKE %s OR
+                                                    summary ILIKE %s
+                                                )
+                                            ORDER BY publication_year DESC NULLS LAST
+                                            LIMIT %s
+                                        """, (
+                                            tuple(publication_suggestions) if publication_suggestions else ('',),
+                                            f"%{partial_query}%",
+                                            f"%{partial_query}%",
+                                            remaining
+                                        ))
+                                        
+                                        for row in cur.fetchall():
+                                            if row[0]:  # Ensure title is not None
+                                                publication_suggestions.append(row[0])
+                                                publication_conf_scores.append(0.6)  # Lower confidence for broader match
+                                                
+                            except Exception as db_error:
+                                logger.error(f"Publication fallback DB error: {db_error}")
+                            finally:
+                                conn.close()
+                            
+                            # If we got publications, use them
+                            if publication_suggestions:
+                                predictions = publication_suggestions
+                                confidence_scores = publication_conf_scores
+                        except Exception as pub_fallback_error:
+                            logger.error(f"Publication-specific fallback failed: {pub_fallback_error}")
                     
                     else:
                         # General search - use Google Autocomplete
@@ -685,12 +789,104 @@ async def process_advanced_query_prediction(
                         
             except Exception as idx_error:
                 logger.error(f"Index search error: {idx_error}", exc_info=True)
+                error_occurred = True
                 
                 # Generic fallback if everything fails
                 predictor = await get_predictor()
                 suggestion_objects = await predictor.predict(partial_query, limit=limit)
                 predictions = [s["text"] for s in suggestion_objects]
                 confidence_scores = [s.get("score", 0.5) * 0.6 for s in suggestion_objects]  # Very low confidence
+        
+        # Special handling for publication context when predictions still empty or error occurred
+        if context == "publication" and (not predictions or error_occurred):
+            try:
+                # Direct database query for publication titles
+                conn = get_db_connection()
+                publication_suggestions = []
+                publication_conf_scores = []
+                
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT 
+                                title
+                            FROM resources_resource
+                            WHERE title ILIKE %s
+                            ORDER BY publication_year DESC NULLS LAST
+                            LIMIT %s
+                        """, (f"%{partial_query}%", limit))
+                        
+                        for row in cur.fetchall():
+                            if row[0]:  # Ensure title is not None
+                                publication_suggestions.append(row[0])
+                                publication_conf_scores.append(0.8)  # Default confidence
+                        
+                        # If still not enough results, try broader match
+                        if len(publication_suggestions) < limit:
+                            remaining = limit - len(publication_suggestions)
+                            cur.execute("""
+                                SELECT 
+                                    title
+                                FROM resources_resource
+                                WHERE 
+                                    title IS NOT NULL
+                                    AND title NOT IN %s
+                                    AND (
+                                        abstract ILIKE %s OR
+                                        summary ILIKE %s
+                                    )
+                                ORDER BY publication_year DESC NULLS LAST
+                                LIMIT %s
+                            """, (
+                                tuple(publication_suggestions) if publication_suggestions else ('',),
+                                f"%{partial_query}%",
+                                f"%{partial_query}%",
+                                remaining
+                            ))
+                            
+                            for row in cur.fetchall():
+                                if row[0]:  # Ensure title is not None
+                                    publication_suggestions.append(row[0])
+                                    publication_conf_scores.append(0.6)  # Lower confidence for broader match
+                                    
+                except Exception as db_error:
+                    logger.error(f"Publication fallback DB error: {db_error}")
+                finally:
+                    if conn:
+                        conn.close()
+                
+                # If we got publications, use them
+                if publication_suggestions:
+                    predictions = publication_suggestions
+                    confidence_scores = publication_conf_scores
+                    
+                    # Also create refinements
+                    refinements_list = [
+                        f"publication on {partial_query} research",
+                        f"publication on {partial_query} methods",
+                        partial_query
+                    ]
+                    
+                    # Extract keywords
+                    words = partial_query.split()
+                    for word in words:
+                        if len(word) > 3:
+                            refinements_list.append(word.capitalize())
+                    
+                    refinements_list.extend([
+                        "Journal Articles", "Conference Papers", "Book Chapters", "Reports"
+                    ])
+                    
+                    return PredictionResponse(
+                        predictions=predictions,
+                        confidence_scores=confidence_scores,
+                        user_id=user_id,
+                        refinements=refinements_list,
+                        total_suggestions=len(predictions),
+                        search_context=context
+                    )
+            except Exception as pub_fallback_error:
+                logger.error(f"Publication-specific fallback failed: {pub_fallback_error}")
         
         # Personalize suggestions if possible
         try:
