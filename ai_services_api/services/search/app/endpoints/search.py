@@ -254,6 +254,141 @@ async def track_suggestion(
     
     return {"status": "success", "message": "Suggestion selection tracked"}
 
+@router.get("/public/advanced_search")
+async def public_advanced_search(
+    query: Optional[str] = None,
+    search_type: Optional[str] = None,
+    active_only: bool = True,
+    k: int = 5,
+    name: Optional[str] = None,
+    theme: Optional[str] = None,
+    designation: Optional[str] = None,
+    publication: Optional[str] = None
+):
+    """
+    Public advanced search endpoint to search experts and resources based on multiple criteria.
+    
+    Allows searching by:
+    - Experts (name, theme, designation)
+    - Publications
+    - Flexible combination of search parameters
+    
+    Does not require a user ID
+    """
+    logger.info(f"Public advanced search request")
+    
+    # Validate search parameters
+    search_params = [search_type, name, theme, designation, publication]
+    if all(param is None for param in search_params):
+        raise HTTPException(
+            status_code=400, 
+            detail="At least one search parameter must be provided"
+        )
+    
+    # Determine search type priority
+    if search_type:
+        valid_search_types = ["name", "theme", "designation", "publication"]
+        if search_type not in valid_search_types:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid search type. Must be one of: {', '.join(valid_search_types)}"
+            )
+    
+    try:
+        # Use a generic user ID for public searches
+        public_user_id = "public_user"
+        
+        # Flexible routing based on available parameters
+        if search_type == "name" or name:
+            return await process_expert_name_search(
+                query or name, 
+                public_user_id, 
+                active_only, 
+                k
+            )
+        
+        elif search_type == "theme" or theme:
+            return await process_expert_theme_search(
+                query or theme, 
+                public_user_id, 
+                active_only, 
+                k
+            )
+        
+        elif search_type == "designation" or designation:
+            return await process_expert_designation_search(
+                query or designation, 
+                public_user_id, 
+                active_only, 
+                k
+            )
+        
+        elif search_type == "publication" or publication:
+            # Assuming you have a similar function for publication search
+            return await process_publication_search(
+                query or publication, 
+                public_user_id, 
+                k
+            )
+        
+        # Fallback to a general search if no specific type is matched
+        return await process_advanced_search(
+            query, 
+            public_user_id, 
+            active_only, 
+            k,
+            name=name,
+            theme=theme,
+            designation=designation,
+            publication=publication
+        )
+    
+    except Exception as e:
+        logger.error(f"Error in public advanced search: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail="An error occurred while processing the advanced search"
+        )
+
+@router.get("/public/experts/advanced_predict/{partial_query}")
+async def public_advanced_predict_query(
+    partial_query: str,
+    search_type: Optional[str] = None,
+    limit: int = 10
+):
+    """
+    Public advanced query prediction with context-specific suggestions.
+    Does not require a user ID.
+    """
+    logger.info(f"Received public advanced query prediction request - Partial query: {partial_query}, Search Type: {search_type}")
+    
+    # Validate search type
+    valid_search_types = ["name", "theme", "designation", None]
+    if search_type and search_type not in valid_search_types[:-1]:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid search type. Must be one of: {', '.join(valid_search_types[:-1])}"
+        )
+    
+    try:
+        # Use a generic user ID for public predictions
+        public_user_id = "public_user"
+        
+        # Process advanced query prediction
+        return await process_advanced_query_prediction(
+            partial_query, 
+            public_user_id, 
+            search_type, 
+            limit
+        )
+    
+    except Exception as e:
+        logger.error(f"Error in public advanced query prediction: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"An error occurred while generating predictions: {str(e)}"
+        )
+
 # Health check endpoint
 @router.get("/health")
 async def health_check():
