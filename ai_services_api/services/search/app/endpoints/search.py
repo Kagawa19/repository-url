@@ -83,18 +83,19 @@ async def predict_query(
 
 @router.get("/advanced_search")
 async def advanced_search(
-    query: Optional[str] = None, 
-    search_type: Optional[str] = None,  # Make search_type optional
     request: Request,
     user_id: str = Depends(get_user_id),
-    active_only: bool = True, 
+    query: Optional[str] = None,
+    search_type: Optional[str] = None,
+    active_only: bool = True,
     k: int = 5,
-    # Add additional parameters for broader search
     name: Optional[str] = None,
     theme: Optional[str] = None,
     designation: Optional[str] = None,
     publication: Optional[str] = None
 ):
+    # Function body
+
     """
     Advanced search endpoint to search experts and resources based on multiple criteria.
     

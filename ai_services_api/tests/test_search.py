@@ -1,455 +1,275 @@
-# ai_services_api/tests/test_search.py
-from fastapi.testclient import TestClient
-import pytest
-from datetime import datetime, timedelta
-from ai_services_api.controllers.search_router import router
+# phrc_interactive_search_tester.py
+import requests
+import json
+from typing import Dict, Any, Optional, List
 
-client = TestClient(router)
-
-# Test data
+BASE_URL = "http://localhost:8000"  # Change to your API's base URL
 TEST_USER = "test_user_789"
-TEST_QUERY = "health research"
-TEST_EXPERT_ID = "123"
-TEST_PUBLICATION = "Health outcomes research"
 
-@pytest.fixture
-def auth_headers():
-    """Fixture for authentication headers"""
-    return {"X-User-ID": TEST_USER}
+def print_header():
+    print("\n" + "=" * 30)
+    print("PHRC Interactive Search Tester")
+    print("=" * 30)
 
-@pytest.fixture
-def sample_expert():
-    """Fixture for sample expert data"""
-    return {
-        "id": TEST_EXPERT_ID,
-        "first_name": "John",
-        "last_name": "Doe",
-        "designation": "Research Lead",
-        "theme": "Health",
-        "unit": "Research",
-        "contact": "john@example.com",
-        "is_active": True,
-        "knowledge_expertise": ["Health", "Research Methods"]
-    }
-
-def test_search_experts(auth_headers):
-    """Test main expert search endpoint"""
-    response = client.get(
-        f"/experts/search/{TEST_QUERY}",
-        headers=auth_headers
-    )
+def make_request(endpoint: str, params: Optional[Dict[str, Any]] = None, 
+                json_data: Optional[Dict[str, Any]] = None, method: str = "GET"):
+    """Make a request to the API with the specified parameters."""
+    headers = {"X-User-ID": TEST_USER}
+    url = f"{BASE_URL}/{endpoint}"
     
-    assert response.status_code == 200
-    data = response.json()
-    assert "total_results" in data
-    assert "experts" in data
-    assert data["user_id"] == TEST_USER
-    
-    if len(data["experts"]) > 0:
-        expert = data["experts"][0]
-        assert all(key in expert for key in [
-            "id", "first_name", "last_name", "designation",
-            "theme", "unit", "contact", "is_active", "score"
-        ])
-
-def test_search_without_user_id():
-    """Test search endpoint with default user ID"""
-    response = client.get(f"/experts/search/{TEST_QUERY}")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["user_id"] == "test_user_123"  # Default test user
-
-def test_predict_query(auth_headers):
-    """Test query prediction endpoint"""
-    partial_query = "hea"
-    response = client.get(
-        f"/experts/predict/{partial_query}",
-        headers=auth_headers
-    )
-    
-    assert response.status_code == 200
-    data = response.json()
-    assert all(key in data for key in ["predictions", "confidence_scores", "user_id"])
-    assert data["user_id"] == TEST_USER
-    assert len(data["predictions"]) == len(data["confidence_scores"])
-
-def test_advanced_predict_query(auth_headers):
-    """Test advanced query prediction endpoint"""
-    partial_query = "hea"
-    
-    # Test with different contexts
-    contexts = ["name", "theme", "designation", "publication", None]
-    
-    for context in contexts:
-        params = {"search_type": context} if context else {}
-        response = client.get(
-            f"/experts/advanced_predict/{partial_query}",
-            headers=auth_headers,
-            params=params
-        )
+    try:
+        if method.upper() == "GET":
+            response = requests.get(url, headers=headers, params=params)
+        elif method.upper() == "POST":
+            response = requests.post(url, headers=headers, params=params, json=json_data)
+        else:
+            print(f"Unsupported method: {method}")
+            return None
         
-        assert response.status_code == 200
-        data = response.json()
-        assert all(key in data for key in ["predictions", "confidence_scores", "user_id"])
-        assert data["user_id"] == TEST_USER
-        assert len(data["predictions"]) == len(data["confidence_scores"])
+        if response.status_code != 200:
+            print(f"Error: {response.status_code}")
+            print(response.text)
+            return None
         
-        # If context was provided, it should be returned in the response
-        if context:
-            assert data.get("search_context") == context
+        return response.json()
+    except Exception as e:
+        print(f"Request failed: {e}")
+        return None
 
-def test_train_predictor(auth_headers):
-    """Test ML predictor training endpoint"""
-    sample_queries = ["health research", "medical studies", "public health"]
-    response = client.post(
-        "/experts/train-predictor",
-        headers=auth_headers,
-        json=sample_queries
-    )
+def display_results(data: Dict[str, Any]):
+    """Display search results in a readable format."""
+    print("\nResults:")
+    print(f"Total results: {data.get('total_results', 0)}")
     
-    assert response.status_code == 200
-    data = response.json()
-    assert data["message"] == "Predictor training initiated"
-    assert data["user_id"] == TEST_USER
-
-def test_advanced_search(auth_headers):
-    """Test the new advanced search endpoint with various parameter combinations"""
+    experts = data.get("experts", [])
+    if not experts:
+        print("No experts found.")
+        return
     
-    # Test with only query parameter
-    response = client.get(
-        "/advanced_search",
-        params={"query": TEST_QUERY},
-        headers=auth_headers
-    )
-    
-    assert response.status_code == 200
-    data = response.json()
-    assert "total_results" in data
-    assert "experts" in data
-    assert data["user_id"] == TEST_USER
-    
-    # Test with search_type parameter
-    search_types = ["name", "theme", "designation", "publication"]
-    for search_type in search_types:
-        response = client.get(
-            "/advanced_search",
-            params={"query": TEST_QUERY, "search_type": search_type},
-            headers=auth_headers
-        )
+    for i, expert in enumerate(experts, 1):
+        print(f"\n{i}. {expert.get('first_name', '')} {expert.get('last_name', '')}")
+        print(f"   Designation: {expert.get('designation', '')}")
+        print(f"   Theme: {expert.get('theme', '')}")
+        print(f"   Score: {expert.get('score', '')}")
         
-        assert response.status_code == 200
-        data = response.json()
-        assert "total_results" in data
-        assert "experts" in data
+        expertise = expert.get('knowledge_expertise', [])
+        if expertise:
+            print(f"   Expertise: {', '.join(expertise)}")
+
+def get_prediction(partial_query: str, search_type: Optional[str] = None):
+    """Get predictions for a partial query."""
+    params = {}
+    if search_type:
+        params["search_type"] = search_type
         
-    # Test with specific parameters
-    response = client.get(
-        "/advanced_search",
-        params={"name": "John Doe"},
-        headers=auth_headers
-    )
+    data = make_request(f"experts/advanced_predict/{partial_query}", params=params)
     
-    assert response.status_code == 200
-    
-    # Test with theme parameter
-    response = client.get(
-        "/advanced_search",
-        params={"theme": "Health"},
-        headers=auth_headers
-    )
-    
-    assert response.status_code == 200
-    
-    # Test with designation parameter
-    response = client.get(
-        "/advanced_search",
-        params={"designation": "Research Lead"},
-        headers=auth_headers
-    )
-    
-    assert response.status_code == 200
-    
-    # Test with publication parameter
-    response = client.get(
-        "/advanced_search",
-        params={"publication": TEST_PUBLICATION},
-        headers=auth_headers
-    )
-    
-    assert response.status_code == 200
-    
-    # Test with multiple parameters
-    response = client.get(
-        "/advanced_search",
-        params={
-            "name": "John", 
-            "theme": "Health", 
-            "designation": "Lead"
-        },
-        headers=auth_headers
-    )
-    
-    assert response.status_code == 200
-    
-    # Test with all parameters
-    response = client.get(
-        "/advanced_search",
-        params={
-            "query": TEST_QUERY,
-            "search_type": "name",
-            "name": "John",
-            "theme": "Health",
-            "designation": "Lead", 
-            "publication": TEST_PUBLICATION
-        },
-        headers=auth_headers
-    )
-    
-    assert response.status_code == 200
-
-def test_advanced_search_errors(auth_headers):
-    """Test error cases for advanced search"""
-    
-    # Test with no parameters (should fail)
-    response = client.get(
-        "/advanced_search",
-        headers=auth_headers
-    )
-    
-    assert response.status_code == 400
-    
-    # Test with invalid search_type
-    response = client.get(
-        "/advanced_search",
-        params={"query": TEST_QUERY, "search_type": "invalid_type"},
-        headers=auth_headers
-    )
-    
-    assert response.status_code == 400
-
-def test_similar_experts(auth_headers, sample_expert):
-    """Test finding similar experts"""
-    response = client.get(
-        f"/experts/similar/{TEST_EXPERT_ID}",
-        headers=auth_headers
-    )
-    
-    assert response.status_code in [200, 404]  # 404 is acceptable if expert not found
-    if response.status_code == 200:
-        data = response.json()
-        assert "total_results" in data
-        assert "experts" in data
-        assert data["user_id"] == TEST_USER
+    if not data:
+        return []
         
-        if len(data["experts"]) > 0:
-            assert str(data["experts"][0]["id"]) != TEST_EXPERT_ID
+    return data.get("predictions", [])
 
-def test_get_expert_details(auth_headers, sample_expert):
-    """Test getting expert details"""
-    response = client.get(
-        f"/experts/{TEST_EXPERT_ID}",
-        headers=auth_headers
-    )
+def display_predictions(predictions: list):
+    """Display predictions in a numbered list."""
+    if not predictions:
+        print("No predictions available.")
+        return
     
-    assert response.status_code in [200, 404]  # 404 is acceptable if expert not found
-    if response.status_code == 200:
-        data = response.json()
-        assert data["user_id"] == TEST_USER
-        assert all(key in data for key in [
-            "id", "first_name", "last_name", "designation",
-            "theme", "unit", "contact", "is_active"
-        ])
+    print("\nPredictions:")
+    for i, prediction in enumerate(predictions, 1):
+        print(f"{i}. {prediction}")
 
-def test_test_endpoints(auth_headers):
-    """Test all test endpoints"""
-    # Test search
-    response = client.get(
-        f"/test/experts/search/{TEST_QUERY}",
-        params={"active_only": True, "test_error": False}
-    )
-    assert response.status_code == 200
-    assert "total_results" in response.json()
-    
-    # Test prediction
-    response = client.get(
-        "/test/experts/predict/health",
-        params={"test_error": False}
-    )
-    assert response.status_code == 200
-    assert "predictions" in response.json()
-    
-    # Test analytics
-    response = client.get("/test/analytics/metrics")
-    assert response.status_code == 200
-    data = response.json()
-    assert "performance_metrics" in data
-    assert "search_metrics" in data
-    assert data["user_id"] == "test_user"
-    
-    # Test click recording
-    response = client.post(
-        "/test/record-click",
-        params={"search_id": 1, "expert_id": TEST_EXPERT_ID}
-    )
-    assert response.status_code in [200, 500]  # 500 is acceptable if record doesn't exist
-
-@pytest.mark.parametrize("query", [
-    "simple query",
-    "Complex Query With Capitals",
-    "query with numbers 123",
-    "query @with #special !chars",
-    "very " * 10 + "long query",
-    ""  # Empty query
-])
-def test_different_queries(auth_headers, query):
-    """Test search with different query types"""
-    response = client.get(
-        f"/experts/search/{query}",
-        headers=auth_headers
-    )
-    
-    assert response.status_code == 200
-    data = response.json()
-    assert "total_results" in data
-    assert "experts" in data
-
-def test_track_suggestion(auth_headers):
-    """Test suggestion tracking endpoint"""
+def track_selection(partial_query: str, selected_suggestion: str):
+    """Track the user's selection."""
     payload = {
-        "partial_query": "hea",
-        "selected_suggestion": "health research"
+        "partial_query": partial_query,
+        "selected_suggestion": selected_suggestion
     }
-    response = client.post(
-        "/experts/track-suggestion",
-        headers=auth_headers,
-        json=payload
-    )
     
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "success"
-    assert "message" in data
-
-def test_error_cases(auth_headers):
-    """Test various error scenarios"""
-    # Test invalid expert ID
-    response = client.get(
-        "/experts/invalid_id",
-        headers=auth_headers
-    )
-    assert response.status_code == 404
-
-    # Test very long query
-    long_query = "a" * 1000
-    response = client.get(
-        f"/experts/search/{long_query}",
-        headers=auth_headers
-    )
-    assert response.status_code in [200, 500]
-
-    # Test invalid similarity search
-    response = client.get(
-        "/experts/similar/nonexistent_id",
-        headers=auth_headers
-    )
-    assert response.status_code == 404
-
-def test_concurrent_searches(auth_headers):
-    """Test multiple concurrent searches"""
-    queries = ["health", "research", "medical"]
-    responses = []
+    result = make_request("experts/track-suggestion", json_data=payload, method="POST")
     
-    for query in queries:
-        response = client.get(
-            f"/experts/search/{query}",
-            headers=auth_headers
-        )
-        responses.append(response)
-    
-    assert all(r.status_code == 200 for r in responses)
-    for response in responses:
-        data = response.json()
-        assert data["user_id"] == TEST_USER
+    if result and result.get("status") == "success":
+        print(f"Selection '{selected_suggestion}' tracked successfully.")
+    else:
+        print("Failed to track selection.")
 
-def test_concurrent_advanced_searches(auth_headers):
-    """Test multiple concurrent advanced searches"""
-    search_params = [
-        {"query": "health"},
-        {"name": "John"},
-        {"theme": "Research"},
-        {"designation": "Lead"},
-        {"publication": "Health outcomes"}
-    ]
+def normal_search():
+    """Perform a normal search."""
+    print("\n=== Normal Search ===")
     
-    responses = []
-    for params in search_params:
-        response = client.get(
-            "/advanced_search",
-            params=params,
-            headers=auth_headers
-        )
-        responses.append(response)
+    # Get partial query and show predictions
+    partial_query = input("Start typing your query: ")
     
-    assert all(r.status_code == 200 for r in responses)
-    for response in responses:
-        data = response.json()
-        assert data["user_id"] == TEST_USER
+    if not partial_query:
+        print("Query cannot be empty.")
+        return
+    
+    predictions = get_prediction(partial_query)
+    display_predictions(predictions)
+    
+    # Let user select a prediction or type full query
+    choice = input("\nSelect a prediction number or press Enter to type full query: ")
+    
+    if choice.isdigit() and 1 <= int(choice) <= len(predictions):
+        selected_prediction = predictions[int(choice) - 1]
+        print(f"Selected: {selected_prediction}")
+        
+        # Track the selection
+        track_selection(partial_query, selected_prediction)
+        
+        # Use selected prediction as query
+        query = selected_prediction
+    else:
+        query = input("Enter full search query: ")
+        
+    if not query:
+        print("Search query cannot be empty.")
+        return
+    
+    data = make_request(f"experts/search/{query}")
+    if data:
+        display_results(data)
 
-# Database verification tests
-def test_search_analytics(auth_headers):
-    """Test analytics recording for searches"""
-    # Perform a search
-    search_response = client.get(
-        f"/experts/search/{TEST_QUERY}",
-        headers=auth_headers
-    )
-    assert search_response.status_code == 200
+def combined_search():
+    """Search with multiple parameters combined in a single request."""
+    print("\n=== Combined Parameters Search ===")
+    print("This search finds experts matching MULTIPLE criteria at once")
     
-    # Verify analytics were recorded
-    analytics_response = client.get("/test/analytics/metrics")
-    assert analytics_response.status_code == 200
-    data = analytics_response.json()
-    assert "search_metrics" in data
-
-def test_advanced_search_analytics(auth_headers):
-    """Test analytics recording for advanced searches"""
-    # Perform an advanced search
-    search_response = client.get(
-        "/advanced_search",
-        params={"query": TEST_QUERY, "search_type": "theme"},
-        headers=auth_headers
-    )
-    assert search_response.status_code == 200
+    # Create parameters dictionary
+    params = {}
     
-    # Verify analytics were recorded
-    analytics_response = client.get("/test/analytics/metrics")
-    assert analytics_response.status_code == 200
-    data = analytics_response.json()
-    assert "search_metrics" in data
-
-def test_prediction_analytics(auth_headers):
-    """Test analytics recording for predictions"""
-    # Make prediction request
-    predict_response = client.get(
-        "/experts/predict/heal",
-        headers=auth_headers
-    )
-    assert predict_response.status_code == 200
+    # Select parameter combination from pre-defined options
+    print("\nChoose a parameter combination to test:")
+    print("1. Name + Theme (experts named 'X' working on theme 'Y')")
+    print("2. Theme + Designation (experts with theme 'X' and job title 'Y')")
+    print("3. Name + Designation + Theme (most specific)")
+    print("4. Query + Search Type (contextual search)")
+    print("5. Custom combination (specify your own parameters)")
     
-    # Verify prediction was recorded
-    analytics_response = client.get("/test/analytics/metrics")
-    assert analytics_response.status_code == 200
-    data = analytics_response.json()
-    assert "performance_metrics" in data
+    option = input("\nSelect option (1-5): ")
+    
+    if option == "1":
+        # Name + Theme
+        name = input("\nEnter expert name: ")
+        theme = input("Enter research theme: ")
+        
+        if not name or not theme:
+            print("Both parameters are required for this option.")
+            return
+            
+        params["name"] = name
+        params["theme"] = theme
+        
+    elif option == "2":
+        # Theme + Designation
+        theme = input("\nEnter research theme: ")
+        designation = input("Enter job title/designation: ")
+        
+        if not theme or not designation:
+            print("Both parameters are required for this option.")
+            return
+            
+        params["theme"] = theme
+        params["designation"] = designation
+        
+    elif option == "3":
+        # Name + Designation + Theme (triple combination)
+        name = input("\nEnter expert name: ")
+        designation = input("Enter job title/designation: ")
+        theme = input("Enter research theme: ")
+        
+        if not name or not designation or not theme:
+            print("All three parameters are required for this option.")
+            return
+            
+        params["name"] = name
+        params["designation"] = designation
+        params["theme"] = theme
+        
+    elif option == "4":
+        # Query + Search Type
+        query = input("\nEnter search query: ")
+        print("Search type options: name, theme, designation, publication")
+        search_type = input("Enter search type: ")
+        
+        if not query or not search_type or search_type not in ["name", "theme", "designation", "publication"]:
+            print("Valid query and search type are required for this option.")
+            return
+            
+        params["query"] = query
+        params["search_type"] = search_type
+        
+    elif option == "5":
+        # Custom combination
+        print("\nEnter values for any parameters you want to include (leave blank to skip):")
+        
+        query = input("Query: ")
+        if query:
+            params["query"] = query
+            
+        print("\nSearch type options: name, theme, designation, publication")
+        search_type = input("Search type: ")
+        if search_type and search_type in ["name", "theme", "designation", "publication"]:
+            params["search_type"] = search_type
+            
+        name = input("\nExpert name: ")
+        if name:
+            params["name"] = name
+            
+        theme = input("Research theme: ")
+        if theme:
+            params["theme"] = theme
+            
+        designation = input("Designation/job title: ")
+        if designation:
+            params["designation"] = designation
+            
+        publication = input("Publication: ")
+        if publication:
+            params["publication"] = publication
+            
+        if not params:
+            print("At least one parameter must be provided.")
+            return
+    else:
+        print("Invalid option.")
+        return
+        
+    # Show final parameter combination
+    print("\n=== Final Combined Parameters ===")
+    for key, value in params.items():
+        print(f"{key}: {value}")
+        
+    print("\nThis will search for experts matching ALL these criteria simultaneously.")
+    
+    # Execute the search
+    print("\nExecuting combined search...")
+    data = make_request("advanced_search", params=params)
+    
+    if data:
+        print(f"\nExperts matching ALL criteria: {data.get('total_results', 0)}")
+        display_results(data)
 
-def test_health_check():
-    """Test health check endpoint"""
-    response = client.get("/health")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "ok"
-    assert "timestamp" in data
-    assert "components" in data
+def main():
+    while True:
+        print_header()
+        print("1. Normal Search")
+        print("2. Combined Search")
+        print("3. Exit")
+        
+        choice = input("Enter your choice (1-3): ")
+        
+        if choice == "1":
+            normal_search()
+        elif choice == "2":
+            combined_search()
+        elif choice == "3":
+            print("Exiting tester. Goodbye!")
+            break
+        else:
+            print("Invalid choice. Please try again.")
+        
+        input("\nPress Enter to continue...")
 
 if __name__ == "__main__":
-    pytest.main(["-v"])
+    main()
