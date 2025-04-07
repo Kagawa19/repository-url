@@ -9,6 +9,10 @@ from asyncio import to_thread
 
 import json
 import time
+import aiohttp
+import asyncio
+import logging
+from typing import Optional
 import asyncio
 import asyncio
 from functools import lru_cache
@@ -673,17 +677,30 @@ class GoogleAutocompletePredictor:
                 self.logger.warning(f"Error updating Redis cache: {e}")
     
     
-
-    async def _get_gemini_embedding(self, text: str, retries: int = 3, delay: float = 1.0):
+    async def _get_gemini_embedding(self, text: str, retries: int = 3, delay: float = 1.0) -> Optional[list]:
         """
         Get Gemini embedding for the input text with retries.
         """
         for attempt in range(retries):
             try:
-                # Replace this with your actual embedding call
-                embedding = await your_embedding_call(text)
-                if embedding is not None:
-                    return embedding
+                async with aiohttp.ClientSession() as session:
+                    headers = {
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self.api_key}"
+                    }
+                    payload = {
+                        "input": text
+                    }
+                    async with session.post(self.api_url, json=payload, headers=headers) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            embedding = data.get("embedding")
+                            if embedding:
+                                return embedding
+                            else:
+                                self.logger.warning(f"Embedding not found in response: {data}")
+                        else:
+                            self.logger.warning(f"Received non-200 status code {response.status}: {await response.text()}")
             except Exception as e:
                 self.logger.warning(f"Embedding error (attempt {attempt + 1}): {e}")
             await asyncio.sleep(delay)
