@@ -1261,6 +1261,165 @@ class ExpertSearchIndexManager:
             logger.error(f"Fallback vector theme search failed: {e}")
             return []
 
+    def search_experts_by_publication(self, publication: str, k: int = 5, active_only: bool = False, min_score: float = 0.1) -> List[Dict[str, Any]]:
+        """
+        Search for experts by publication using the expert-resource link table.
+        
+        Args:
+            publication (str): Publication title or identifier to search for
+            k (int): Number of results to return
+            active_only (bool): Whether to return only active experts
+            min_score (float): Minimum confidence score threshold
+            
+        Returns:
+            List[Dict[str, Any]]: List of matching experts with their confidence scores
+        """
+        try:
+            # Get database connection
+            conn = self.db.get_connection()
+            matching_experts = []
+            
+            try:
+                with conn.cursor() as cur:
+                    # Add active_only filter if requested
+                    active_filter = "AND e.is_active = true" if active_only else ""
+                    
+                    # Search for publications matching the query and get linked experts
+                    cur.execute(f"""
+                        SELECT 
+                            e.id,
+                            e.first_name,
+                            e.last_name,
+                            e.knowledge_expertise,
+                            erl.confidence_score,
+                            r.title,
+                            r.authors
+                        FROM expert_resource_links erl
+                        JOIN experts_expert e ON erl.expert_id = e.id
+                        JOIN resources_resource r ON erl.resource_id = r.id
+                        WHERE 
+                            (
+                                r.title ILIKE %s OR
+                                r.authors ILIKE %s OR
+                                r.abstract ILIKE %s OR
+                                r.summary ILIKE %s
+                            )
+                            {active_filter}
+                        ORDER BY erl.confidence_score DESC
+                        LIMIT %s
+                    """, (
+                        f"%{publication}%",  # Title match
+                        f"%{publication}%",  # Authors match
+                        f"%{publication}%",  # Abstract match
+                        f"%{publication}%",  # Summary match
+                        k*3  # Get more to filter better
+                    ))
+                    
+                    rows = cur.fetchall()
+                    
+                    # Process results with relevance scoring
+                    seen_experts = set()  # To avoid duplicates
+                    for row in rows:
+                        expert_id, first_name, last_name, knowledge_expertise, confidence_score, title, authors = row
+                        
+                        # Skip if we've already seen this expert (keep highest score)
+                        if expert_id in seen_experts:
+                            continue
+                        seen_experts.add(expert_id)
+                        
+                        # Skip if below minimum score
+                        if confidence_score < min_score:
+                            continue
+                        
+                        # Calculate match score based on confidence and publication relevance
+                        match_score = float(confidence_score)
+                        
+                        # Boost score if publication appears in title
+                        if title and publication.lower() in title.lower():
+                            match_score = min(1.0, match_score * 1.2)
+                        
+                        matching_experts.append({
+                            'id': expert_id,
+                            'first_name': first_name or '',
+                            'last_name': last_name or '',
+                            'knowledge_expertise': self._parse_jsonb(knowledge_expertise),
+                            'score': match_score,
+                            'publication_match': {
+                                'title': title,
+                                'authors': authors
+                            }
+                        })
+            
+            finally:
+                conn.close()
+            
+            # Sort by score (most relevant first)
+            matching_experts.sort(key=lambda x: x.get('score', 0), reverse=True)
+            return matching_experts[:k]
+            
+        except Exception as e:
+            logger.error(f"Error in publication search: {e}")
+            # Fall back to vector search if database query fails
+            try:
+                return self._fallback_vector_publication_search(publication, k, active_only, min_score)
+            except Exception as fallback_error:
+                logger.error(f"Fallback publication search also failed: {fallback_error}")
+                return []
+
+    def _fallback_vector_publication_search(self, publication: str, k: int, active_only: bool, min_score: float):
+        """Fallback to vector search if direct database query fails"""
+        try:
+            # Load index and mapping
+            index = faiss.read_index(str(self.index_path))
+            with open(self.mapping_path, 'rb') as f:
+                id_mapping = pickle.load(f)
+            
+            # Create a publication-focused query
+            publication_focused_query = f"Publication: {publication} Expert who published {publication}"
+            
+            # Generate query embedding
+            query_embedding = self.model.encode([publication_focused_query], convert_to_numpy=True)
+            
+            # Search index
+            max_candidates = min(k * 5, index.ntotal)
+            distances, indices = index.search(query_embedding.astype(np.float32), max_candidates)
+            
+            # Process results
+            results = []
+            
+            for i, idx in enumerate(indices[0]):
+                if idx < 0:
+                    continue
+                    
+                expert_id = id_mapping[idx]
+                expert_data = self.redis_binary.hgetall(f"expert:{expert_id}")
+                
+                if expert_data:
+                    try:
+                        metadata = json.loads(expert_data[b'metadata'].decode())
+                        
+                        # For L2 distance, lower is better, so convert to similarity score
+                        distance = float(distances[0][i])
+                        base_score = float(1.0 / (1.0 + distance))
+                        
+                        # Add publication context to metadata
+                        metadata['score'] = base_score
+                        metadata['publication_match'] = {
+                            'title': publication,
+                            'authors': 'Unknown (vector search fallback)'
+                        }
+                        
+                        results.append(metadata)
+                    except Exception as e:
+                        continue
+            
+            sorted_results = sorted(results, key=lambda x: x.get('score', 0), reverse=True)
+            return sorted_results[:k]
+            
+        except Exception as e:
+            logger.error(f"Fallback vector publication search failed: {e}")
+            return []
+
     def search_experts_by_designation(self, designation: str, k: int = 5, active_only: bool = False, min_score: float = 0.1) -> List[Dict[str, Any]]:
         """
         Search for experts by designation using direct database matching.

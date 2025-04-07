@@ -7,7 +7,7 @@ from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutoco
 from fastapi import APIRouter, HTTPException, Request, Depends, Body
 from ai_services_api.services.search.core.models import PredictionResponse, SearchResponse
 from ai_services_api.services.search.app.endpoints.process_functions import process_query_prediction
-from ai_services_api.services.search.core.expert_search import process_expert_search
+from ai_services_api.services.search.core.expert_search import process_advanced_search, process_expert_search, process_publication_search
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request, Depends, Body
 from typing import Any, List, Dict, Optional
