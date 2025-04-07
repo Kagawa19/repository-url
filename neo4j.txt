@@ -1,0 +1,37 @@
+neo4j  | 2025-04-07 14:50:19.356+0000 INFO  Logging config in use: File '/var/lib/neo4j/conf/user-logs.xml'
+neo4j  | 2025-04-07 14:50:19.470+0000 WARN  Use of deprecated setting 'dbms.transaction.timeout'. It is replaced by 'db.transaction.timeout'.
+neo4j  | 2025-04-07 14:50:19.507+0000 INFO  Starting...
+neo4j  | 2025-04-07 14:50:24.074+0000 INFO  This instance is ServerId{5972cb8f} (5972cb8f-7097-439e-83d2-dfcc28bd9490)
+neo4j  | 2025-04-07 14:50:27.490+0000 INFO  ======== Neo4j 5.12.0 ========
+neo4j  | 2025-04-07 14:50:35.718+0000 INFO  Bolt enabled on 0.0.0.0:7687.
+neo4j  | 2025-04-07 14:50:39.913+0000 INFO  HTTP enabled on 0.0.0.0:7474.
+neo4j  | 2025-04-07 14:50:39.914+0000 INFO  Remote interface available at http://localhost:7474/
+neo4j  | 2025-04-07 14:50:39.933+0000 INFO  id: 1AD92BDF0F4A6AF51D3B43EE7DECC62D8954B23D56A04A267863C2CCA9A33FF0
+neo4j  | 2025-04-07 14:50:39.934+0000 INFO  name: system
+neo4j  | 2025-04-07 14:50:39.937+0000 INFO  creationDate: 2025-04-07T10:31:15.96Z
+neo4j  | 2025-04-07 14:50:39.941+0000 INFO  Started.
+neo4j  | 2025-04-07 14:52:17.725+0000 INFO  Neo4j Server shutdown initiated by request
+neo4j  | 2025-04-07 14:52:17.770+0000 INFO  Stopping...
+neo4j  | 2025-04-07 14:52:24.016+0000 INFO  Stopped.
+neo4j  | 2025-04-07 14:52:57.743+0000 INFO  [o.n.s.CommunityBootstrapper] Neo4j Server shutdown initiated by request
+neo4j  | 2025-04-07 14:52:57.817+0000 INFO  [o.n.s.CommunityBootstrapper] Stopped.
+neo4j  | 2025-04-07 14:53:12.416+0000 INFO  [o.n.s.CommunityBootstrapper] Neo4j Server shutdown initiated by request
+neo4j  | 2025-04-07 14:53:12.457+0000 INFO  [o.n.s.CommunityBootstrapper] Stopped.
+neo4j  | 2025-04-07 14:53:23.348+0000 INFO  [o.n.s.CommunityBootstrapper] Neo4j Server shutdown initiated by request
+neo4j  | 2025-04-07 14:53:23.381+0000 INFO  [o.n.s.CommunityBootstrapper] Stopped.
+neo4j  | 2025-04-07 14:53:48.068+0000 INFO  Logging config in use: File '/var/lib/neo4j/conf/user-logs.xml'
+neo4j  | 2025-04-07 14:53:48.113+0000 WARN  Use of deprecated setting 'dbms.transaction.timeout'. It is replaced by 'db.transaction.timeout'.
+neo4j  | 2025-04-07 14:53:48.145+0000 INFO  Starting...
+neo4j  | 2025-04-07 14:53:50.425+0000 INFO  This instance is ServerId{5972cb8f} (5972cb8f-7097-439e-83d2-dfcc28bd9490)
+neo4j  | 2025-04-07 14:53:52.383+0000 INFO  ======== Neo4j 5.12.0 ========
+neo4j  | 2025-04-07 14:53:55.960+0000 INFO  Bolt enabled on 0.0.0.0:7687.
+neo4j  | 2025-04-07 14:53:58.241+0000 INFO  HTTP enabled on 0.0.0.0:7474.
+neo4j  | 2025-04-07 14:53:58.248+0000 INFO  Remote interface available at http://localhost:7474/
+neo4j  | 2025-04-07 14:53:58.282+0000 INFO  id: 1AD92BDF0F4A6AF51D3B43EE7DECC62D8954B23D56A04A267863C2CCA9A33FF0
+neo4j  | 2025-04-07 14:53:58.286+0000 INFO  name: system
+neo4j  | 2025-04-07 14:53:58.287+0000 INFO  creationDate: 2025-04-07T10:31:15.96Z
+neo4j  | 2025-04-07 14:53:58.290+0000 INFO  Started.
+neo4j  | 2025-04-07 14:53:58.347+0000 INFO  Neo4j Server shutdown initiated by request
+neo4j  | 2025-04-07 14:53:58.349+0000 INFO  Stopping...
+neo4j  | 2025-04-07 14:54:04.323+0000 INFO  Stopped.
+env
