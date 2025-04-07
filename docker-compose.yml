@@ -231,7 +231,12 @@ services:
     command: >
       bash -c "
         airflow db init &&
-        airflow users create --username ${AIRFLOW_USERNAME:-admin} --password ${AIRFLOW_PASSWORD:-neymar} --firstname ${AIRFLOW_FIRSTNAME:-Admin} --lastname ${AIRFLOW_LASTNAME:-User} --role Admin --email ${AIRFLOW_EMAIL:-briankimutai97@gmail.com}
+        if ! airflow users list | grep -q ${AIRFLOW_EMAIL:-briankimutai97@gmail.com}; then
+          airflow users create --username ${AIRFLOW_USERNAME:-admin} --password ${AIRFLOW_PASSWORD:-neymar} --firstname ${AIRFLOW_FIRSTNAME:-Admin} --lastname ${AIRFLOW_LASTNAME:-User} --role Admin --email ${AIRFLOW_EMAIL:-briankimutai97@gmail.com}
+          echo 'Airflow user created successfully'
+        else
+          echo 'Airflow user already exists, skipping user creation'
+        fi
       "
     environment:
       - AIRFLOW__CORE__EXECUTOR=CeleryExecutor
@@ -259,7 +264,6 @@ services:
     restart: "no"
     env_file:
       - .env
-
   airflow-webserver:
     build:
       context: .
