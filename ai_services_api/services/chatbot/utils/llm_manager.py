@@ -1172,160 +1172,176 @@ class GeminiLLMManager:
         
     async def get_relevant_publications(self, query: str, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """
-        Retrieve publications from Redis with improved pattern matching and error handling.
-        
-        Args:
-            query (str): The user's query about publications
-            limit (int): Maximum number of publications to return
-        
-        Returns:
-            Tuple[List[Dict[str, Any]], Optional[str]]: Matching publications and optional suggestion
+        Retrieve publications from Redis with advanced matching capabilities
         """
         try:
             if not self.redis_manager:
                 logger.warning("Redis manager not available, cannot retrieve publications")
                 return [], "Our publication database is currently unavailable. Please try again later."
             
-            # Extract potential publication title from query for title-specific searches
-            title_query = None
-            title_patterns = [
-                r'publication (?:titled|called|named) ["\']([^"\']+)["\']',
-                r'publication ["\']([^"\']+)["\']',
-                r'paper (?:titled|called|named) ["\']([^"\']+)["\']',
-                r'paper ["\']([^"\']+)["\']',
-                r'article (?:titled|called|named) ["\']([^"\']+)["\']',
-                r'article ["\']([^"\']+)["\']',
-                r'summarize (?:the publication|the paper|the article|) ["\']([^"\']+)["\']',
-                r'summarize (?:the publication|the paper|the article|) (.+?)(?:\.|$)',
-            ]
-            
-            for pattern in title_patterns:
-                match = re.search(pattern, query, re.IGNORECASE)
-                if match:
-                    title_query = match.group(1).strip()
-                    logger.info(f"Detected specific publication title request: '{title_query}'")
-                    break
-            
-            # Get all publication keys with proper error handling
+            # Get all publication keys
             publication_keys = await self._get_all_publication_keys()
             
             if not publication_keys:
-                logger.warning("No publication keys found in Redis")
-                return [], "No publications found in the database. Please try a different search."
-            
-            logger.info(f"Found {len(publication_keys)} total publication keys in Redis")
+                return [], "No publications found in the database."
             
             # Parse specific requests for publication counts
             count_pattern = r'(\d+)\s+publications?'
             count_match = re.search(count_pattern, query, re.IGNORECASE)
             requested_count = int(count_match.group(1)) if count_match else limit
             
-            # Simple search across multiple fields
+            # Comprehensive publication retrieval
             matched_publications = []
             query_terms = set(query.lower().split())
-            stopwords = self._get_stopwords()
-            query_terms = {term for term in query_terms if term not in stopwords and len(term) > 2}
             
-            # Keep track of search statistics
-            processed_count = 0
-            error_count = 0
+            # Extract potential exact title match
+            title_match = self._extract_title_from_query(query)
             
             for key in publication_keys:
                 try:
-                    processed_count += 1
+                    # Retrieve full publication metadata
+                    raw_metadata = self.redis_manager.redis_text.hgetall(key)
                     
-                    # Retrieve publication metadata
-                    try:
-                        metadata = self.redis_manager.redis_text.hgetall(key)
-                        if not metadata:
-                            continue
-                    except Exception as redis_error:
-                        logger.debug(f"Error retrieving metadata for key {key}: {redis_error}")
-                        error_count += 1
+                    # Skip entries without essential metadata
+                    if not raw_metadata or 'title' not in raw_metadata:
                         continue
                     
-                    # Skip entries without a title
-                    if 'title' not in metadata:
-                        continue
+                    # Reconstruct metadata exactly as it was stored
+                    metadata = {
+                        'id': raw_metadata.get('id', ''),
+                        'doi': raw_metadata.get('doi', ''),
+                        'title': raw_metadata.get('title', ''),
+                        'abstract': raw_metadata.get('abstract', ''),
+                        'summary': raw_metadata.get('summary', ''),
+                        'domains': json.loads(raw_metadata.get('domains', '[]')),
+                        'topics': json.loads(raw_metadata.get('topics', '{}')),
+                        'description': raw_metadata.get('description', ''),
+                        'expert_id': raw_metadata.get('expert_id', ''),
+                        'type': raw_metadata.get('type', 'publication'),
+                        'subtitles': json.loads(raw_metadata.get('subtitles', '{}')),
+                        'publishers': json.loads(raw_metadata.get('publishers', '{}')),
+                        'collection': raw_metadata.get('collection', ''),
+                        'date_issue': raw_metadata.get('date_issue', ''),
+                        'citation': raw_metadata.get('citation', ''),
+                        'language': raw_metadata.get('language', ''),
+                        'identifiers': json.loads(raw_metadata.get('identifiers', '{}')),
+                        'created_at': raw_metadata.get('created_at', ''),
+                        'updated_at': raw_metadata.get('updated_at', ''),
+                        'source': raw_metadata.get('source', 'unknown'),
+                        'authors': json.loads(raw_metadata.get('authors', '[]')),
+                        'publication_year': raw_metadata.get('publication_year', '')
+                    }
                     
-                    # If doing a title-specific search
-                    if title_query:
-                        # Check for title match
-                        pub_title = metadata.get('title', '').lower()
-                        title_query_lower = title_query.lower()
-                        
-                        # Match if the title contains the query, or query contains the title,
-                        # or they're very similar
-                        if (title_query_lower in pub_title or 
-                            pub_title in title_query_lower or 
-                            self._similar_strings(pub_title, title_query_lower)):
-                            try:
-                                # Prepare metadata (handle JSON fields)
-                                self._prepare_publication_metadata(metadata)
-                                matched_publications.append(metadata)
-                            except Exception as e:
-                                logger.error(f"Error preparing metadata for title match: {e}")
-                        # If we're searching for a specific title, don't do general matching
-                        continue
-                    
-                    # For general searches, prepare search text from multiple fields
+                    # Prepare comprehensive search text
                     search_text = ' '.join([
                         str(metadata.get('title', '')).lower(),
-                        str(metadata.get('field', '')).lower(),
-                        str(metadata.get('summary_snippet', '')).lower(),
+                        str(metadata.get('description', '')).lower(),
+                        str(metadata.get('abstract', '')).lower(),
+                        str(metadata.get('summary', '')).lower(),
+                        ' '.join([str(a).lower() for a in metadata.get('authors', []) if a]),
                     ])
                     
-                    # Try to add authors if available
-                    try:
-                        if metadata.get('authors'):
-                            authors_data = json.loads(metadata.get('authors', '[]'))
-                            if isinstance(authors_data, list):
-                                authors_text = ' '.join([str(a).lower() for a in authors_data if a])
-                                search_text += ' ' + authors_text
-                    except Exception as authors_error:
-                        pass  # Continue without authors if there's an error
+                    # Advanced matching logic
+                    match_score = self._calculate_publication_match_score(
+                        metadata, 
+                        query_terms, 
+                        title_match
+                    )
                     
-                    # Check if any query terms match the search text
-                    if query_terms and any(term in search_text for term in query_terms):
-                        try:
-                            # Prepare metadata
-                            self._prepare_publication_metadata(metadata)
-                            matched_publications.append(metadata)
-                        except Exception as e:
-                            logger.error(f"Error preparing metadata: {e}")
+                    if match_score > 0:
+                        # Attach match score for later sorting
+                        metadata['_match_score'] = match_score
+                        matched_publications.append(metadata)
                 
                 except Exception as e:
-                    error_count += 1
                     logger.error(f"Error processing publication {key}: {e}")
             
-            logger.info(f"Publication search stats: Processed {processed_count}, found {len(matched_publications)} matches, {error_count} errors")
-            
-            # If no matches found
-            if not matched_publications:
-                if title_query:
-                    # For specific title searches
-                    return [], f"I couldn't find a publication titled '{title_query}'. Please check the title or try a more general search."
-                else:
-                    # For general searches
-                    return [], self._generate_search_suggestions(query)
-            
-            # Sort publications by relevance (newest first for now)
+            # Sort publications by match score and year
             sorted_publications = sorted(
-                matched_publications, 
-                key=lambda x: x.get('publication_year', '0000') if x.get('publication_year') else '0000', 
+                matched_publications,
+                key=lambda x: (x.get('_match_score', 0), x.get('publication_year', '0000')),
                 reverse=True
             )
             
             # Limit to requested count
             top_publications = sorted_publications[:requested_count]
             
-            logger.info(f"Returning {len(top_publications)} publications matching query")
+            # Remove internal match score before returning
+            for pub in top_publications:
+                pub.pop('_match_score', None)
             
+            logger.info(f"Found {len(top_publications)} publications matching query")
             return top_publications, None
         
         except Exception as e:
             logger.error(f"Error retrieving publications: {e}")
             return [], "We encountered an error searching publications. Try simplifying your query."
+
+    def _extract_title_from_query(self, query: str) -> Optional[str]:
+        """
+        Extract potential publication title from query
+        """
+        title_patterns = [
+            r'publication (?:titled|called|named) ["\']([^"\']+)["\']',
+            r'publication ["\']([^"\']+)["\']',
+            r'paper (?:titled|called|named) ["\']([^"\']+)["\']',
+            r'paper ["\']([^"\']+)["\']',
+            r'article (?:titled|called|named) ["\']([^"\']+)["\']',
+            r'article ["\']([^"\']+)["\']',
+            r'summarize (?:the publication|the paper|the article|) ["\']([^"\']+)["\']',
+            r'summarize (?:the publication|the paper|the article|) (.+?)(?:\.|$)',
+        ]
+        
+        for pattern in title_patterns:
+            match = re.search(pattern, query, re.IGNORECASE)
+            if match:
+                return match.group(1).strip().lower()
+        
+        return None
+
+    def _calculate_publication_match_score(
+        self, 
+        metadata: Dict[str, Any], 
+        query_terms: Set[str], 
+        title_match: Optional[str]
+    ) -> float:
+        """
+        Calculate a comprehensive match score for a publication
+        """
+        score = 0.0
+        
+        # Exact title match
+        pub_title = str(metadata.get('title', '')).lower()
+        if title_match and title_match in pub_title:
+            score += 2.0  # Significant boost for exact title match
+        
+        # Prepare search text
+        search_text = ' '.join([
+            pub_title,
+            str(metadata.get('description', '')).lower(),
+            str(metadata.get('abstract', '')).lower(),
+            str(metadata.get('summary', '')).lower(),
+            ' '.join([str(a).lower() for a in metadata.get('authors', []) if a]),
+        ])
+        
+        # Term matching
+        for term in query_terms:
+            if term in search_text:
+                score += 1.0
+        
+        # Similarity check for non-matching terms
+        for term in query_terms:
+            if term not in search_text:
+                # Check if any word in the search text is similar to the term
+                similar_match = any(
+                    self._similar_strings(term, word) 
+                    for word in search_text.split()
+                )
+                if similar_match:
+                    score += 0.5
+        
+        return score
+
 
     def _similar_strings(self, s1: str, s2: str) -> bool:
             """Check if two strings are similar (for fuzzy title matching)."""
@@ -1354,7 +1370,7 @@ class GeminiLLMManager:
                 
             # For shorter titles, check percentage overlap
             overlap_ratio = len(common_words) / min(len(words1), len(words2))
-            return overlap_ratio > 0.1 # Over 50% word overlap
+            return overlap_ratio > 0.7 # Over 50% word overlap
 
 
     def create_context(self, relevant_data: List[Dict]) -> str:
