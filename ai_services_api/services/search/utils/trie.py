@@ -5,23 +5,26 @@ from typing import List, Tuple, Dict, Any
 # Configure logger
 logger = logging.getLogger(__name__)
 
+# Enhanced version of PrefixTrie from paste-5.txt
 class PrefixTrie:
-    """Efficient prefix trie for fast query suggestions"""
+    """Efficient prefix trie for fast query suggestions with improved filtering"""
     
     def __init__(self):
         self.root = {}
         self.end_symbol = "*"
         self.frequency_key = "freq"
         self.timestamp_key = "ts"
+        self.source_key = "src"  # Track where this suggestion came from
     
-    def insert(self, word: str, frequency: int = 1, timestamp: float = None) -> None:
+    def insert(self, word: str, frequency: int = 1, timestamp: float = None, source: str = None) -> None:
         """
-        Insert a word into the trie with its frequency and timestamp
+        Insert a word into the trie with its frequency, timestamp and source
         
         Args:
             word: The word to insert
             frequency: Occurrence frequency (higher = more important)
             timestamp: Optional timestamp of when this was added
+            source: Optional source of this suggestion (e.g. 'history', 'trending')
         """
         if not word:
             return
@@ -40,6 +43,8 @@ class PrefixTrie:
             node[self.end_symbol] = {}
             node[self.end_symbol][self.frequency_key] = frequency
             node[self.end_symbol][self.timestamp_key] = timestamp or time.time()
+            if source:
+                node[self.end_symbol][self.source_key] = source
         else:
             # Increment frequency for existing words
             node[self.end_symbol][self.frequency_key] += frequency
@@ -47,8 +52,11 @@ class PrefixTrie:
             if timestamp and (self.timestamp_key not in node[self.end_symbol] or 
                              timestamp > node[self.end_symbol][self.timestamp_key]):
                 node[self.end_symbol][self.timestamp_key] = timestamp
+            # Update source if provided
+            if source:
+                node[self.end_symbol][self.source_key] = source
     
-    def search(self, prefix: str, limit: int = 10) -> List[Tuple[str, int, float]]:
+    def search(self, prefix: str, limit: int = 10) -> List[Tuple[str, int, float, str]]:
         """
         Search for words that start with the given prefix
         
@@ -57,13 +65,19 @@ class PrefixTrie:
             limit: Maximum number of results to return
             
         Returns:
-            List of (word, frequency, timestamp) tuples
+            List of (word, frequency, timestamp, source) tuples
         """
-        if not prefix:
-            return []
+        if prefix is None:
+            prefix = ""
             
         prefix = prefix.lower()
         node = self.root
+        
+        # For empty prefix, return top frequent items
+        if not prefix:
+            results = []
+            self._collect_top_frequent_words(self.root, "", results, limit)
+            return results
         
         # Navigate to the prefix node
         for char in prefix:
@@ -79,7 +93,24 @@ class PrefixTrie:
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:limit]
     
-    def _collect_words(self, node: Dict, prefix: str, results: List[Tuple[str, int, float]]) -> None:
+    def _collect_top_frequent_words(self, node, current_prefix, results, limit):
+        """Collect most frequent words from the trie"""
+        if self.end_symbol in node:
+            freq = node[self.end_symbol].get(self.frequency_key, 1)
+            ts = node[self.end_symbol].get(self.timestamp_key, 0)
+            src = node[self.end_symbol].get(self.source_key, "unknown")
+            results.append((current_prefix, freq, ts, src))
+        
+        # Recursively explore all child nodes
+        for char, child_node in node.items():
+            if char != self.end_symbol:
+                self._collect_top_frequent_words(child_node, current_prefix + char, results, limit)
+                
+                # Early return if we've collected enough results
+                if len(results) >= limit * 2:  # Collect more than needed for better sorting
+                    return
+    
+    def _collect_words(self, node: Dict, prefix: str, results: List[Tuple[str, int, float, str]]) -> None:
         """
         Recursively collect all words from the current node
         
@@ -91,13 +122,14 @@ class PrefixTrie:
         if self.end_symbol in node:
             freq = node[self.end_symbol].get(self.frequency_key, 1)
             ts = node[self.end_symbol].get(self.timestamp_key, 0)
-            results.append((prefix, freq, ts))
+            src = node[self.end_symbol].get(self.source_key, "unknown")
+            results.append((prefix, freq, ts, src))
         
         # Recursively explore all child nodes
         for char, child_node in node.items():
             if char != self.end_symbol:
                 self._collect_words(child_node, prefix + char, results)
-    
+
     def get_size(self) -> int:
         """Get the number of words in the trie"""
         count = [0]
@@ -185,3 +217,6 @@ class PrefixTrie:
         # Sort by frequency and limit results
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:limit]
+    
+    # Other methods remain the same...
+   

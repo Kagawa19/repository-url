@@ -110,7 +110,7 @@ async def personalize_suggestions(
 ) -> List[Dict[str, Any]]:
     """
     Re-rank suggestions based on user's search history with temporal relevance
-    and collaborative filtering.
+    and collaborative filtering. Enhanced for dynamic filtering.
     
     Args:
         suggestions: Original search suggestions from predictor
@@ -121,6 +121,10 @@ async def personalize_suggestions(
         Personalized list of suggestions
     """
     logger.info(f"Personalizing suggestions for user {user_id}")
+    
+    # If partial_query is empty, just return suggestions as is
+    if not partial_query:
+        return suggestions
     
     # Get user history with timestamps
     history = await get_user_search_history(user_id)
@@ -134,11 +138,13 @@ async def personalize_suggestions(
     combined_suggestions = suggestions.copy()
     seen_texts = set(s.get("text", "").lower() for s in suggestions)
     
-    # Add collaborative suggestions if not already present
+    # Add collaborative suggestions if not already present and they match the prefix
     for collab_suggestion in collaborative_suggestions:
-        if collab_suggestion.get("text", "").lower() not in seen_texts:
+        suggestion_text = collab_suggestion.get("text", "").lower()
+        if (suggestion_text not in seen_texts and 
+            suggestion_text.startswith(partial_query.lower())):
             combined_suggestions.append(collab_suggestion)
-            seen_texts.add(collab_suggestion.get("text", "").lower())
+            seen_texts.add(suggestion_text)
     
     # If no history and no collaborative data, return combined suggestions
     if not history and not collaborative_suggestions:
@@ -198,12 +204,16 @@ async def personalize_suggestions(
     
     # Also consider domain-specific expertise relevance if available
     user_expertise = await get_user_expertise_areas(user_id)
-    expertise_boost = 0.0
     
     # Boost scores for suggestions that match user's expertise areas
     personalized_suggestions = []
     for suggestion in combined_suggestions:
         text = suggestion.get("text", "").lower()
+        
+        # Only include suggestions that start with our partial query
+        if not text.startswith(partial_query.lower()):
+            continue
+            
         base_score = suggestion.get("score", 0.5)
         source = suggestion.get("source", "")
         
