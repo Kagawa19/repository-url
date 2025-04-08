@@ -520,112 +520,7 @@ class GoogleAutocompletePredictor:
         max_len = max(len(query1), len(query2))
         return common_len / max_len
 
-    async def predict(self, partial_query: str, limit: int = 10, user_id: str = None) -> List[Dict[str, Any]]:
-        """
-        Generate search suggestions with optimized parallel processing, latency control,
-        and adaptive response strategies.
-        
-        Args:
-            partial_query: The partial query to get suggestions for
-            limit: Maximum number of suggestions to return
-            user_id: Optional user ID for personalized suggestions
-            
-        Returns:
-            List of dictionaries containing suggestion text and metadata
-        """
-        if not partial_query:
-            return []
-        
-        # Track performance metrics
-        start_time = time.time()
-        normalized_query = self._normalize_text(partial_query)
-        self.metrics["total_requests"] += 1
-        
-        # For very short queries, limit processing to improve responsiveness
-        is_short_query = len(normalized_query) <= 2
-        
-        try:
-            # First check cache (optimized version)
-            cache_key = f"suggestions:{normalized_query}"
-            if user_id:
-                cache_key = f"suggestions:{user_id}:{normalized_query}"
-            
-            # Create tasks for parallel execution
-            cache_task = asyncio.create_task(self._check_cache(cache_key))
-            pattern_task = asyncio.create_task(self._generate_pattern_suggestions(normalized_query, limit))
-            
-            # First wait for cache - it's fastest
-            cached_suggestions = await cache_task
-            if cached_suggestions:
-                processing_time = time.time() - start_time
-                self._update_latency_metric(processing_time)
-                self.logger.info(f"Returning cached suggestions for '{normalized_query}' ({processing_time:.3f}s)")
-                return cached_suggestions[:limit]
-            
-            # Next get pattern suggestions - they're next fastest
-            pattern_suggestions = await pattern_task
-            
-            # Start faiss task only after checking cache
-            faiss_task = asyncio.create_task(self._generate_faiss_suggestions(normalized_query, limit))
-            
-            # Start personalization in background
-            personalization_task = None
-            if user_id:
-                try:
-                    personalization_task = asyncio.create_task(
-                        self._personalize_suggestions_async(pattern_suggestions, user_id, normalized_query)
-                    )
-                except Exception as e:
-                    self.logger.error(f"Error starting personalization: {e}")
-            
-            # Wait for FAISS with timeout
-            try:
-                faiss_suggestions = await asyncio.wait_for(faiss_task, timeout=0.3)
-                # Combine with pattern suggestions
-                all_suggestions = pattern_suggestions + faiss_suggestions
-            except (asyncio.TimeoutError, Exception) as e:
-                # Just use pattern suggestions if FAISS times out or errors
-                if isinstance(e, asyncio.TimeoutError):
-                    self.logger.warning(f"FAISS search timed out for '{normalized_query}'")
-                else:
-                    self.logger.error(f"FAISS search error: {e}")
-                all_suggestions = pattern_suggestions
-            
-            # Return results immediately
-            combined_suggestions = await self._hybrid_rank_suggestions(all_suggestions, normalized_query, user_id)
-            
-            # Update cache in background
-            try:
-                asyncio.create_task(self._update_cache(cache_key, combined_suggestions[:limit]))
-            except Exception as e:
-                self.logger.error(f"Error in background cache update: {e}")
-            
-            # Apply personalization later if available
-            if personalization_task:
-                try:
-                    asyncio.create_task(
-                        self._apply_personalization_later(combined_suggestions, personalization_task, user_id, normalized_query, limit)
-                    )
-                except Exception as e:
-                    self.logger.error(f"Error in background personalization: {e}")
-            
-            processing_time = time.time() - start_time
-            self._update_latency_metric(processing_time)
-            self.logger.info(
-                f"Generated {len(combined_suggestions)} suggestions for '{normalized_query}' ({processing_time:.3f}s)"
-            )
-            
-            return combined_suggestions[:limit]
-                
-        except Exception as e:
-            processing_time = time.time() - start_time
-            self._update_latency_metric(processing_time)
-            self.logger.error(f"Error predicting suggestions: {e}")
-            
-            # Ensure we always return something
-            self.metrics["fallbacks_used"] += 1
-            return await self._generate_pattern_suggestions(normalized_query, limit)
-
+    
     async def _personalize_suggestions_async(self, suggestions, user_id, query):
         """Run personalization in a separate task without blocking the main response."""
         try:
@@ -855,7 +750,7 @@ class GoogleAutocompletePredictor:
 
     async def _generate_faiss_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
         """
-        Optimized FAISS-based suggestion generation with parallel processing,
+        Optimized FAISS-based suggestion generation with proper prefix filtering,
         semantic matching, and intelligent fallbacks.
         """
         if not self.index or not self.id_mapping:
@@ -902,7 +797,7 @@ class GoogleAutocompletePredictor:
                 self.cpu_executor, 
                 self._execute_faiss_search_with_tuning,
                 query_embedding, 
-                limit * 2,  # Get more results for better filtering
+                limit * 3,  # Get more results for better filtering
                 partial_query
             )
             
@@ -912,8 +807,10 @@ class GoogleAutocompletePredictor:
                 return backup_suggestions
             
             # Process search results into suggestions
-            suggestions = []
+            direct_completions = []  # Suggestions starting with query
+            related_suggestions = []  # Related suggestions containing query
             seen_texts = set()  # For deduplication
+            partial_query_lower = partial_query.lower()
             
             for idx, score in search_result:
                 if idx < 0 or idx >= len(self.id_mapping):  # Invalid index
@@ -933,8 +830,10 @@ class GoogleAutocompletePredictor:
                     # Create search suggestion from expert data
                     if 'first_name' in metadata and 'last_name' in metadata:
                         full_name = f"{metadata.get('first_name', '')} {metadata.get('last_name', '')}".strip()
-                        if full_name and full_name.lower() not in seen_texts:
-                            seen_texts.add(full_name.lower())
+                        full_name_lower = full_name.lower()
+                        
+                        if full_name and full_name_lower not in seen_texts:
+                            seen_texts.add(full_name_lower)
                             
                             # Convert FAISS distance to similarity score (1.0 is best)
                             normalized_score = 1.0 - min(1.0, float(score))
@@ -942,47 +841,76 @@ class GoogleAutocompletePredictor:
                             # Apply additional boosting based on query overlap
                             boost = self._calculate_text_overlap_score(partial_query, full_name)
                             
-                            suggestions.append({
-                                "text": full_name,
-                                "source": "faiss",
-                                "score": min(0.95, normalized_score * (1.0 + boost))
-                            })
+                            # Categorize as direct completion or related suggestion
+                            if full_name_lower.startswith(partial_query_lower):
+                                direct_completions.append({
+                                    "text": full_name,
+                                    "source": "faiss",
+                                    "score": min(0.95, normalized_score * (1.0 + boost)),
+                                    "type": "completion"  # Mark as direct completion
+                                })
+                            elif partial_query_lower in full_name_lower:
+                                related_suggestions.append({
+                                    "text": full_name,
+                                    "source": "faiss",
+                                    "score": min(0.7, normalized_score * 0.8),  # Lower score for related
+                                    "type": "related"  # Mark as related but not direct completion
+                                })
                     
                     # Also add expertise areas if relevant
                     if 'knowledge_expertise' in metadata:
                         expertise_areas = metadata.get('knowledge_expertise', [])
                         if isinstance(expertise_areas, list):
                             for area in expertise_areas:
-                                if (area and isinstance(area, str) and 
-                                    partial_query.lower() in area.lower() and 
-                                    area.lower() not in seen_texts):
+                                area_lower = area.lower() if isinstance(area, str) else ""
+                                if not area_lower or area_lower in seen_texts:
+                                    continue
                                     
-                                    seen_texts.add(area.lower())
-                                    
-                                    # Expertise areas get a slightly lower base score
-                                    normalized_score = 0.85 * (1.0 - min(1.0, float(score)))
-                                    
-                                    suggestions.append({
+                                seen_texts.add(area_lower)
+                                
+                                # Expertise areas get a slightly lower base score
+                                normalized_score = 0.85 * (1.0 - min(1.0, float(score)))
+                                
+                                # Categorize expertise areas too
+                                if area_lower.startswith(partial_query_lower):
+                                    direct_completions.append({
                                         "text": area,
                                         "source": "faiss_expertise",
-                                        "score": normalized_score
+                                        "score": normalized_score,
+                                        "type": "completion"
+                                    })
+                                elif partial_query_lower in area_lower:
+                                    related_suggestions.append({
+                                        "text": area,
+                                        "source": "faiss_expertise", 
+                                        "score": normalized_score * 0.8,
+                                        "type": "related"
                                     })
                 except Exception as e:
                     self.logger.error(f"Error processing FAISS result: {e}")
                     continue
             
-            # Sort by score and limit results
-            suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+            # Sort each category by score
+            direct_completions.sort(key=lambda x: x.get("score", 0), reverse=True)
+            related_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
             
-            # Get backup suggestions if we don't have enough
+            # Prioritize direct completions but include some related suggestions
+            suggestions = direct_completions[:int(limit * 0.7)]  # 70% direct completions
+            remaining_slots = limit - len(suggestions)
+            
+            if remaining_slots > 0 and related_suggestions:
+                suggestions.extend(related_suggestions[:remaining_slots])
+                
+            # If we still don't have enough suggestions, use backup
             if len(suggestions) < limit / 2:
                 backup_suggestions = await backup_future
                 
                 # Merge with backup suggestions, prioritizing FAISS results
+                backup_texts = set(s["text"].lower() for s in suggestions)
                 for backup in backup_suggestions:
-                    if backup["text"].lower() not in seen_texts:
+                    if backup["text"].lower() not in backup_texts:
                         suggestions.append(backup)
-                        seen_texts.add(backup["text"].lower())
+                        backup_texts.add(backup["text"].lower())
             
             # Log performance metrics
             self.logger.info(f"FAISS search completed in {time.time() - start_time:.3f}s: {len(suggestions)} suggestions")
@@ -997,6 +925,174 @@ class GoogleAutocompletePredictor:
                 return backup_suggestions
             except:
                 return []
+
+    async def predict(self, partial_query: str, limit: int = 10, user_id: str = None) -> List[Dict[str, Any]]:
+        """
+        Generate search suggestions with optimized parallel processing, latency control,
+        and adaptive response strategies that follow Google-like pattern prioritization.
+        
+        Args:
+            partial_query: The partial query to get suggestions for
+            limit: Maximum number of suggestions to return
+            user_id: Optional user ID for personalized suggestions
+            
+        Returns:
+            List of dictionaries containing suggestion text and metadata
+        """
+        if not partial_query:
+            return []
+        
+        # Track performance metrics
+        start_time = time.time()
+        normalized_query = self._normalize_text(partial_query)
+        self.metrics["total_requests"] += 1
+        
+        # For very short queries, limit processing to improve responsiveness
+        is_short_query = len(normalized_query) <= 2
+        
+        try:
+            # First check cache (optimized version)
+            cache_key = f"suggestions:{normalized_query}"
+            if user_id:
+                cache_key = f"suggestions:{user_id}:{normalized_query}"
+            
+            # Create tasks for parallel execution
+            cache_task = asyncio.create_task(self._check_cache(cache_key))
+            pattern_task = asyncio.create_task(self._generate_pattern_suggestions(normalized_query, limit))
+            
+            # First wait for cache - it's fastest
+            cached_suggestions = await cache_task
+            if cached_suggestions:
+                # Even if we have cached suggestions, filter them to prioritize prefix matches
+                direct_completions = []
+                related_suggestions = []
+                
+                for suggestion in cached_suggestions:
+                    if suggestion.get("text", "").lower().startswith(normalized_query.lower()):
+                        suggestion["type"] = "completion"
+                        direct_completions.append(suggestion)
+                    elif normalized_query.lower() in suggestion.get("text", "").lower():
+                        suggestion["type"] = "related"
+                        related_suggestions.append(suggestion)
+                
+                # Sort by score within each group
+                direct_completions.sort(key=lambda x: x.get("score", 0), reverse=True)
+                related_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+                
+                # Prioritize direct completions
+                filtered_suggestions = direct_completions[:int(limit * 0.7)]
+                remaining_slots = limit - len(filtered_suggestions)
+                
+                if remaining_slots > 0 and related_suggestions:
+                    filtered_suggestions.extend(related_suggestions[:remaining_slots])
+                
+                processing_time = time.time() - start_time
+                self._update_latency_metric(processing_time)
+                self.logger.info(f"Returning filtered cached suggestions for '{normalized_query}' ({processing_time:.3f}s)")
+                return filtered_suggestions[:limit]
+            
+            # Next get pattern suggestions - they're next fastest
+            pattern_suggestions = await pattern_task
+            
+            # Start faiss task only after checking cache
+            faiss_task = asyncio.create_task(self._generate_faiss_suggestions(normalized_query, limit))
+            
+            # Start personalization in background
+            personalization_task = None
+            if user_id:
+                try:
+                    personalization_task = asyncio.create_task(
+                        self._personalize_suggestions_async(pattern_suggestions, user_id, normalized_query)
+                    )
+                except Exception as e:
+                    self.logger.error(f"Error starting personalization: {e}")
+            
+            # Wait for FAISS with timeout
+            try:
+                faiss_suggestions = await asyncio.wait_for(faiss_task, timeout=0.3)
+                # Combine with pattern suggestions
+                all_suggestions = pattern_suggestions + faiss_suggestions
+            except (asyncio.TimeoutError, Exception) as e:
+                # Just use pattern suggestions if FAISS times out or errors
+                if isinstance(e, asyncio.TimeoutError):
+                    self.logger.warning(f"FAISS search timed out for '{normalized_query}'")
+                else:
+                    self.logger.error(f"FAISS search error: {e}")
+                all_suggestions = pattern_suggestions
+            
+            # Filter and prioritize suggestions like Google
+            direct_completions = []
+            related_suggestions = []
+            
+            for suggestion in all_suggestions:
+                suggestion_text = suggestion.get("text", "").lower()
+                
+                # Let type field override if available
+                if suggestion.get("type") == "completion":
+                    direct_completions.append(suggestion)
+                elif suggestion.get("type") == "related":
+                    related_suggestions.append(suggestion)
+                # Otherwise decide based on text matching
+                elif suggestion_text.startswith(normalized_query.lower()):
+                    suggestion["type"] = "completion"
+                    direct_completions.append(suggestion)
+                elif normalized_query.lower() in suggestion_text:
+                    suggestion["type"] = "related"
+                    related_suggestions.append(suggestion)
+            
+            # Sort each category by score
+            direct_completions.sort(key=lambda x: x.get("score", 0), reverse=True)
+            related_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+            
+            # Combine, prioritizing direct completions
+            combined_suggestions = direct_completions[:int(limit * 0.7)]  # 70% direct completions
+            remaining_slots = limit - len(combined_suggestions)
+            
+            if remaining_slots > 0 and related_suggestions:
+                combined_suggestions.extend(related_suggestions[:remaining_slots])
+            
+            # Ensure we have at least some suggestions
+            if not combined_suggestions and all_suggestions:
+                combined_suggestions = all_suggestions[:limit]
+            
+            # Update cache in background
+            try:
+                asyncio.create_task(self._update_cache(cache_key, combined_suggestions[:limit]))
+            except Exception as e:
+                self.logger.error(f"Error in background cache update: {e}")
+            
+            # Apply personalization later if available
+            if personalization_task:
+                try:
+                    asyncio.create_task(
+                        self._apply_personalization_later(combined_suggestions, personalization_task, user_id, normalized_query, limit)
+                    )
+                except Exception as e:
+                    self.logger.error(f"Error in background personalization: {e}")
+            
+            processing_time = time.time() - start_time
+            self._update_latency_metric(processing_time)
+            self.logger.info(
+                f"Generated {len(combined_suggestions)} suggestions for '{normalized_query}' ({processing_time:.3f}s)"
+            )
+            
+            return combined_suggestions[:limit]
+                
+        except Exception as e:
+            processing_time = time.time() - start_time
+            self._update_latency_metric(processing_time)
+            self.logger.error(f"Error predicting suggestions: {e}")
+            
+            # Ensure we always return something
+            self.metrics["fallbacks_used"] += 1
+            pattern_suggestions = await self._generate_pattern_suggestions(normalized_query, limit)
+            
+            # Filter even the fallback suggestions to prioritize prefix matches
+            direct_matches = [s for s in pattern_suggestions if s.get("text", "").lower().startswith(normalized_query.lower())]
+            if direct_matches:
+                return direct_matches[:limit]
+            
+            return pattern_suggestions[:limit]
 
     def _calculate_text_overlap_score(self, query: str, text: str) -> float:
         """Calculate text overlap score for boosting relevant matches."""
