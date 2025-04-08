@@ -39,7 +39,7 @@ def get_connection_params():
             'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres')
         }
 
-def get_db_pool(min_conn=5, max_conn=20, dbname=None):
+def get_db_pool(min_conn=10, max_conn=50, dbname=None):
     """Get or create database connection pool (thread-safe singleton)."""
     global _DB_POOL
     
