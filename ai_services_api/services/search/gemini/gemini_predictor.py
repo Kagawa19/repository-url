@@ -128,21 +128,14 @@ class GoogleAutocompletePredictor:
     Optimized prediction service for search suggestions using Gemini API and FAISS index.
     Provides a Google-like autocomplete experience with minimal latency.
     """
-    def __init__(self, api_key: str = None, redis_config: Dict = None):
-        """
-        Initialize the Autocomplete predictor with optimizations for speed.
-        
-        Args:
-            api_key: Optional API key. If not provided, will attempt to read from environment.
-            redis_config: Optional Redis configuration for distributed caching.
-        """
-        # Prioritize passed api_key, then environment variable
-        key = api_key or os.getenv('GEMINI_API_KEY')
+    def __init__(self, redis_config: Dict = None):
+        # Directly use os.getenv to get the API key from .env
+        key = os.getenv('GEMINI_API_KEY')
         
         if not key:
             raise ValueError(
-                "No Gemini API key provided. "
-                "Please pass the key directly or set GEMINI_API_KEY in your .env file."
+                "GEMINI_API_KEY not found in .env file. "
+                "Please ensure the API key is set in your environment variables."
             )
         
         try:
@@ -150,7 +143,6 @@ class GoogleAutocompletePredictor:
             genai.configure(api_key=key)
             self.model = genai.GenerativeModel('gemini-2.0-flash')
             self.logger = logging.getLogger(__name__)
-            
             # Set up distributed Redis cache if configured
             self.redis_client = None
             if redis_config:
