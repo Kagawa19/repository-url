@@ -549,147 +549,73 @@ class GoogleAutocompletePredictor:
             cache_key = f"suggestions:{normalized_query}"
             if user_id:
                 cache_key = f"suggestions:{user_id}:{normalized_query}"
-                    
-            cached_suggestions = await self._check_cache(cache_key)
+            
+            # Create tasks for parallel execution
+            cache_task = asyncio.create_task(self._check_cache(cache_key))
+            pattern_task = asyncio.create_task(self._generate_pattern_suggestions(normalized_query, limit))
+            
+            # First wait for cache - it's fastest
+            cached_suggestions = await cache_task
             if cached_suggestions:
                 processing_time = time.time() - start_time
                 self._update_latency_metric(processing_time)
                 self.logger.info(f"Returning cached suggestions for '{normalized_query}' ({processing_time:.3f}s)")
                 return cached_suggestions[:limit]
             
-            # Gather tasks based on query characteristics
-            tasks = []
-            context = {"user_id": user_id}
+            # Next get pattern suggestions - they're next fastest
+            pattern_suggestions = await pattern_task
             
-            # For short queries, prioritize speed over comprehensiveness
-            if is_short_query:
-                # Prioritize pattern suggestions (fastest)
-                tasks.append((
-                    self._generate_pattern_suggestions(normalized_query, limit),
-                    0.9,  # Priority weight for results
-                    "pattern"
-                ))
-                
-                # Add trie suggestions if available
-                if hasattr(self, 'suggestion_trie'):
-                    tasks.append((
-                        self._get_trie_suggestions(normalized_query, limit),
-                        0.8,
-                        "trie"
-                    ))
-                    
-                # Only add FAISS for queries that seem like names
-                if any(c.isupper() for c in partial_query):
-                    tasks.append((
-                        self._generate_faiss_suggestions(normalized_query, limit//2),
-                        0.7,
-                        "faiss"
-                    ))
-            else:
-                # For longer queries, use all available sources
-                # 1. Start with pattern suggestions (fastest)
-                tasks.append((
-                    self._generate_pattern_suggestions(normalized_query, limit),
-                    0.8,  # Slightly lower priority for longer queries
-                    "pattern"
-                ))
-                
-                # 2. Add FAISS for semantic matches
-                tasks.append((
-                    self._generate_faiss_suggestions(normalized_query, limit),
-                    0.9,  # Higher priority for longer queries
-                    "faiss"
-                ))
-                
-                # 3. Add Gemini API for ML-powered suggestions
-                tasks.append((
-                    self._generate_simplified_gemini_suggestions(normalized_query, limit//2),
-                    0.7,
-                    "gemini"
-                ))
-                
-                # 4. Add personalized suggestions if user_id is provided
-                if user_id:
-                    try:
-                        from ai_services_api.services.search.core.personalization import get_user_search_history
-                        tasks.append((
-                            self._get_personalized_suggestions(normalized_query, user_id, limit),
-                            1.0,  # Highest priority for personalized results
-                            "personalized"
-                        ))
-                    except ImportError:
-                        self.logger.debug("Personalization module not available")
+            # Start faiss task only after checking cache
+            faiss_task = asyncio.create_task(self._generate_faiss_suggestions(normalized_query, limit))
             
-            # Set up timeouts based on query characteristics
-            timeout = 0.3 if is_short_query else 0.5  # Shorter timeout for shorter queries
+            # Start personalization in background
+            personalization_task = None
+            if user_id:
+                try:
+                    personalization_task = asyncio.create_task(
+                        self._personalize_suggestions_async(pattern_suggestions, user_id, normalized_query)
+                    )
+                except Exception as e:
+                    self.logger.error(f"Error starting personalization: {e}")
             
-            # Create progress tracking
-            pending_tasks = {asyncio.create_task(task): (weight, name) for task, weight, name in tasks}
-            completed_tasks = {}
-            all_suggestions = []
+            # Wait for FAISS with timeout
+            try:
+                faiss_suggestions = await asyncio.wait_for(faiss_task, timeout=0.3)
+                # Combine with pattern suggestions
+                all_suggestions = pattern_suggestions + faiss_suggestions
+            except (asyncio.TimeoutError, Exception) as e:
+                # Just use pattern suggestions if FAISS times out or errors
+                if isinstance(e, asyncio.TimeoutError):
+                    self.logger.warning(f"FAISS search timed out for '{normalized_query}'")
+                else:
+                    self.logger.error(f"FAISS search error: {e}")
+                all_suggestions = pattern_suggestions
             
-            # Process tasks with progressive result handling
-            while pending_tasks and time.time() - start_time < timeout:
-                # Wait for the first task to complete or timeout
-                remaining_time = max(0.01, timeout - (time.time() - start_time))
-                done, pending = await asyncio.wait(
-                    pending_tasks.keys(),
-                    timeout=remaining_time,
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-                
-                # Update tracking
-                for task in done:
-                    weight, name = pending_tasks.pop(task)
-                    completed_tasks[task] = (weight, name)
-                    
-                    # Extract result
-                    try:
-                        result = task.result()
-                        if isinstance(result, list):
-                            # Track the source for analytics
-                            for item in result:
-                                if 'source' not in item:
-                                    item['source'] = name
-                            all_suggestions.extend(result)
-                    except Exception as e:
-                        self.logger.warning(f"Task {name} failed: {e}")
+            # Return results immediately
+            combined_suggestions = await self._hybrid_rank_suggestions(all_suggestions, normalized_query, user_id)
             
-            # Clean up any remaining tasks
-            for task in pending_tasks:
-                task.cancel()
-                
-            # If we have no suggestions, use fallback
-            if not all_suggestions:
-                self.metrics["fallbacks_used"] += 1
-                all_suggestions = await self._generate_pattern_suggestions(normalized_query, limit)
-                    
-            # Combine with hybrid ranking
-            combined_suggestions = await self._hybrid_rank_suggestions(
-                all_suggestions, normalized_query, user_id
-            )
+            # Update cache in background
+            try:
+                asyncio.create_task(self._update_cache(cache_key, combined_suggestions[:limit]))
+            except Exception as e:
+                self.logger.error(f"Error in background cache update: {e}")
             
-            # Classify by content type
-            classified_suggestions = self._classify_suggestion_types(
-                combined_suggestions, normalized_query
-            )
-            
-            # Ensure diversity in results
-            diversified_suggestions = self._ensure_content_diversity(
-                classified_suggestions, limit
-            )
-            
-            # Update cache with new results
-            await self._update_cache(cache_key, diversified_suggestions[:limit])
+            # Apply personalization later if available
+            if personalization_task:
+                try:
+                    asyncio.create_task(
+                        self._apply_personalization_later(combined_suggestions, personalization_task, user_id, normalized_query, limit)
+                    )
+                except Exception as e:
+                    self.logger.error(f"Error in background personalization: {e}")
             
             processing_time = time.time() - start_time
             self._update_latency_metric(processing_time)
             self.logger.info(
-                f"Generated {len(diversified_suggestions)} suggestions for '{normalized_query}' "
-                f"({processing_time:.3f}s, {len(completed_tasks)}/{len(tasks)} sources)"
+                f"Generated {len(combined_suggestions)} suggestions for '{normalized_query}' ({processing_time:.3f}s)"
             )
             
-            return diversified_suggestions[:limit]
+            return combined_suggestions[:limit]
                 
         except Exception as e:
             processing_time = time.time() - start_time
@@ -700,22 +626,142 @@ class GoogleAutocompletePredictor:
             self.metrics["fallbacks_used"] += 1
             return await self._generate_pattern_suggestions(normalized_query, limit)
 
-    async def _get_trie_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
-        """Get suggestions from the prefix trie with timing."""
+    async def _personalize_suggestions_async(self, suggestions, user_id, query):
+        """Run personalization in a separate task without blocking the main response."""
+        try:
+            from ai_services_api.services.search.core.personalization import get_user_search_history, personalize_suggestions
+            
+            # Get user's search history
+            history = await get_user_search_history(user_id, limit=50)
+            
+            # Extract search terms from history and create a weighted frequency map
+            term_weights = {}
+            
+            # Get current time for temporal weighting
+            current_time = datetime.now()
+            
+            # Process history items with temporal decay
+            for item in history:
+                query_text = item.get("query", "").lower()
+                timestamp_str = item.get("timestamp")
+                
+                # Calculate recency weight based on timestamp
+                recency_weight = 1.0  # Default weight
+                if timestamp_str:
+                    try:
+                        timestamp = datetime.fromisoformat(timestamp_str)
+                        # Calculate days difference
+                        days_diff = (current_time - timestamp).days
+                        # Apply exponential decay: weight = exp(-days/30)
+                        recency_weight = math.exp(-days_diff/30)
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Split into words and apply weighted counting
+                words = query_text.split()
+                for word in words:
+                    if len(word) >= 3:  # Only consider significant words
+                        current_weight = term_weights.get(word, 0)
+                        # Add recency-weighted value
+                        term_weights[word] = current_weight + recency_weight
+            
+            # Apply personalization boosting to suggestions
+            personalized_suggestions = []
+            for suggestion in suggestions:
+                text = suggestion.get("text", "").lower()
+                base_score = suggestion.get("score", 0.5)
+                
+                # Calculate boost based on term frequency in user history
+                history_boost = 0.0
+                
+                # Apply term frequency boosts
+                for term, weight in term_weights.items():
+                    if term in text:
+                        # Apply diminishing returns
+                        history_boost += min(0.25, math.sqrt(weight) * 0.05)
+                
+                # Apply boost
+                personalized_score = min(1.0, base_score + history_boost)
+                
+                personalized_suggestion = suggestion.copy()
+                personalized_suggestion["score"] = personalized_score
+                personalized_suggestion["personalized"] = True
+                
+                personalized_suggestions.append(personalized_suggestion)
+            
+            # Sort by personalized score
+            personalized_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+            
+            return personalized_suggestions
+            
+        except Exception as e:
+            self.logger.error(f"Error in async personalization: {e}")
+            return suggestions  # Return original suggestions if personalization fails
+
+    async def _apply_personalization_later(self, initial_suggestions, personalization_task, user_id, normalized_query, limit):
+        """Apply personalization after initial results are returned and update cache."""
+        try:
+            # Wait for personalization task to complete
+            personalized = await personalization_task
+            
+            if not personalized:
+                return
+            
+            # Update user-specific cache with personalized results
+            cache_key = f"suggestions:{user_id}:{normalized_query}"
+            await self._update_cache(cache_key, personalized[:limit])
+            
+            # Also update the trending data in Redis
+            if self.redis_client:
+                try:
+                    # Update popularity weights for this user and query
+                    user_pref_key = f"user_pref:{user_id}:{normalized_query[:3]}"
+                    
+                    preference_data = {
+                        "query": normalized_query,
+                        "suggestions": [s.get("text") for s in personalized[:5]],
+                        "timestamp": time.time()
+                    }
+                    
+                    self.redis_client.setex(
+                        user_pref_key,
+                        86400 * 7,  # 7-day expiry
+                        json.dumps(preference_data)
+                    )
+                except Exception as redis_error:
+                    self.logger.warning(f"Redis update error in personalization: {redis_error}")
+            
+        except Exception as e:
+            self.logger.error(f"Late personalization error: {e}")
+
+    def _get_trie_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
+        """Get suggestions from the prefix trie with dynamic fuzzy matching."""
         if not hasattr(self, 'suggestion_trie'):
             return []
             
         try:
+            # Dynamic fuzzy match distance based on query length
+            # Longer queries can tolerate more typos while remaining specific
+            max_distance = 1  # Default distance
+            if len(partial_query) >= 6:
+                max_distance = 2  # More forgiving for longer queries
+                
+            # First try exact search
             trie_results = self.suggestion_trie.search(partial_query, limit=limit*2)
             
-            if not trie_results:
-                # Try fuzzy search for longer queries
-                if len(partial_query) >= 3:
-                    trie_results = self.suggestion_trie.fuzzy_search(
-                        partial_query, 
-                        max_distance=1, 
-                        limit=limit
-                    )
+            # If exact search doesn't yield enough results, try fuzzy search
+            if len(trie_results) < limit and len(partial_query) >= 3:
+                fuzzy_results = self.suggestion_trie.fuzzy_search(
+                    partial_query, 
+                    max_distance=max_distance, 
+                    limit=limit
+                )
+                
+                # Combine results, prioritizing exact matches
+                seen = set(result[0] for result in trie_results)
+                for result in fuzzy_results:
+                    if result[0] not in seen:
+                        trie_results.append(result)
             
             suggestions = []
             current_time = time.time()
