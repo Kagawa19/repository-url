@@ -1362,7 +1362,7 @@ class ExpertSearchIndexManager:
             logger.error(f"Error in publication search: {e}")
             # Fall back to vector search if database query fails
             try:
-                return self._fallback_vector_publication_search(publication, k, active_only, mincpc_score)
+                return self._fallback_vector_publication_search(publication, k, active_only, min_score)
             except Exception as fallback_error:
                 logger.error(f"Fallback publication search also failed: {fallback_error}")
                 return []

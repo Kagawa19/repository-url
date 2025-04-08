@@ -1,3 +1,4 @@
+import datetime
 import os
 import google.generativeai as genai
 import logging
@@ -6,6 +7,9 @@ import faiss
 import pickle
 import redis
 from asyncio import to_thread
+from ai_services_api.services.search.utils.trie import PrefixTrie
+import math
+import asyncio
 
 import json
 import time
@@ -124,7 +128,6 @@ class GoogleAutocompletePredictor:
     Optimized prediction service for search suggestions using Gemini API and FAISS index.
     Provides a Google-like autocomplete experience with minimal latency.
     """
-    
     def __init__(self, api_key: str = None, redis_config: Dict = None):
         """
         Initialize the Autocomplete predictor with optimizations for speed.
@@ -169,6 +172,24 @@ class GoogleAutocompletePredictor:
             # Load FAISS index and mapping
             self._load_faiss_index()
             
+            # Initialize prediction trie
+            self.suggestion_trie = PrefixTrie()
+            self.trie_last_updated = 0
+            self.trie_update_interval = 3600  # Update once per hour
+            
+            # Initialize trending suggestions tracker
+            self.trending_suggestions = {}
+            
+            # Create background task for trie updates if Redis available
+            if self.redis_client:
+                try:
+                    asyncio.create_task(self._init_trie_from_redis())
+                except Exception as e:
+                    self.logger.warning(f"Could not initialize trie update task: {e}")
+            
+            # Initialize selection log for local tracking if database isn't available
+            self._selection_log = []
+            
             # Performance metrics
             self.metrics = {
                 "api_calls": 0,
@@ -182,6 +203,306 @@ class GoogleAutocompletePredictor:
         except Exception as e:
             self.logger.error(f"Failed to initialize predictor: {e}")
             raise
+
+    @retry(
+    retry=retry_if_exception_type((asyncio.TimeoutError, ConnectionError)),
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=0.5, min=0.5, max=1.5)
+    )
+    async def _generate_simplified_gemini_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
+        """
+        Generate simplified Gemini suggestions with query intent classification.
+        Adds fallback to FAISS before using pattern suggestions.
+        
+        Args:
+            partial_query: Partial query to get suggestions for
+            limit: Maximum number of suggestions
+            
+        Returns:
+            List of suggestion dictionaries
+        """
+        self.metrics["api_calls"] += 1
+        
+        try:
+            # First detect query intent
+            query_intent = await self._detect_query_intent(partial_query)
+            
+            # Use circuit breaker
+            suggestions = await self.generation_circuit.execute(
+                self._execute_gemini_suggestion_request,
+                partial_query,
+                query_intent,
+                limit
+            )
+            
+            if suggestions is None:
+                self.logger.warning("Circuit breaker open, attempting FAISS fallback")
+                # Try FAISS before pattern suggestions
+                try:
+                    faiss_suggestions = await self._generate_faiss_suggestions(partial_query, limit)
+                    if faiss_suggestions and len(faiss_suggestions) > 0:
+                        self.logger.info("Using FAISS fallback suggestions")
+                        return faiss_suggestions
+                except Exception as faiss_error:
+                    self.logger.error(f"FAISS fallback error: {faiss_error}")
+                    
+                # Try Trie-based suggestions before using pattern suggestions
+                if hasattr(self, 'suggestion_trie'):
+                    try:
+                        trie_results = self.suggestion_trie.search(partial_query, limit=limit*2)
+                        if trie_results and len(trie_results) > 0:
+                            trie_suggestions = []
+                            for suggestion, frequency, timestamp in trie_results:
+                                trie_suggestions.append({
+                                    "text": suggestion,
+                                    "source": "trie",
+                                    "score": min(0.85, 0.6 + (frequency / 20))
+                                })
+                            self.logger.info(f"Using trie fallback suggestions: {len(trie_suggestions)} results")
+                            return trie_suggestions
+                    except Exception as trie_error:
+                        self.logger.error(f"Trie fallback error: {trie_error}")
+                
+                # If both FAISS and Trie failed, fall back to pattern suggestions
+                self.logger.warning("All fallbacks failed, using pattern suggestions")
+                return await self._generate_pattern_suggestions(partial_query, limit)
+            
+            return suggestions
+            
+        except Exception as e:
+            self.logger.error(f"Error generating Gemini suggestions after retries: {e}")
+            self.metrics["fallbacks_used"] += 1
+            
+            # Try FAISS first as a fallback
+            try:
+                faiss_suggestions = await self._generate_faiss_suggestions(partial_query, limit)
+                if faiss_suggestions and len(faiss_suggestions) > 0:
+                    self.logger.info("Using FAISS fallback after Gemini error")
+                    return faiss_suggestions
+            except Exception as faiss_error:
+                self.logger.error(f"FAISS fallback also failed: {faiss_error}")
+            
+            # Try Trie-based suggestions as second fallback
+            if hasattr(self, 'suggestion_trie'):
+                try:
+                    trie_results = self.suggestion_trie.search(partial_query, limit=limit*2)
+                    if trie_results and len(trie_results) > 0:
+                        trie_suggestions = []
+                        current_time = time.time()
+                        for suggestion, frequency, timestamp in trie_results:
+                            # Apply recency boosting
+                            recency_factor = 1.0
+                            if timestamp:
+                                age_hours = (current_time - timestamp) / 3600
+                                recency_factor = math.exp(-age_hours / 72)  # 3-day half-life
+                                
+                            trie_suggestions.append({
+                                "text": suggestion,
+                                "source": "trie",
+                                "score": min(0.85, (0.6 + (frequency / 20)) * recency_factor)
+                            })
+                        self.logger.info(f"Using trie fallback after Gemini & FAISS errors: {len(trie_suggestions)} results")
+                        return trie_suggestions
+                except Exception as trie_error:
+                    self.logger.error(f"Trie fallback also failed: {trie_error}")
+            
+            # If all else fails, use pattern suggestions
+            return await self._generate_pattern_suggestions(partial_query, limit)
+    async def _generate_pattern_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
+        """
+        Generate data-driven suggestions based on user behavior and trending queries.
+        
+        Args:
+            partial_query: Partial query to get suggestions for
+            limit: Maximum number of suggestions
+            
+        Returns:
+            List of suggestion dictionaries
+        """
+        try:
+            suggestions = []
+            current_time = time.time()
+            
+            # Try trie suggestions first (fastest and most accurate)
+            if hasattr(self, 'suggestion_trie'):
+                trie_results = self.suggestion_trie.search(partial_query, limit=limit*2)
+                
+                for suggestion, frequency, timestamp in trie_results:
+                    # Apply recency boost: more recent = higher score
+                    recency_factor = 1.0
+                    if timestamp:
+                        # Calculate age in hours and apply decay
+                        age_hours = (current_time - timestamp) / 3600
+                        recency_factor = math.exp(-age_hours / 72)  # 3-day half-life
+                    
+                    # Calculate score based on frequency and recency
+                    score = min(0.9, (0.5 + (frequency / 20)) * recency_factor)
+                    
+                    suggestions.append({
+                        "text": suggestion,
+                        "source": "user_history",
+                        "score": score
+                    })
+            
+            # If we have Redis, try to get trending suggestions
+            if self.redis_client and len(suggestions) < limit:
+                remaining = limit - len(suggestions)
+                
+                try:
+                    # Get current hour's trending suggestions
+                    current_hour = int(time.time() / 3600)
+                    trending_key = f"trending:{current_hour}"
+                    
+                    # Use SCAN for pattern matching instead of direct prefix matching
+                    # This handles cases where the prefix might be in the middle of a word
+                    pattern = f"*{partial_query.lower()}*"
+                    cursor = 0
+                    trending_matches = []
+                    
+                    while len(trending_matches) < remaining * 2:
+                        cursor, matches = self.redis_client.zscan(trending_key, cursor, pattern, count=100)
+                        trending_matches.extend(matches)
+                        if cursor == 0:  # We've gone through the whole set
+                            break
+                    
+                    # Sort by score and take top matches
+                    trending_matches.sort(key=lambda x: x[1], reverse=True)
+                    
+                    for suggestion, score in trending_matches[:remaining]:
+                        # Only add if not already in suggestions
+                        if not any(s["text"].lower() == suggestion.lower() for s in suggestions):
+                            suggestions.append({
+                                "text": suggestion,
+                                "source": "trending",
+                                "score": min(0.85, 0.6 + (score / 20))
+                            })
+                except Exception as redis_error:
+                    self.logger.warning(f"Redis trending lookup error: {redis_error}")
+            
+            # If we still need more suggestions, try database fallback
+            if len(suggestions) < limit:
+                remaining = limit - len(suggestions)
+                db_suggestions = await self._get_database_suggestions(partial_query, remaining)
+                
+                # Add database suggestions that aren't already included
+                for db_suggestion in db_suggestions:
+                    if not any(s["text"].lower() == db_suggestion["text"].lower() for s in suggestions):
+                        suggestions.append(db_suggestion)
+            
+            # If we still have no suggestions, provide minimal fallback
+            if not suggestions:
+                # Last resort - return just the query itself
+                suggestions.append({
+                    "text": partial_query,
+                    "source": "fallback",
+                    "score": 0.5
+                })
+            
+            return suggestions[:limit]
+        
+        except Exception as e:
+            self.logger.error(f"Error generating pattern suggestions: {e}")
+            # Return minimal fallback
+            return [{
+                "text": partial_query,
+                "source": "error_fallback",
+                "score": 0.5
+            }]
+    async def predict(self, partial_query: str, limit: int = 10, user_id: str = None) -> List[Dict[str, Any]]:
+        """
+        Generate search suggestions with Google-like experience using hybrid ranking.
+        
+        Args:
+            partial_query: The partial query to get suggestions for
+            limit: Maximum number of suggestions to return
+            user_id: Optional user ID for personalized suggestions
+            
+        Returns:
+            List of dictionaries containing suggestion text and metadata
+        """
+        if not partial_query:
+            return []
+        
+        start_time = time.time()
+        normalized_query = self._normalize_text(partial_query)
+        self.metrics["total_requests"] += 1
+        
+        try:
+            # First check cache
+            cache_key = f"suggestions:{normalized_query}"
+            if user_id:
+                cache_key = f"suggestions:{user_id}:{normalized_query}"
+                
+            cached_suggestions = await self._check_cache(cache_key)
+            if cached_suggestions:
+                processing_time = time.time() - start_time
+                self._update_latency_metric(processing_time)
+                self.logger.info(f"Returning cached suggestions for '{normalized_query}' ({processing_time:.3f}s)")
+                return cached_suggestions[:limit]
+            
+            # Use asyncio.gather to run multiple async operations concurrently
+            suggestion_futures = []
+            
+            # 1. First priority: User's personal history and behavior-based suggestions
+            suggestion_futures.append(self._generate_pattern_suggestions(normalized_query, limit))
+            
+            # 2. Second priority: Try FAISS for semantic matches
+            suggestion_futures.append(self._generate_faiss_suggestions(normalized_query, max(limit - 2, 5)))
+            
+            # 3. Third priority: Try Gemini API for ML-powered suggestions
+            suggestion_futures.append(self._generate_simplified_gemini_suggestions(normalized_query, 5))
+            
+            # 4. Add personalized suggestions if user_id is provided
+            if user_id:
+                try:
+                    from ai_services_api.services.search.core.personalization import get_user_search_history
+                    suggestion_futures.append(self._get_personalized_suggestions(normalized_query, user_id, limit))
+                except ImportError:
+                    self.logger.warning("Personalization module not available")
+            
+            # Wait for all operations to complete
+            results = await asyncio.gather(*suggestion_futures, return_exceptions=True)
+            
+            # Process results, handling exceptions
+            all_suggestions = []
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    self.logger.error(f"Error in suggestion source {i}: {result}")
+                elif isinstance(result, list):
+                    all_suggestions.extend(result)
+            
+            # If we have no suggestions, use fallback
+            if not all_suggestions:
+                all_suggestions = await self._generate_pattern_suggestions(normalized_query, limit)
+                
+            # Combine with hybrid ranking
+            combined_suggestions = await self._hybrid_rank_suggestions(all_suggestions, normalized_query, user_id)
+            
+            # Update cache with new results
+            if self.redis_client:
+                try:
+                    self.redis_client.setex(
+                        cache_key, 
+                        300,  # 5-minute cache for fresh results
+                        json.dumps(combined_suggestions[:limit])
+                    )
+                except Exception as cache_error:
+                    self.logger.warning(f"Cache update error: {cache_error}")
+            
+            processing_time = time.time() - start_time
+            self._update_latency_metric(processing_time)
+            self.logger.info(f"Generated {len(combined_suggestions)} suggestions for '{normalized_query}' ({processing_time:.3f}s)")
+            
+            return combined_suggestions[:limit]
+            
+        except Exception as e:
+            processing_time = time.time() - start_time
+            self._update_latency_metric(processing_time)
+            self.logger.error(f"Error predicting suggestions: {e}")
+            
+            # Ensure we always return something
+            self.metrics["fallbacks_used"] += 1
+            return await self._generate_pattern_suggestions(normalized_query, limit)
     
     def _setup_redis(self, config: Dict):
         """Set up Redis connection for distributed caching."""
@@ -308,6 +629,341 @@ class GoogleAutocompletePredictor:
             classified.append(suggestion_copy)
         
         return classified
+    
+
+    async def track_selection(self, partial_query: str, selected_suggestion: str, user_id: str = None):
+        """
+        Track which suggestion was selected to improve future predictions.
+        
+        Args:
+            partial_query: The partial query that was typed
+            selected_suggestion: The suggestion that was selected
+            user_id: Optional user identifier for personalization
+        """
+        try:
+            # First, update local trie if it exists
+            if hasattr(self, 'suggestion_trie'):
+                self.suggestion_trie.insert(selected_suggestion, frequency=2, timestamp=time.time())
+            
+            # Then, update Redis statistics if available
+            if self.redis_client:
+                try:
+                    # Increment selection counter
+                    selection_key = f"selection:{selected_suggestion.lower()}"
+                    self.redis_client.zincrby("suggestion_selections", 1, selection_key)
+                    
+                    # Update query-specific selections
+                    if partial_query:
+                        query_key = f"query_selections:{partial_query.lower()}"
+                        self.redis_client.zincrby(query_key, 1, selected_suggestion.lower())
+                        self.redis_client.expire(query_key, 86400 * 7)  # 1 week expiry
+                    
+                    # Add to trending suggestions with timestamp
+                    current_hour = int(time.time() / 3600)
+                    trending_key = f"trending:{current_hour}"
+                    self.redis_client.zincrby(trending_key, 1, selected_suggestion.lower())
+                    self.redis_client.expire(trending_key, 86400)  # 24 hour expiry
+                except Exception as redis_error:
+                    self.logger.warning(f"Redis tracking error: {redis_error}")
+            
+            # Record in database asynchronously if function exists
+            try:
+                from ai_services_api.services.search.core.personalization import track_selected_suggestion
+                if user_id:
+                    asyncio.create_task(track_selected_suggestion(user_id, partial_query, selected_suggestion))
+            except ImportError:
+                # If the function doesn't exist, log selection locally
+                if not hasattr(self, '_selection_log'):
+                    self._selection_log = []
+                self._selection_log.append({
+                    'query': partial_query,
+                    'selection': selected_suggestion,
+                    'timestamp': time.time()
+                })
+                # Limit log size
+                if len(self._selection_log) > 1000:
+                    self._selection_log = self._selection_log[-1000:]
+            
+            self.logger.info(f"Tracked selection: '{selected_suggestion}' for query '{partial_query}'")
+        except Exception as e:
+            self.logger.error(f"Error tracking selection: {e}")
+
+    async def _get_database_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
+        """Get suggestions from database search history"""
+        try:
+            # Import database connection function
+            from ai_services_api.services.message.core.database import get_db_connection
+            
+            conn = None
+            suggestions = []
+            
+            try:
+                conn = get_db_connection()
+                with conn.cursor() as cur:
+                    # Get common completions from actual past searches
+                    cur.execute("""
+                        SELECT query, COUNT(*) as frequency 
+                        FROM search_analytics 
+                        WHERE query ILIKE %s
+                        GROUP BY query
+                        ORDER BY frequency DESC, MAX(timestamp) DESC
+                        LIMIT %s
+                    """, (f"%{partial_query}%", limit*2))
+                    
+                    rows = cur.fetchall()
+                    
+                    for i, (query, frequency) in enumerate(rows):
+                        # Calculate score based on database frequency
+                        normalized_score = min(0.8, 0.5 + (frequency / 100))  # Cap at 0.8
+                        
+                        suggestions.append({
+                            "text": query,
+                            "source": "db_history",
+                            "score": normalized_score - (i * 0.02)  # Slight penalty for lower ranks
+                        })
+                    
+            except Exception as db_error:
+                self.logger.warning(f"Database suggestion error: {db_error}")
+            finally:
+                if conn:
+                    conn.close()
+                    
+            return suggestions
+            
+        except Exception as e:
+            self.logger.error(f"Error in database suggestions: {e}")
+            return []
+
+    async def _init_trie_from_redis(self):
+        """Initialize the suggestion trie from Redis data"""
+        try:
+            # Get top 1000 selections from Redis
+            selections = self.redis_client.zrevrange("suggestion_selections", 0, 999, withscores=True)
+            
+            # Initialize trie with these selections
+            for selection_key, score in selections:
+                if selection_key.startswith("selection:"):
+                    suggestion = selection_key[10:]  # Remove "selection:" prefix
+                    self.suggestion_trie.insert(suggestion, frequency=int(score))
+            
+            # Also add trending suggestions from the last 24 hours
+            current_hour = int(time.time() / 3600)
+            for hour in range(current_hour - 24, current_hour + 1):
+                trending_key = f"trending:{hour}"
+                trending = self.redis_client.zrevrange(trending_key, 0, 100, withscores=True)
+                for suggestion, score in trending:
+                    # Add with higher frequency to prioritize recent trends
+                    self.suggestion_trie.insert(suggestion, frequency=int(score) * 2)
+            
+            self.logger.info("Successfully initialized suggestion trie from Redis")
+            self.trie_last_updated = time.time()
+            
+            # Schedule periodic updates
+            asyncio.create_task(self._schedule_trie_updates())
+        except Exception as e:
+            self.logger.error(f"Error initializing trie from Redis: {e}")
+
+    async def _schedule_trie_updates(self):
+        """Schedule periodic updates to the suggestion trie"""
+        while True:
+            try:
+                # Wait for the update interval
+                await asyncio.sleep(self.trie_update_interval)
+                
+                # Update the trie
+                await self._update_trie_from_redis()
+            except Exception as e:
+                self.logger.error(f"Error in trie update schedule: {e}")
+                await asyncio.sleep(60)  # Wait a minute and try again
+
+    async def _update_trie_from_redis(self):
+        """Update the suggestion trie with latest data from Redis"""
+        try:
+            # Get recent trending suggestions
+            current_hour = int(time.time() / 3600)
+            trending_key = f"trending:{current_hour}"
+            trending = self.redis_client.zrevrange(trending_key, 0, 100, withscores=True)
+            
+            # Update trie with trending suggestions
+            for suggestion, score in trending:
+                self.suggestion_trie.insert(suggestion, frequency=int(score) * 2, timestamp=time.time())
+            
+            # Also update with recent selections since last update
+            last_update = self.trie_last_updated
+            selection_log = self.redis_client.zrangebyscore("suggestion_log", last_update, "+inf", withscores=True)
+            
+            for suggestion, timestamp in selection_log:
+                self.suggestion_trie.insert(suggestion, frequency=2, timestamp=timestamp)
+            
+            self.trie_last_updated = time.time()
+            self.logger.info("Successfully updated suggestion trie")
+        except Exception as e:
+            self.logger.error(f"Error updating trie: {e}")
+    
+    async def _hybrid_rank_suggestions(
+        self, suggestions: List[Dict[str, Any]], 
+        query: str, 
+        user_id: str = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Apply hybrid ranking to suggestions using multiple factors.
+        
+        Args:
+            suggestions: List of suggestion dictionaries
+            query: Original query for relevance calculation
+            user_id: Optional user ID for personalization
+            
+        Returns:
+            Ranked list of suggestion dictionaries
+        """
+        if not suggestions:
+            return []
+        
+        # Deduplicate suggestions
+        unique_suggestions = {}
+        for suggestion in suggestions:
+            text = suggestion.get("text", "").lower()
+            if text not in unique_suggestions or suggestion.get("score", 0) > unique_suggestions[text].get("score", 0):
+                unique_suggestions[text] = suggestion
+        
+        # Convert back to list
+        deduplicated = list(unique_suggestions.values())
+        
+        # Apply ranking factors
+        ranked_suggestions = []
+        
+        for suggestion in deduplicated:
+            text = suggestion.get("text", "")
+            base_score = suggestion.get("score", 0.5)
+            source = suggestion.get("source", "unknown")
+            
+            # Calculate ranking factors
+            prefix_match = 1.5 if text.lower().startswith(query.lower()) else 1.0
+            exact_match = 1.3 if text.lower() == query.lower() else 1.0
+            
+            # Source priority factor
+            source_priority = {
+                "user_history": 1.3,
+                "trending": 1.2,
+                "gemini": 1.1,
+                "faiss": 1.05,
+                "db_history": 1.0,
+                "pattern": 0.9,
+                "fallback": 0.7
+            }.get(source, 1.0)
+            
+            # Apply personalization boost if user_id provided
+            personalization_boost = 1.0
+            if user_id and hasattr(self, '_selection_log'):
+                # Check if this suggestion was selected by this user before
+                for log_entry in self._selection_log:
+                    if log_entry.get('user_id') == user_id and log_entry.get('selection', '').lower() == text.lower():
+                        personalization_boost = 1.3
+                        break
+            
+            # Calculate final score
+            final_score = min(1.0, base_score * prefix_match * exact_match * source_priority * personalization_boost)
+            
+            ranked_suggestions.append({
+                "text": text,
+                "source": source,
+                "score": final_score,
+                "original_score": base_score
+            })
+        
+        # Sort by final score
+        ranked_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+        
+        # Ensure diversity in top results (avoid having all results from same source)
+        return self._ensure_diversity(ranked_suggestions)
+
+    def _ensure_diversity(self, suggestions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Ensure diversity in suggestions by source type"""
+        if len(suggestions) <= 3:
+            return suggestions
+            
+        # Group by source
+        source_groups = {}
+        for suggestion in suggestions:
+            source = suggestion.get("source", "unknown")
+            if source not in source_groups:
+                source_groups[source] = []
+            source_groups[source].append(suggestion)
+        
+        # If we have multiple sources, ensure diversity in top results
+        if len(source_groups) > 1:
+            diverse_results = []
+            
+            # Take top result from each source for the first few slots
+            for source in source_groups:
+                if source_groups[source]:
+                    diverse_results.append(source_groups[source][0])
+                    source_groups[source] = source_groups[source][1:]
+            
+            # Then fill remaining slots with top results by score
+            remaining = []
+            for source in source_groups:
+                remaining.extend(source_groups[source])
+            
+            # Sort remaining by score
+            remaining.sort(key=lambda x: x.get("score", 0), reverse=True)
+            
+            # Combine and return
+            diverse_results.extend(remaining)
+            return diverse_results
+        
+        # If only one source, just return original suggestions
+        return suggestions
+
+    async def _get_personalized_suggestions(
+        self, partial_query: str, user_id: str, limit: int
+    ) -> List[Dict[str, Any]]:
+        """Get personalized suggestions based on user's search history"""
+        try:
+            from ai_services_api.services.search.core.personalization import get_user_search_history
+            
+            # Get user's search history
+            history = await get_user_search_history(user_id, limit=50)
+            
+            # Filter and rank historical queries that match the current partial query
+            personalized_suggestions = []
+            
+            for item in history:
+                query = item.get("query", "")
+                timestamp = item.get("timestamp")
+                
+                # Skip if query doesn't match partial query
+                if not query or partial_query.lower() not in query.lower():
+                    continue
+                
+                # Calculate recency score (more recent = higher score)
+                recency_score = 0.7  # Base score
+                if timestamp:
+                    try:
+                        # Parse timestamp
+                        if isinstance(timestamp, str):
+                            timestamp = datetime.fromisoformat(timestamp)
+                        
+                        # Calculate days ago
+                        days_ago = (datetime.now() - timestamp).days
+                        # Apply exponential decay
+                        recency_score = 0.7 * math.exp(-days_ago / 30)  # 30-day half-life
+                    except (ValueError, TypeError):
+                        pass
+                
+                personalized_suggestions.append({
+                    "text": query,
+                    "source": "user_history",
+                    "score": recency_score
+                })
+            
+            # Sort by score and return
+            personalized_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+            return personalized_suggestions[:limit]
+            
+        except Exception as e:
+            self.logger.error(f"Error getting personalized suggestions: {e}")
+            return []
 
     def _apply_hybrid_ranking(
         self, suggestions: List[Dict[str, Any]], 
@@ -1065,46 +1721,7 @@ class GoogleAutocompletePredictor:
         
         return intersection / union if union > 0 else 0
     
-    @retry(
-    retry=retry_if_exception_type((asyncio.TimeoutError, ConnectionError)),
-    stop=stop_after_attempt(2),
-    wait=wait_exponential(multiplier=0.5, min=0.5, max=1.5)
-    )
-    async def _generate_simplified_gemini_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
-        """
-        Generate simplified Gemini suggestions with query intent classification.
-        
-        Args:
-            partial_query: Partial query to get suggestions for
-            limit: Maximum number of suggestions
-            
-        Returns:
-            List of suggestion dictionaries
-        """
-        self.metrics["api_calls"] += 1
-        
-        try:
-            # First detect query intent
-            query_intent = await self._detect_query_intent(partial_query)
-            
-            # Use circuit breaker
-            suggestions = await self.generation_circuit.execute(
-                self._execute_gemini_suggestion_request,
-                partial_query,
-                query_intent,
-                limit
-            )
-            
-            if suggestions is None:
-                self.logger.warning("Circuit breaker open, using pattern suggestions instead")
-                return self._generate_pattern_suggestions(partial_query, limit)
-            
-            return suggestions
-            
-        except Exception as e:
-            self.logger.error(f"Error generating Gemini suggestions after retries: {e}")
-            self.metrics["fallbacks_used"] += 1
-            return self._generate_pattern_suggestions(partial_query, limit)
+    
     async def _execute_gemini_suggestion_request(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
         """Execute the actual Gemini suggestion request with timeout."""
         # Simple and direct prompt focused on speed
@@ -1154,155 +1771,7 @@ class GoogleAutocompletePredictor:
             
         return suggestions
     
-    def _generate_pattern_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
-        """
-        Generate simple pattern-based suggestions when other methods fail.
-        This is a fast fallback that doesn't require API calls.
-        """
-        # Common patterns to complete search queries - customize based on your domain
-        common_completions = [
-            "", 
-            " research",
-            " methods",
-            " framework",
-            " meaning",
-            " definition",
-            " examples",
-            " analysis",
-            " tools",
-            " techniques",
-            " case studies",
-            " best practices",
-            " guidelines",
-            " theory",
-            " applications"
-        ]
-        
-        suggestions = []
-        for i, completion in enumerate(common_completions):
-            if len(suggestions) >= limit:
-                break
-                
-            suggestion_text = f"{partial_query}{completion}".strip()
-            suggestions.append({
-                "text": suggestion_text,
-                "source": "pattern",
-                "score": 0.9 - (i * 0.05)
-            })
-            
-        return suggestions
     
-    async def predict(self, partial_query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """
-        Generate search suggestions with Google-like experience using hybrid ranking.
-        
-        Args:
-            partial_query: The partial query to get suggestions for
-            limit: Maximum number of suggestions to return
-            
-        Returns:
-            List of dictionaries containing suggestion text and metadata
-        """
-        if not partial_query:
-            return []
-        
-        start_time = time.time()
-        normalized_query = self._normalize_text(partial_query)
-        self.metrics["total_requests"] += 1
-        
-        try:
-            # First check cache
-            cached_suggestions = await self._check_cache(normalized_query)
-            if cached_suggestions:
-                processing_time = time.time() - start_time
-                self._update_latency_metric(processing_time)
-                self.logger.info(f"Returning cached suggestions for '{normalized_query}' ({processing_time:.3f}s)")
-                return cached_suggestions[:limit]
-            
-            # Use asyncio.gather to run multiple async operations concurrently
-            # This improves performance by allowing both operations to run in parallel
-            faiss_future = self._generate_faiss_suggestions(normalized_query, max(limit - 2, 5))
-            gemini_future = self._generate_simplified_gemini_suggestions(normalized_query, 3)
-            
-            # Wait for both operations to complete
-            faiss_suggestions, gemini_suggestions = await asyncio.gather(
-                faiss_future, 
-                gemini_future
-            )
-            
-            # New: Get historical popularity data for weighting
-            popularity_weights = await self._get_query_popularity_weights(normalized_query)
-            
-            # Combine suggestions with hybrid ranking approach
-            combined_suggestions = []
-            seen_texts = set()
-            
-            # Process each suggestion with hybrid scoring
-            all_suggestions = faiss_suggestions + gemini_suggestions
-            for suggestion in all_suggestions:
-                text = suggestion["text"]
-                if text in seen_texts:
-                    continue
-                
-                seen_texts.add(text)
-                
-                # Base score from original source
-                base_score = suggestion.get("score", 0.5)
-                
-                # Calculate additional scores for hybrid ranking
-                exact_match_score = 1.0 if normalized_query == self._normalize_text(text) else 0.0
-                prefix_match_score = 0.8 if text.lower().startswith(normalized_query) else 0.0
-                substring_match_score = 0.4 if normalized_query in text.lower() else 0.0
-                
-                # Semantic relevance already captured in base_score for FAISS results
-                popularity_score = popularity_weights.get(self._normalize_text(text), 0.0)
-                
-                # Length normalization (slightly prefer shorter suggestions)
-                length_score = max(0.0, 1.0 - (len(text.split()) / 20))
-                
-                # Combine scores with appropriate weights
-                hybrid_score = (
-                    base_score * 0.5 +              # Base relevance score (50%)
-                    exact_match_score * 0.15 +      # Exact match bonus (15%)
-                    prefix_match_score * 0.15 +     # Prefix match (15%)
-                    substring_match_score * 0.05 +  # Contains query (5%)
-                    popularity_score * 0.1 +        # Historical popularity (10%)
-                    length_score * 0.05             # Length normalization (5%)
-                )
-                
-                # Add to combined results with hybrid score
-                combined_suggestions.append({
-                    "text": text,
-                    "source": suggestion.get("source", "hybrid"),
-                    "score": min(1.0, hybrid_score),  # Cap at 1.0
-                    "original_score": base_score
-                })
-            
-            # Fallback to pattern suggestions if we still don't have enough
-            if not combined_suggestions:
-                self.metrics["fallbacks_used"] += 1
-                combined_suggestions = self._generate_pattern_suggestions(normalized_query, limit)
-            
-            # Update cache with new results
-            await self._update_cache(normalized_query, combined_suggestions)
-            
-            # Sort by hybrid score for best results first
-            combined_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
-            
-            processing_time = time.time() - start_time
-            self._update_latency_metric(processing_time)
-            self.logger.info(f"Generated {len(combined_suggestions)} suggestions for '{normalized_query}' ({processing_time:.3f}s)")
-            
-            return combined_suggestions[:limit]
-            
-        except Exception as e:
-            processing_time = time.time() - start_time
-            self._update_latency_metric(processing_time)
-            self.logger.error(f"Error predicting suggestions: {e}")
-            
-            # Ensure we always return something
-            self.metrics["fallbacks_used"] += 1
-            return self._generate_pattern_suggestions(normalized_query, limit)
     
     def _update_latency_metric(self, processing_time: float):
         """Update the average latency metric."""
