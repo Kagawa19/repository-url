@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import os
 import google.generativeai as genai
 import logging
@@ -400,9 +401,129 @@ class GoogleAutocompletePredictor:
                 "source": "error_fallback",
                 "score": 0.5
             }]
+    async def _check_cache(self, query: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Enhanced cache checking with intelligent prefix and fuzzy matching.
+        Checks both Redis (if available) and local cache with tiered strategy.
+        """
+        normalized_query = self._normalize_text(query)
+        
+        # First check Redis for distributed cache if available
+        if self.redis_client:
+            try:
+                # Try exact match first
+                redis_key = f"suggestions:{normalized_query}"
+                cached_data = self.redis_client.get(redis_key)
+                
+                if cached_data:
+                    self.metrics["cache_hits"] += 1
+                    self.logger.debug(f"Redis exact cache hit for query: {normalized_query}")
+                    return json.loads(cached_data)
+                
+                # Try prefix match in Redis with scan for better performance
+                if len(normalized_query) >= 3:  # Only check prefixes for queries of reasonable length
+                    prefix_matches = []
+                    cursor = 0
+                    while True:
+                        cursor, keys = self.redis_client.scan(
+                            cursor, 
+                            match=f"suggestions:{normalized_query[:3]}*", 
+                            count=20
+                        )
+                        for key in keys:
+                            if isinstance(key, bytes):
+                                key = key.decode('utf-8')
+                            key_query = key.replace("suggestions:", "")
+                            # Check if our query is a prefix of a cached query or vice versa
+                            if (normalized_query.startswith(key_query) or 
+                                key_query.startswith(normalized_query)):
+                                cached_data = self.redis_client.get(key)
+                                if cached_data:
+                                    prefix_matches.append((key_query, json.loads(cached_data)))
+                        
+                        if cursor == 0:
+                            break
+                    
+                    # Find best prefix match
+                    if prefix_matches:
+                        # Sort by prefix match quality (longest common prefix)
+                        prefix_matches.sort(
+                            key=lambda x: self._calculate_prefix_quality(normalized_query, x[0]),
+                            reverse=True
+                        )
+                        self.metrics["cache_hits"] += 1
+                        self.logger.debug(f"Redis prefix cache hit for {normalized_query} matched {prefix_matches[0][0]}")
+                        return prefix_matches[0][1]
+                        
+            except Exception as e:
+                self.logger.warning(f"Error checking Redis cache: {e}")
+        
+        # Then check local cache with improved matching
+        try:
+            # Exact match first
+            if normalized_query in self.suggestion_cache:
+                self.metrics["cache_hits"] += 1
+                self.logger.debug(f"Local exact cache hit for query: {normalized_query}")
+                return self.suggestion_cache[normalized_query]
+            
+            # Intelligent prefix matching
+            best_match = None
+            best_score = 0
+            min_prefix_length = min(3, len(normalized_query))
+            
+            for cached_query in list(self.suggestion_cache.keys()):
+                # Skip unlikely matches early
+                if abs(len(cached_query) - len(normalized_query)) > 5:
+                    continue
+                    
+                # Calculate prefix quality
+                prefix_score = self._calculate_prefix_quality(normalized_query, cached_query)
+                
+                if prefix_score > best_score:
+                    best_score = prefix_score
+                    best_match = cached_query
+            
+            # Use the best prefix match if good enough
+            if best_match and best_score > 0.7:  # Threshold for good match
+                self.metrics["cache_hits"] += 1
+                self.logger.debug(f"Local prefix cache hit for {normalized_query} matched {best_match}")
+                return self.suggestion_cache[best_match]
+                
+        except Exception as e:
+            self.logger.warning(f"Error checking local cache: {e}")
+        
+        return None
+
+    def _calculate_prefix_quality(self, query1: str, query2: str) -> float:
+        """
+        Calculate the quality of prefix match between two queries.
+        Returns a score between 0 and 1, where 1 is a perfect match.
+        """
+        # If one is a prefix of the other, calculate how much of the longer
+        # string is matched by the shorter one
+        if query1.startswith(query2):
+            return len(query2) / len(query1)
+        elif query2.startswith(query1):
+            return len(query1) / len(query2)
+        
+        # Find common prefix length
+        common_len = 0
+        for c1, c2 in zip(query1, query2):
+            if c1 != c2:
+                break
+            common_len += 1
+        
+        if common_len == 0:
+            return 0
+        
+        # Prioritize matches at word boundaries
+        max_len = max(len(query1), len(query2))
+        return common_len / max_len
+
     async def predict(self, partial_query: str, limit: int = 10, user_id: str = None) -> List[Dict[str, Any]]:
         """
-        Generate search suggestions with Google-like experience using hybrid ranking.
+        Generate search suggestions with optimized parallel processing, latency control,
+        and adaptive response strategies.
         
         Args:
             partial_query: The partial query to get suggestions for
@@ -415,16 +536,20 @@ class GoogleAutocompletePredictor:
         if not partial_query:
             return []
         
+        # Track performance metrics
         start_time = time.time()
         normalized_query = self._normalize_text(partial_query)
         self.metrics["total_requests"] += 1
         
+        # For very short queries, limit processing to improve responsiveness
+        is_short_query = len(normalized_query) <= 2
+        
         try:
-            # First check cache
+            # First check cache (optimized version)
             cache_key = f"suggestions:{normalized_query}"
             if user_id:
                 cache_key = f"suggestions:{user_id}:{normalized_query}"
-                
+                    
             cached_suggestions = await self._check_cache(cache_key)
             if cached_suggestions:
                 processing_time = time.time() - start_time
@@ -432,61 +557,140 @@ class GoogleAutocompletePredictor:
                 self.logger.info(f"Returning cached suggestions for '{normalized_query}' ({processing_time:.3f}s)")
                 return cached_suggestions[:limit]
             
-            # Use asyncio.gather to run multiple async operations concurrently
-            suggestion_futures = []
+            # Gather tasks based on query characteristics
+            tasks = []
+            context = {"user_id": user_id}
             
-            # 1. First priority: User's personal history and behavior-based suggestions
-            suggestion_futures.append(self._generate_pattern_suggestions(normalized_query, limit))
+            # For short queries, prioritize speed over comprehensiveness
+            if is_short_query:
+                # Prioritize pattern suggestions (fastest)
+                tasks.append((
+                    self._generate_pattern_suggestions(normalized_query, limit),
+                    0.9,  # Priority weight for results
+                    "pattern"
+                ))
+                
+                # Add trie suggestions if available
+                if hasattr(self, 'suggestion_trie'):
+                    tasks.append((
+                        self._get_trie_suggestions(normalized_query, limit),
+                        0.8,
+                        "trie"
+                    ))
+                    
+                # Only add FAISS for queries that seem like names
+                if any(c.isupper() for c in partial_query):
+                    tasks.append((
+                        self._generate_faiss_suggestions(normalized_query, limit//2),
+                        0.7,
+                        "faiss"
+                    ))
+            else:
+                # For longer queries, use all available sources
+                # 1. Start with pattern suggestions (fastest)
+                tasks.append((
+                    self._generate_pattern_suggestions(normalized_query, limit),
+                    0.8,  # Slightly lower priority for longer queries
+                    "pattern"
+                ))
+                
+                # 2. Add FAISS for semantic matches
+                tasks.append((
+                    self._generate_faiss_suggestions(normalized_query, limit),
+                    0.9,  # Higher priority for longer queries
+                    "faiss"
+                ))
+                
+                # 3. Add Gemini API for ML-powered suggestions
+                tasks.append((
+                    self._generate_simplified_gemini_suggestions(normalized_query, limit//2),
+                    0.7,
+                    "gemini"
+                ))
+                
+                # 4. Add personalized suggestions if user_id is provided
+                if user_id:
+                    try:
+                        from ai_services_api.services.search.core.personalization import get_user_search_history
+                        tasks.append((
+                            self._get_personalized_suggestions(normalized_query, user_id, limit),
+                            1.0,  # Highest priority for personalized results
+                            "personalized"
+                        ))
+                    except ImportError:
+                        self.logger.debug("Personalization module not available")
             
-            # 2. Second priority: Try FAISS for semantic matches
-            suggestion_futures.append(self._generate_faiss_suggestions(normalized_query, max(limit - 2, 5)))
+            # Set up timeouts based on query characteristics
+            timeout = 0.3 if is_short_query else 0.5  # Shorter timeout for shorter queries
             
-            # 3. Third priority: Try Gemini API for ML-powered suggestions
-            suggestion_futures.append(self._generate_simplified_gemini_suggestions(normalized_query, 5))
-            
-            # 4. Add personalized suggestions if user_id is provided
-            if user_id:
-                try:
-                    from ai_services_api.services.search.core.personalization import get_user_search_history
-                    suggestion_futures.append(self._get_personalized_suggestions(normalized_query, user_id, limit))
-                except ImportError:
-                    self.logger.warning("Personalization module not available")
-            
-            # Wait for all operations to complete
-            results = await asyncio.gather(*suggestion_futures, return_exceptions=True)
-            
-            # Process results, handling exceptions
+            # Create progress tracking
+            pending_tasks = {asyncio.create_task(task): (weight, name) for task, weight, name in tasks}
+            completed_tasks = {}
             all_suggestions = []
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    self.logger.error(f"Error in suggestion source {i}: {result}")
-                elif isinstance(result, list):
-                    all_suggestions.extend(result)
             
+            # Process tasks with progressive result handling
+            while pending_tasks and time.time() - start_time < timeout:
+                # Wait for the first task to complete or timeout
+                remaining_time = max(0.01, timeout - (time.time() - start_time))
+                done, pending = await asyncio.wait(
+                    pending_tasks.keys(),
+                    timeout=remaining_time,
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                # Update tracking
+                for task in done:
+                    weight, name = pending_tasks.pop(task)
+                    completed_tasks[task] = (weight, name)
+                    
+                    # Extract result
+                    try:
+                        result = task.result()
+                        if isinstance(result, list):
+                            # Track the source for analytics
+                            for item in result:
+                                if 'source' not in item:
+                                    item['source'] = name
+                            all_suggestions.extend(result)
+                    except Exception as e:
+                        self.logger.warning(f"Task {name} failed: {e}")
+            
+            # Clean up any remaining tasks
+            for task in pending_tasks:
+                task.cancel()
+                
             # If we have no suggestions, use fallback
             if not all_suggestions:
+                self.metrics["fallbacks_used"] += 1
                 all_suggestions = await self._generate_pattern_suggestions(normalized_query, limit)
-                
+                    
             # Combine with hybrid ranking
-            combined_suggestions = await self._hybrid_rank_suggestions(all_suggestions, normalized_query, user_id)
+            combined_suggestions = await self._hybrid_rank_suggestions(
+                all_suggestions, normalized_query, user_id
+            )
+            
+            # Classify by content type
+            classified_suggestions = self._classify_suggestion_types(
+                combined_suggestions, normalized_query
+            )
+            
+            # Ensure diversity in results
+            diversified_suggestions = self._ensure_content_diversity(
+                classified_suggestions, limit
+            )
             
             # Update cache with new results
-            if self.redis_client:
-                try:
-                    self.redis_client.setex(
-                        cache_key, 
-                        300,  # 5-minute cache for fresh results
-                        json.dumps(combined_suggestions[:limit])
-                    )
-                except Exception as cache_error:
-                    self.logger.warning(f"Cache update error: {cache_error}")
+            await self._update_cache(cache_key, diversified_suggestions[:limit])
             
             processing_time = time.time() - start_time
             self._update_latency_metric(processing_time)
-            self.logger.info(f"Generated {len(combined_suggestions)} suggestions for '{normalized_query}' ({processing_time:.3f}s)")
+            self.logger.info(
+                f"Generated {len(diversified_suggestions)} suggestions for '{normalized_query}' "
+                f"({processing_time:.3f}s, {len(completed_tasks)}/{len(tasks)} sources)"
+            )
             
-            return combined_suggestions[:limit]
-            
+            return diversified_suggestions[:limit]
+                
         except Exception as e:
             processing_time = time.time() - start_time
             self._update_latency_metric(processing_time)
@@ -495,7 +699,379 @@ class GoogleAutocompletePredictor:
             # Ensure we always return something
             self.metrics["fallbacks_used"] += 1
             return await self._generate_pattern_suggestions(normalized_query, limit)
-    
+
+    async def _get_trie_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
+        """Get suggestions from the prefix trie with timing."""
+        if not hasattr(self, 'suggestion_trie'):
+            return []
+            
+        try:
+            trie_results = self.suggestion_trie.search(partial_query, limit=limit*2)
+            
+            if not trie_results:
+                # Try fuzzy search for longer queries
+                if len(partial_query) >= 3:
+                    trie_results = self.suggestion_trie.fuzzy_search(
+                        partial_query, 
+                        max_distance=1, 
+                        limit=limit
+                    )
+            
+            suggestions = []
+            current_time = time.time()
+            
+            for suggestion, frequency, timestamp in trie_results:
+                # Apply recency boosting
+                recency_factor = 1.0
+                if timestamp:
+                    age_hours = (current_time - timestamp) / 3600
+                    recency_factor = math.exp(-age_hours / 72)  # 3-day half-life
+                    
+                suggestions.append({
+                    "text": suggestion,
+                    "source": "trie",
+                    "score": min(0.9, (0.6 + (frequency / 20)) * recency_factor)
+                })
+                
+            return suggestions
+        except Exception as e:
+            self.logger.error(f"Error getting trie suggestions: {e}")
+            return []
+
+    async def _update_cache(self, query: str, suggestions: List[Dict[str, Any]]):
+        """
+        Enhanced update for both Redis and local cache with tiered expiration.
+        Implements hierarchical caching for prefix matching.
+        """
+        normalized_query = self._normalize_text(query)
+        
+        # Update local cache with TTL tracking
+        self.suggestion_cache[normalized_query] = suggestions
+        
+        # Update Redis if available with intelligent TTL and tag-based invalidation
+        if self.redis_client:
+            try:
+                # Store full query results
+                redis_key = f"suggestions:{normalized_query}"
+                
+                # Apply different TTL based on query specificity and result count
+                if len(normalized_query) <= 2:
+                    ttl = 1800  # 30 minutes for very short queries (high change frequency)
+                elif len(normalized_query) <= 4:
+                    ttl = 3600  # 1 hour for short queries
+                else:
+                    ttl = 7200  # 2 hours for longer specific queries
+                    
+                # Reduce TTL for queries with few results (might be incomplete)
+                if len(suggestions) < 3:
+                    ttl = min(ttl, 900)  # Max 15 minutes for queries with few results
+                
+                # Store in Redis with appropriate TTL
+                self.redis_client.setex(
+                    redis_key, 
+                    ttl,
+                    json.dumps(suggestions)
+                )
+                
+                # Also store prefix-based keys for the first 2-3 characters
+                # to enable prefix matching
+                if len(normalized_query) >= 3:
+                    prefix_key = f"prefix:{normalized_query[:3]}"
+                    prefix_data = {normalized_query: time.time()}
+                    
+                    # Update the prefix index (or create if doesn't exist)
+                    existing_data = self.redis_client.get(prefix_key)
+                    if existing_data:
+                        try:
+                            existing_prefix_data = json.loads(existing_data)
+                            existing_prefix_data.update(prefix_data)
+                            # Limit size to avoid unbounded growth
+                            if len(existing_prefix_data) > 100:
+                                # Keep most recent entries
+                                sorted_items = sorted(
+                                    existing_prefix_data.items(), 
+                                    key=lambda x: x[1], 
+                                    reverse=True
+                                )
+                                existing_prefix_data = dict(sorted_items[:100])
+                            prefix_data = existing_prefix_data
+                        except:
+                            pass
+                    
+                    self.redis_client.setex(
+                        prefix_key,
+                        86400,  # 24 hours for prefix index
+                        json.dumps(prefix_data)
+                    )
+                    
+            except Exception as e:
+                self.logger.warning(f"Error updating Redis cache: {e}")
+
+    async def _generate_faiss_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
+        """
+        Optimized FAISS-based suggestion generation with parallel processing,
+        semantic matching, and intelligent fallbacks.
+        """
+        if not self.index or not self.id_mapping:
+            return []
+
+        try:
+            start_time = time.time()
+            # Generate embedding for the partial query
+            embedding_future = asyncio.create_task(self._get_optimized_embedding(partial_query))
+            
+            # While embedding is being generated, prepare backup suggestions in parallel
+            backup_future = asyncio.create_task(self._prepare_backup_suggestions(partial_query, limit))
+            
+            # Wait for embedding with timeout
+            try:
+                query_embedding = await asyncio.wait_for(embedding_future, timeout=1.0)
+            except (asyncio.TimeoutError, Exception) as e:
+                self.logger.warning(f"Embedding generation timed out or failed: {e}")
+                # Return backup suggestions if embedding failed
+                backup_suggestions = await backup_future
+                return backup_suggestions
+                
+            if query_embedding is None:
+                self.logger.warning("Embedding generation failed, falling back to backups")
+                backup_suggestions = await backup_future
+                return backup_suggestions
+
+            # Convert to numpy array if needed
+            if not isinstance(query_embedding, np.ndarray):
+                query_embedding = np.array(query_embedding, dtype=np.float32)
+
+            # Ensure we have a 2D array for FAISS
+            if len(query_embedding.shape) == 1:
+                query_embedding = query_embedding.reshape(1, -1)
+
+            # Normalize the embedding for cosine similarity
+            norm = np.linalg.norm(query_embedding)
+            if norm > 0:
+                query_embedding = query_embedding / norm
+
+            # Execute FAISS search in thread pool to avoid blocking
+            loop = asyncio.get_event_loop()
+            search_result = await loop.run_in_executor(
+                self.cpu_executor, 
+                self._execute_faiss_search_with_tuning,
+                query_embedding, 
+                limit * 2,  # Get more results for better filtering
+                partial_query
+            )
+            
+            if not search_result or len(search_result) == 0:
+                self.logger.warning("FAISS search returned no results, using backup")
+                backup_suggestions = await backup_future
+                return backup_suggestions
+            
+            # Process search results into suggestions
+            suggestions = []
+            seen_texts = set()  # For deduplication
+            
+            for idx, score in search_result:
+                if idx < 0 or idx >= len(self.id_mapping):  # Invalid index
+                    continue
+                    
+                expert_id = self.id_mapping[idx]
+                
+                try:
+                    # Get expert data from Redis
+                    expert_data = self.redis_binary.hgetall(f"expert:{expert_id}")
+                    
+                    if not expert_data:
+                        continue
+                        
+                    metadata = json.loads(expert_data[b'metadata'].decode())
+                    
+                    # Create search suggestion from expert data
+                    if 'first_name' in metadata and 'last_name' in metadata:
+                        full_name = f"{metadata.get('first_name', '')} {metadata.get('last_name', '')}".strip()
+                        if full_name and full_name.lower() not in seen_texts:
+                            seen_texts.add(full_name.lower())
+                            
+                            # Convert FAISS distance to similarity score (1.0 is best)
+                            normalized_score = 1.0 - min(1.0, float(score))
+                            
+                            # Apply additional boosting based on query overlap
+                            boost = self._calculate_text_overlap_score(partial_query, full_name)
+                            
+                            suggestions.append({
+                                "text": full_name,
+                                "source": "faiss",
+                                "score": min(0.95, normalized_score * (1.0 + boost))
+                            })
+                    
+                    # Also add expertise areas if relevant
+                    if 'knowledge_expertise' in metadata:
+                        expertise_areas = metadata.get('knowledge_expertise', [])
+                        if isinstance(expertise_areas, list):
+                            for area in expertise_areas:
+                                if (area and isinstance(area, str) and 
+                                    partial_query.lower() in area.lower() and 
+                                    area.lower() not in seen_texts):
+                                    
+                                    seen_texts.add(area.lower())
+                                    
+                                    # Expertise areas get a slightly lower base score
+                                    normalized_score = 0.85 * (1.0 - min(1.0, float(score)))
+                                    
+                                    suggestions.append({
+                                        "text": area,
+                                        "source": "faiss_expertise",
+                                        "score": normalized_score
+                                    })
+                except Exception as e:
+                    self.logger.error(f"Error processing FAISS result: {e}")
+                    continue
+            
+            # Sort by score and limit results
+            suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+            
+            # Get backup suggestions if we don't have enough
+            if len(suggestions) < limit / 2:
+                backup_suggestions = await backup_future
+                
+                # Merge with backup suggestions, prioritizing FAISS results
+                for backup in backup_suggestions:
+                    if backup["text"].lower() not in seen_texts:
+                        suggestions.append(backup)
+                        seen_texts.add(backup["text"].lower())
+            
+            # Log performance metrics
+            self.logger.info(f"FAISS search completed in {time.time() - start_time:.3f}s: {len(suggestions)} suggestions")
+            
+            return suggestions[:limit]
+
+        except Exception as e:
+            self.logger.error(f"Error in FAISS suggestions: {e}", exc_info=True)
+            # Return backup suggestions on error
+            try:
+                backup_suggestions = await backup_future
+                return backup_suggestions
+            except:
+                return []
+
+    def _calculate_text_overlap_score(self, query: str, text: str) -> float:
+        """Calculate text overlap score for boosting relevant matches."""
+        query_lower = query.lower()
+        text_lower = text.lower()
+        
+        # Direct substring match is highest value
+        if query_lower in text_lower:
+            return 0.5
+        
+        # Word-level matching
+        query_words = set(query_lower.split())
+        text_words = set(text_lower.split())
+        
+        if not query_words or not text_words:
+            return 0
+        
+        # Count matching words
+        matching_words = query_words.intersection(text_words)
+        match_ratio = len(matching_words) / len(query_words)
+        
+        return match_ratio * 0.3  # Scale the boost
+
+    def _execute_faiss_search_with_tuning(self, query_embedding, top_k, partial_query):
+        """
+        Execute FAISS search with performance tuning based on query characteristics.
+        Returns list of (index, distance) tuples.
+        """
+        if query_embedding.shape[-1] != self.index.d:
+            raise ValueError(f"Embedding dimension mismatch: expected {self.index.d}, got {query_embedding.shape[-1]}")
+        
+        try:
+            # Use nprobe tuning based on query length and specificity
+            if hasattr(self.index, 'nprobe'):
+                query_specificity = min(32, max(8, len(partial_query) * 4))
+                original_nprobe = self.index.nprobe
+                
+                # Adjust nprobe: longer queries = more focused search
+                self.index.nprobe = int(min(64, 128 // query_specificity))
+            
+            # Perform the search
+            distances, indices = self.index.search(query_embedding.astype(np.float32), top_k)
+            
+            # Reset nprobe if we changed it
+            if hasattr(self.index, 'nprobe') and 'original_nprobe' in locals():
+                self.index.nprobe = original_nprobe
+            
+            # Convert to list of (index, distance) tuples for valid indices
+            result = [(int(idx), float(distances[0][i])) 
+                    for i, idx in enumerate(indices[0]) 
+                    if idx >= 0]
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"[FAISS][Query='{partial_query[:30]}...'] Error in index search: {e}")
+            return []
+
+    async def _get_optimized_embedding(self, text: str) -> Optional[np.ndarray]:
+        """Get embedding with optimized performance and caching."""
+        # Check embedding cache first
+        cache_key = f"emb:{hashlib.md5(text.encode()).hexdigest()}"
+        
+        if self.redis_binary:
+            try:
+                cached_embedding = self.redis_binary.get(cache_key)
+                if cached_embedding:
+                    return np.frombuffer(cached_embedding, dtype=np.float32)
+            except Exception as e:
+                self.logger.debug(f"Embedding cache read error: {e}")
+        
+        # Try to get embedding from API with circuit breaker
+        try:
+            embedding = await self.embedding_circuit.execute(
+                self._execute_embedding_request,
+                text
+            )
+            
+            if embedding is not None:
+                # Cache the embedding
+                if self.redis_binary:
+                    try:
+                        embedding_array = np.array(embedding, dtype=np.float32)
+                        self.redis_binary.setex(
+                            cache_key,
+                            86400,  # 24-hour cache
+                            embedding_array.tobytes()
+                        )
+                        return embedding_array
+                    except Exception as e:
+                        self.logger.debug(f"Embedding cache write error: {e}")
+                
+                return np.array(embedding, dtype=np.float32)
+        except Exception as e:
+            self.logger.warning(f"Error getting embedding: {e}")
+        
+        # Fall back to deterministic embedding generation
+        return self._generate_fallback_embedding(text)
+
+    async def _prepare_backup_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
+        """Prepare backup suggestions to use if FAISS search fails."""
+        # Try trie-based suggestions first
+        if hasattr(self, 'suggestion_trie'):
+            try:
+                trie_results = self.suggestion_trie.search(partial_query, limit=limit*2)
+                
+                if trie_results and len(trie_results) > 0:
+                    suggestions = []
+                    for suggestion, frequency, timestamp in trie_results:
+                        suggestions.append({
+                            "text": suggestion,
+                            "source": "trie_backup",
+                            "score": min(0.8, 0.5 + (frequency / 20))
+                        })
+                    return suggestions
+            except Exception as trie_error:
+                self.logger.debug(f"Trie backup error: {trie_error}")
+        
+        # Fall back to pattern-based suggestions
+        return await self._generate_pattern_suggestions(partial_query, limit)
+            
     def _setup_redis(self, config: Dict):
         """Set up Redis connection for distributed caching."""
         try:
@@ -1264,65 +1840,7 @@ class GoogleAutocompletePredictor:
         # Fall back to prefix matching for other cases
         return str1.startswith(str2) or str2.startswith(str1)
         
-    async def _check_cache(self, query: str) -> Optional[List[Dict[str, Any]]]:
-        """
-        Check if suggestions for this query are in cache.
-        Checks both Redis (if available) and local cache.
-        """
-        normalized_query = self._normalize_text(query)
-        
-        # First check Redis for distributed cache if available
-        if self.redis_client:
-            try:
-                redis_key = f"suggestions:{normalized_query}"
-                cached_data = self.redis_client.get(redis_key)
-                if cached_data:
-                    self.metrics["cache_hits"] += 1
-                    self.logger.debug(f"Redis cache hit for query: {normalized_query}")
-                    return json.loads(cached_data)
-            except Exception as e:
-                self.logger.warning(f"Error checking Redis cache: {e}")
-        
-        # Then check local cache
-        try:
-            if normalized_query in self.suggestion_cache:
-                self.metrics["cache_hits"] += 1
-                self.logger.debug(f"Local cache hit for query: {normalized_query}")
-                return self.suggestion_cache[normalized_query]
-        except Exception as e:
-            self.logger.warning(f"Error checking local cache: {e}")
-        
-        # Check for prefix matches for partial queries in local cache
-        try:
-            for cached_query in list(self.suggestion_cache.keys()):
-                if normalized_query.startswith(cached_query) and len(normalized_query) - len(cached_query) <= 3:
-                    # Close enough prefix match
-                    self.metrics["cache_hits"] += 1
-                    self.logger.debug(f"Prefix cache hit for query: {normalized_query} matched {cached_query}")
-                    return self.suggestion_cache[cached_query]
-        except Exception as e:
-            self.logger.warning(f"Error checking prefix matches in cache: {e}")
-        
-        return None
     
-    async def _update_cache(self, query: str, suggestions: List[Dict[str, Any]]):
-        """Update both Redis and local cache with new suggestions."""
-        normalized_query = self._normalize_text(query)
-        
-        # Update local cache
-        self.suggestion_cache[normalized_query] = suggestions
-        
-        # Update Redis if available
-        if self.redis_client:
-            try:
-                redis_key = f"suggestions:{normalized_query}"
-                self.redis_client.set(
-                    redis_key, 
-                    json.dumps(suggestions),
-                    ex=self.cache_ttl
-                )
-            except Exception as e:
-                self.logger.warning(f"Error updating Redis cache: {e}")
     
     
     async def _get_gemini_embedding(self, text: str, retries: int = 3, delay: float = 1.0) -> Optional[list]:
@@ -1396,37 +1914,7 @@ class GoogleAutocompletePredictor:
         return embedding
     
     
-    async def _generate_faiss_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
-        """Generate suggestions from FAISS index with parallel processing."""
-        if not self.index or not self.id_mapping:
-            return []
-
-        try:
-            # Generate embedding for the partial query
-            query_embedding = await self._get_gemini_embedding(partial_query)
-
-            if query_embedding is None:
-                raise RuntimeError("Failed to generate embedding. Gemini API did not return a valid result.")
-
-            # Convert to numpy array if needed
-            if not isinstance(query_embedding, np.ndarray):
-                query_embedding = np.array(query_embedding, dtype=np.float32)
-
-            # Ensure we have a 2D array for FAISS
-            if len(query_embedding.shape) == 1:
-                query_embedding = query_embedding.reshape(1, -1)
-
-            # Use to_thread for FAISS search in a background thread
-            search_future = to_thread(self._execute_faiss_search, query_embedding, limit * 2, partial_query)
-
-            # Await search completion
-            suggestions = await search_future
-            return suggestions
-
-        except Exception as e:
-            self.logger.error(f"Error generating FAISS suggestions: {e}")
-            return []
-
+    
 
     
     def _extract_partial_word(self, query: str) -> Tuple[str, str]:

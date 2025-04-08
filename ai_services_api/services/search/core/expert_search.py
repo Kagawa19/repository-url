@@ -1,10 +1,19 @@
 # expert_search.py
+import asyncio
+import hashlib
+import os
+
+import redis
 from fastapi import HTTPException
 from typing import Any, List, Dict, Optional
 import logging
 from datetime import datetime
 import json
 import uuid
+
+# Add this at the top of expert_search.py
+from functools import lru_cache
+import psycopg2.pool
 
 from ai_services_api.services.search.indexing.index_creator import ExpertSearchIndexManager
 from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
@@ -21,31 +30,7 @@ import uuid
 # Configure logger
 logger = logging.getLogger(__name__)
 
-async def get_or_create_session(conn, user_id: str) -> str:
-    """Create a session for tracking user interactions."""
-    logger.info(f"Getting or creating session for user: {user_id}")
-    cur = conn.cursor()
-    try:
-        session_id = int(str(int(datetime.utcnow().timestamp()))[-8:])
-        logger.debug(f"Generated session ID: {session_id}")
-        
-        cur.execute("""
-            INSERT INTO search_sessions 
-                (session_id, user_id, start_timestamp, is_active)
-            VALUES (%s, %s, CURRENT_TIMESTAMP, true)
-            RETURNING session_id
-        """, (session_id, user_id))
-        
-        conn.commit()
-        logger.debug(f"Session created successfully with ID: {session_id}")
-        return str(session_id)
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"Error creating session: {str(e)}", exc_info=True)
-        logger.debug(f"Session creation failed: {str(e)}")
-        raise
-    finally:
-        cur.close()
+
 
 async def record_search(conn, session_id: str, user_id: str, query: str, results: List[Dict], response_time: float):
     """Record search analytics in the database."""
@@ -102,9 +87,80 @@ async def record_search(conn, session_id: str, user_id: str, query: str, results
     finally:
         cur.close()
 
+
+# Create a connection pool as a module-level singleton
+@lru_cache(maxsize=1)
+def get_connection_pool(min_conn=5, max_conn=20):
+    """Create or return a connection pool singleton."""
+    try:
+        # Use the existing database connection parameters
+        from ai_services_api.services.message.core.database import get_db_connection
+        # Get a sample connection to extract connection parameters
+        sample_conn = get_db_connection()
+        conn_params = sample_conn.get_dsn_parameters()
+        sample_conn.close()
+        
+        # Create the connection pool with the same parameters
+        pool = psycopg2.pool.ThreadedConnectionPool(
+            min_conn, 
+            max_conn,
+            user=conn_params.get('user'),
+            password=conn_params.get('password'),
+            host=conn_params.get('host'),
+            port=conn_params.get('port'),
+            database=conn_params.get('dbname')
+        )
+        return pool
+    except Exception as e:
+        logger.error(f"Error creating connection pool: {e}")
+        # Fall back to original connection method if pool creation fails
+        return None
+
+async def get_or_create_session(conn, user_id: str) -> str:
+    """Create a session for tracking user interactions."""
+    logger.info(f"Getting or creating session for user: {user_id}")
+    
+    # Get connection from pool if available
+    pool = get_connection_pool()
+    should_return_to_pool = False
+    
+    if pool and conn is None:
+        try:
+            conn = pool.getconn()
+            should_return_to_pool = True
+        except Exception as e:
+            logger.error(f"Error getting connection from pool: {e}")
+            # Fall back to the provided connection
+    
+    cur = conn.cursor()
+    try:
+        session_id = int(str(int(datetime.utcnow().timestamp()))[-8:])
+        logger.debug(f"Generated session ID: {session_id}")
+        
+        cur.execute("""
+            INSERT INTO search_sessions 
+                (session_id, user_id, start_timestamp, is_active)
+            VALUES (%s, %s, CURRENT_TIMESTAMP, true)
+            RETURNING session_id
+        """, (session_id, user_id))
+        
+        conn.commit()
+        logger.debug(f"Session created successfully with ID: {session_id}")
+        return str(session_id)
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error creating session: {str(e)}", exc_info=True)
+        logger.debug(f"Session creation failed: {str(e)}")
+        raise
+    finally:
+        cur.close()
+        # Return connection to pool if we got it from there
+        if should_return_to_pool and pool:
+            pool.putconn(conn)
+
 async def process_expert_search(query: str, user_id: str, active_only: bool = True, k: int = 5) -> SearchResponse:
     """
-    Process expert search with improved Gemini-enhanced refinements
+    Process expert search with performance optimizations and improved resilience
     
     Args:
         query (str): Search query
@@ -120,23 +176,54 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
     conn = None
     session_id = str(uuid.uuid4())[:8]  # Default session ID in case DB connection fails
     
+    # Get connection pool if available
+    pool = get_connection_pool() if 'get_connection_pool' in globals() else None
+    using_pool = False
+    
+    start_time = datetime.utcnow()
+    
     try:
         # Establish database connection
         try:
-            conn = get_db_connection()
-            session_id = await get_or_create_session(conn, user_id)
-            logger.debug(f"Created session: {session_id}")
+            if pool:
+                conn = pool.getconn()
+                using_pool = True
+                logger.debug("Using connection from pool")
+            else:
+                conn = get_db_connection()
+                
+            # Create session asynchronously to reduce latency
+            session_creation = asyncio.create_task(get_or_create_session(conn, user_id))
         except Exception as db_error:
             logger.error(f"Database connection error: {db_error}", exc_info=True)
             # Continue processing with default session ID
         
-        # Execute search with timing
-        start_time = datetime.utcnow()
+        # Execute search with timing - use thread pool if search is complex
         results = []
+        is_complex_query = len(query.split()) > 3 or any(c in query for c in [':', '&', '|', '"', "'"])
+        
         try:
             search_manager = ExpertSearchIndexManager()
-            results = search_manager.search_experts(query, k=k, active_only=active_only)
+            
+            # For complex queries, run in thread pool to avoid blocking
+            if is_complex_query:
+                loop = asyncio.get_event_loop()
+                results = await loop.run_in_executor(
+                    None,  # Use default executor
+                    lambda: search_manager.search_experts(query, k=k, active_only=active_only)
+                )
+            else:
+                # For simple queries, run directly
+                results = search_manager.search_experts(query, k=k, active_only=active_only)
+                
             logger.info(f"Search found {len(results)} results")
+            
+            # Append search to user history in background
+            loop = asyncio.get_event_loop()
+            loop.create_task(
+                _record_search_history(user_id, query, len(results))
+            )
+            
         except Exception as search_error:
             logger.error(f"Search execution error: {search_error}", exc_info=True)
         
@@ -163,60 +250,66 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
         except Exception as format_error:
             logger.error(f"Result formatting error: {format_error}", exc_info=True)
         
-        # Record search analytics if we have a connection
+        # Get session ID from async task if it completed
+        if 'session_creation' in locals():
+            try:
+                session_id = await asyncio.wait_for(session_creation, timeout=0.1)
+            except asyncio.TimeoutError:
+                logger.warning("Session creation timed out, using default session ID")
+            except Exception as session_error:
+                logger.error(f"Error waiting for session: {session_error}")
+        
+        # Record search analytics in background to reduce latency
         if conn and results:
             try:
-                await record_search(conn, session_id, user_id, query, results, response_time)
+                # Don't wait for this to complete
+                asyncio.create_task(
+                    record_search(conn, session_id, user_id, query, results, response_time)
+                )
             except Exception as record_error:
-                logger.error(f"Error recording search: {record_error}", exc_info=True)
+                logger.error(f"Error creating record search task: {record_error}", exc_info=True)
         
-        # Generate refinement suggestions using Gemini
+        # Generate refinement suggestions - run in parallel with returning results
         refinements = {}
+        refinement_future = asyncio.create_task(
+            _generate_refinements(query, results, search_manager)
+        )
+        
+        # Use shared memory cache for repeated queries
+        cache_key = f"refinements:{hashlib.md5(query.encode()).hexdigest()}"
         try:
-            # First try to get refinements from search manager
-            if results:
-                refinements = search_manager.get_search_refinements(query, results)
-            else:
-                # If no results or empty refinements, enhance with Gemini
-                try:
-                    # Use GoogleAutocompletePredictor to get related queries
-                    gemini_predictor = GoogleAutocompletePredictor()
-                    suggestion_objects = await gemini_predictor.predict(query, limit=5)
-                    related_queries = [s["text"] for s in suggestion_objects]
-                    
-                    # Extract potential expertise areas
-                    expertise_areas = set()
-                    for related_query in related_queries:
-                        words = related_query.lower().split()
-                        for word in words:
-                            if len(word) > 3 and word != query.lower():
-                                expertise_areas.add(word.capitalize())
-                    
-                    # Ensure we have some expertise areas
-                    if len(expertise_areas) < 3:
-                        expertise_areas.add(query.capitalize())
-                    
-                    # Build enhanced refinements
-                    refinements = {
-                        "filters": [],
-                        "related_queries": related_queries,
-                        "expertise_areas": list(expertise_areas)[:5]
-                    }
-                except Exception as gemini_error:
-                    logger.error(f"Gemini refinement error: {gemini_error}", exc_info=True)
-                    # Fallback to basic refinements
-                    refinements = {
-                        "filters": [],
-                        "related_queries": [],
-                        "expertise_areas": [query.capitalize()]
-                    }
-        except Exception as refine_error:
-            logger.error(f"Refinements generation error: {refine_error}", exc_info=True)
-            refinements = {
-                "filters": [],
-                "related_queries": [],
-                "expertise_areas": []
-            }
+            # Check if we have this in cache
+            if hasattr(search_manager, 'redis_client'):
+                cached_refinements = search_manager.redis_client.get(cache_key)
+                if cached_refinements:
+                    refinements = json.loads(cached_refinements)
+        except Exception as cache_error:
+            logger.error(f"Cache error: {cache_error}")
+            
+        # If no refinements from cache, wait for the future (with timeout)
+        if not refinements:
+            try:
+                refinements = await asyncio.wait_for(refinement_future, timeout=0.2)
+                # Cache the result
+                if hasattr(search_manager, 'redis_client') and refinements:
+                    try:
+                        search_manager.redis_client.setex(
+                            cache_key,
+                            1800,  # 30 minute cache
+                            json.dumps(refinements)
+                        )
+                    except Exception as cache_error:
+                        logger.error(f"Cache storage error: {cache_error}")
+            except asyncio.TimeoutError:
+                logger.warning("Refinement generation timed out")
+                # Use empty default
+                refinements = {
+                    "filters": [],
+                    "related_queries": [],
+                    "expertise_areas": []
+                }
+            except Exception as refine_error:
+                logger.error(f"Error waiting for refinements: {refine_error}")
         
         # Prepare response
         response = SearchResponse(
@@ -226,6 +319,10 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
             session_id=session_id,
             refinements=refinements
         )
+        
+        # Log total processing time
+        total_time = (datetime.utcnow() - start_time).total_seconds()
+        logger.info(f"Total processing time: {total_time:.3f}s")
         
         return response
         
@@ -246,10 +343,102 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
             }
         )
     finally:
-        # Always close connection if opened
+        # Always close connection properly
         if conn:
-            conn.close()
-            logger.debug("Database connection closed")
+            if using_pool and pool:
+                pool.putconn(conn)
+                logger.debug("Returned connection to pool")
+            else:
+                conn.close()
+                logger.debug("Database connection closed")
+
+# New helper functions to support the optimized implementation
+
+async def _generate_refinements(query: str, results: List[Dict], search_manager) -> Dict:
+    """Generate refinements in a separate function for parallelism."""
+    try:
+        # First try to get refinements from search manager
+        if results:
+            refinements = search_manager.get_search_refinements(query, results)
+            if refinements:
+                return refinements
+                
+        # If no results or empty refinements, enhance with Gemini
+        try:
+            # Use GoogleAutocompletePredictor to get related queries
+            gemini_predictor = GoogleAutocompletePredictor()
+            suggestion_objects = await gemini_predictor.predict(query, limit=5)
+            related_queries = [s["text"] for s in suggestion_objects]
+            
+            # Extract potential expertise areas
+            expertise_areas = set()
+            for related_query in related_queries:
+                words = related_query.lower().split()
+                for word in words:
+                    if len(word) > 3 and word != query.lower():
+                        expertise_areas.add(word.capitalize())
+            
+            # Ensure we have some expertise areas
+            if len(expertise_areas) < 3:
+                expertise_areas.add(query.capitalize())
+            
+            # Build enhanced refinements
+            refinements = {
+                "filters": [],
+                "related_queries": related_queries,
+                "expertise_areas": list(expertise_areas)[:5]
+            }
+            
+            return refinements
+            
+        except Exception as gemini_error:
+            logger.error(f"Gemini refinement error: {gemini_error}", exc_info=True)
+            # Fallback to basic refinements
+            return {
+                "filters": [],
+                "related_queries": [],
+                "expertise_areas": [query.capitalize()]
+            }
+            
+    except Exception as e:
+        logger.error(f"Refinements generation error: {e}", exc_info=True)
+        return {
+            "filters": [],
+            "related_queries": [],
+            "expertise_areas": []
+        }
+
+async def _record_search_history(user_id: str, query: str, result_count: int):
+    """Record search in user history asynchronously."""
+    try:
+        # Connect to Redis for search history
+        redis_client = redis.Redis(
+            host=os.getenv('REDIS_HOST', 'localhost'),
+            port=int(os.getenv('REDIS_PORT', 6379)),
+            db=int(os.getenv('REDIS_HISTORY_DB', 3)),
+            decode_responses=True
+        )
+        
+        # Create history entry
+        history_entry = {
+            "query": query,
+            "timestamp": datetime.utcnow().isoformat(),
+            "result_count": result_count
+        }
+        
+        # Add to user-specific history list with limit
+        history_key = f"search_history:{user_id}"
+        redis_client.lpush(history_key, json.dumps(history_entry))
+        redis_client.ltrim(history_key, 0, 99)  # Keep most recent 100 searches
+        redis_client.expire(history_key, 86400 * 30)  # 30-day expiry
+        
+        # Also add to global search history for trending analytics
+        popular_key = "popular_searches"
+        redis_client.zincrby(popular_key, 1, query.lower())
+        redis_client.expire(popular_key, 86400 * 7)  # 7-day expiry for popular searches
+        
+    except Exception as e:
+        logger.error(f"Error recording search history: {e}")
 
 async def process_expert_name_search(
     name: str, 
