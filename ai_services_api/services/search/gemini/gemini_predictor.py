@@ -1771,7 +1771,7 @@ class GoogleAutocompletePredictor:
             self.logger.error(f"Error getting query popularity weights: {e}")
             return {}
 
-    def _fuzzy_match(self, str1: str, str2: str, max_distance: int = 1) -> bool:
+    def _fuzzy_match(self, str1: str, str2: str, max_distance: int = 3) -> bool:
         """
         Determine if two strings match within a maximum edit distance.
         Uses a simplified Levenshtein distance calculation.
@@ -1799,7 +1799,7 @@ class GoogleAutocompletePredictor:
             return str1.startswith(str2) or str2.startswith(str1)
             
         # For longer strings with 1 max distance, we can use a simplified approach
-        if max_distance == 1:
+        if max_distance == 3:
             # Check character by character with at most one difference
             differences = 0
             if len(str1) == len(str2):
