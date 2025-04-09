@@ -16,7 +16,7 @@ from ai_services_api.services.search.core.models import PredictionResponse
 from ai_services_api.services.search.core.personalization import get_selected_suggestions, get_trending_suggestions, get_user_search_history, personalize_suggestions
 
 # In your other Python script
-from ai_services_api.services.message.core.database import get_db_connection, close_connection_pool, DatabaseConnection
+from ai_services_api.services.message.core.database import get_db_connection
 
 # Configure logger
 logger = logging.getLogger(__name__)
