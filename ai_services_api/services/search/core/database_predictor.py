@@ -129,17 +129,8 @@ class DatabaseSuggestionGenerator:
     ) -> List[Dict[str, Any]]:
         """
         Generate name-based suggestions from experts table.
-        
-        Args:
-            cur: Database cursor
-            normalized_query: Normalized search input
-            limit: Maximum suggestions to return
-            context: Optional context filter
-        
-        Returns:
-            List of name suggestions
         """
-        # Query to match first or last names
+        # Query to match first or last names using ILIKE and text ranking
         query = """
         SELECT 
             first_name, 
@@ -147,8 +138,11 @@ class DatabaseSuggestionGenerator:
             designation, 
             theme,
             (
-                similarity(lower(first_name), %s) * 0.5 + 
-                similarity(lower(last_name), %s) * 0.5
+                CASE 
+                    WHEN lower(first_name) LIKE %s THEN 1.0
+                    WHEN lower(last_name) LIKE %s THEN 0.9
+                    ELSE 0.5
+                END
             ) as name_score
         FROM experts_expert
         WHERE 
@@ -163,8 +157,8 @@ class DatabaseSuggestionGenerator:
         
         # Execute query
         cur.execute(query, (
-            normalized_query, 
-            normalized_query, 
+            like_pattern, 
+            like_pattern, 
             like_pattern, 
             like_pattern, 
             limit
@@ -187,7 +181,7 @@ class DatabaseSuggestionGenerator:
             })
         
         return suggestions
-    
+
     def _get_expert_theme_suggestions(
         self, 
         cur, 
@@ -197,30 +191,24 @@ class DatabaseSuggestionGenerator:
     ) -> List[Dict[str, Any]]:
         """
         Generate theme/designation suggestions from experts table.
-        
-        Args:
-            cur: Database cursor
-            normalized_query: Normalized search input
-            limit: Maximum suggestions to return
-            context: Optional context filter
-        
-        Returns:
-            List of theme suggestions
         """
         # Query to match themes and designations
         query = """
         SELECT DISTINCT
             theme, 
             designation,
-            similarity(lower(theme), %s) as theme_score,
-            similarity(lower(designation), %s) as designation_score
+            (
+                CASE 
+                    WHEN lower(theme) LIKE %s THEN 1.0
+                    WHEN lower(designation) LIKE %s THEN 0.9
+                    ELSE 0.5
+                END
+            ) as match_score
         FROM experts_expert
         WHERE 
             (lower(theme) LIKE %s OR lower(designation) LIKE %s)
             AND is_active = true
-        ORDER BY 
-            theme_score DESC, 
-            designation_score DESC
+        ORDER BY match_score DESC
         LIMIT %s
         """
         
@@ -229,8 +217,8 @@ class DatabaseSuggestionGenerator:
         
         # Execute query
         cur.execute(query, (
-            normalized_query, 
-            normalized_query, 
+            like_pattern, 
+            like_pattern, 
             like_pattern, 
             like_pattern, 
             limit
@@ -239,15 +227,14 @@ class DatabaseSuggestionGenerator:
         # Process results
         suggestions = []
         for row in cur.fetchall():
-            theme, designation, theme_score, designation_score = row
+            theme, designation, score = row
             
-            # Determine which field matched and use its score
-            score = max(theme_score, designation_score)
-            matched_text = theme if theme_score > designation_score else designation
+            # Determine which field to use as text
+            matched_text = theme if theme and theme.lower().startswith(normalized_query.lower()) else designation
             
             suggestions.append({
                 "text": matched_text,
-                "type": "theme" if theme_score > designation_score else "designation",
+                "type": "theme" if theme and theme.lower().startswith(normalized_query.lower()) else "designation",
                 "score": score,
                 "metadata": {
                     "theme": theme,
@@ -256,7 +243,7 @@ class DatabaseSuggestionGenerator:
             })
         
         return suggestions
-    
+
     def _get_resource_suggestions(
         self, 
         cur, 
@@ -266,15 +253,6 @@ class DatabaseSuggestionGenerator:
     ) -> List[Dict[str, Any]]:
         """
         Generate resource title suggestions.
-        
-        Args:
-            cur: Database cursor
-            normalized_query: Normalized search input
-            limit: Maximum suggestions to return
-            context: Optional context filter
-        
-        Returns:
-            List of resource suggestions
         """
         # Query to match resource titles
         query = """
@@ -282,7 +260,12 @@ class DatabaseSuggestionGenerator:
             title, 
             type,
             domains,
-            similarity(lower(title), %s) as title_score
+            (
+                CASE 
+                    WHEN lower(title) LIKE %s THEN 1.0
+                    ELSE 0.5
+                END
+            ) as title_score
         FROM resources_resource
         WHERE 
             lower(title) LIKE %s
@@ -295,7 +278,7 @@ class DatabaseSuggestionGenerator:
         
         # Execute query
         cur.execute(query, (
-            normalized_query, 
+            like_pattern, 
             like_pattern, 
             limit
         ))
