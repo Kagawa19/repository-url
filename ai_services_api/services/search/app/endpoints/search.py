@@ -153,7 +153,7 @@ async def advanced_search(
             )
         
         # Fallback to a general search if no specific type is matched
-        return await process_expert_search(
+        return await process_advanced_search(
             query, 
             user_id, 
             active_only, 
