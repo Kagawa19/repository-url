@@ -328,6 +328,53 @@ class MessageHandler:
             logger.error(f"Error in start_chat_session: {e}")
             raise
 
+    def _format_publication_response(self, text):
+        """Special formatter for publication list responses."""
+        # First, extract the introductory text
+        intro_match = re.match(r'^(.*?)\s*\d+\.', text, re.DOTALL)
+        intro = intro_match.group(1).strip() if intro_match else ""
+        
+        # Split by numbered items
+        parts = re.split(r'(\d+\.)', text)
+        if len(parts) < 3:
+            return text  # Not a properly structured list
+        
+        formatted_parts = [intro] if intro else []
+        
+        # Rebuild with proper formatting
+        current_item = ""
+        for i, part in enumerate(parts):
+            if re.match(r'\d+\.', part):
+                # Start of a new item
+                if current_item:
+                    formatted_parts.append(current_item.strip())
+                current_item = part
+            elif i > 0 and re.match(r'\d+\.', parts[i-1]):
+                # Content of an item
+                lines = []
+                
+                # Format title
+                title_match = re.search(r'(.*?)(Authors:|$)', part, re.DOTALL)
+                if title_match:
+                    title = title_match.group(1).strip()
+                    lines.append(title)
+                
+                # Format other fields
+                for field in ["Authors:", "Publication Year:", "DOI:", "Research Domains:"]:
+                    field_match = re.search(f'({field})(.*?)(?=(Authors:|Publication Year:|DOI:|Research Domains:|$))', part, re.DOTALL)
+                    if field_match:
+                        field_content = field_match.group(2).strip()
+                        lines.append(f"{field} {field_content}")
+                
+                current_item += "\n" + "\n".join(lines)
+        
+        # Add the last item
+        if current_item:
+            formatted_parts.append(current_item.strip())
+        
+        # Join with double newlines for clear separation
+        return "\n\n".join(formatted_parts)
+
     async def send_message_async(self, message: str, user_id: str, session_id: str = None):
         """
         Process message and handle responses with enhanced rate limit handling.
@@ -346,6 +393,12 @@ class MessageHandler:
         # Response tracking
         response_chunks = []
         has_error_occurred = False
+        
+        # Check if this is a publication list request
+        is_publication_request = False
+        if "publication" in message.lower() and any(x in message.lower() for x in ["list", "show", "find", "get"]):
+            is_publication_request = True
+            logger.info("Detected publication list request - will apply special formatting")
         
         try:
             self.metadata = None
@@ -399,23 +452,40 @@ class MessageHandler:
             
             # Process and format the response stream
             try:
-                async for chunk in self.process_stream_response(raw_response_stream):
-                    # Check if this is a metadata chunk
-                    if isinstance(chunk, dict) and chunk.get('is_metadata'):
-                        captured_metadata = chunk['metadata']
+                if is_publication_request:
+                    # For publication requests, collect the entire response first
+                    async for chunk in self.process_stream_response(raw_response_stream):
+                        # Check if this is a metadata chunk
+                        if isinstance(chunk, dict) and chunk.get('is_metadata'):
+                            captured_metadata = chunk['metadata']
+                            continue
                         
-                        # Check if the response was generated in rate-limited mode
-                        if captured_metadata.get('metrics', {}).get('rate_limited_mode', False):
-                            rate_limit_encountered = True
-                            logger.warning("Response was generated in rate-limited mode")
-                        
-                        logger.debug(f"Captured metadata: {json.dumps(captured_metadata, default=str)}")
-                        continue
-                        
-                    logger.debug(f"Yielding formatted response chunk (length: {len(chunk)})")
-                    response_chunks.append(chunk)
-                    yield chunk
+                        response_chunks.append(chunk)
                     
+                    # Format the complete response for publications
+                    complete_response = ''.join(response_chunks)
+                    formatted_response = self._format_publication_response(complete_response)
+                    logger.info(f"FINAL RESPONSE FORMAT:\n{formatted_response}")
+                    yield formatted_response
+                else:
+                    # For regular requests, process streaming response normally
+                    async for chunk in self.process_stream_response(raw_response_stream):
+                        # Check if this is a metadata chunk
+                        if isinstance(chunk, dict) and chunk.get('is_metadata'):
+                            captured_metadata = chunk['metadata']
+                            
+                            # Check if the response was generated in rate-limited mode
+                            if captured_metadata.get('metrics', {}).get('rate_limited_mode', False):
+                                rate_limit_encountered = True
+                                logger.warning("Response was generated in rate-limited mode")
+                            
+                            logger.debug(f"Captured metadata: {json.dumps(captured_metadata, default=str)}")
+                            continue
+                            
+                        logger.debug(f"Yielding formatted response chunk (length: {len(chunk)})")
+                        response_chunks.append(chunk)
+                        yield chunk
+                        
             except Exception as stream_error:
                 # Detect rate limit errors in streaming
                 if any(x in str(stream_error).lower() for x in ["429", "quota", "rate limit", "resource exhausted"]):
