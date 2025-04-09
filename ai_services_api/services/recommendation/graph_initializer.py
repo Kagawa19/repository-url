@@ -10,20 +10,18 @@ from typing import List, Dict, Any, Optional
 import json
 from urllib.parse import urlparse
 from dotenv import load_dotenv
+import time
+from datetime import datetime, timedelta
+import socket
+import requests
 
 # Load environment variables
 load_dotenv()
 
-# Configure Gemini
-try:
-    gemini_api_key = os.getenv('GEMINI_API_KEY')
-    if gemini_api_key:
-        genai.configure(api_key=gemini_api_key)
-        model = genai.GenerativeModel('gemini-1.5-pro-latest')
-    else:
-        model = None
-except ImportError:
-    model = None
+# Configure HTTP proxy if needed
+if os.getenv('HTTP_PROXY'):
+    os.environ['HTTPS_PROXY'] = os.getenv('HTTP_PROXY')
+    os.environ['https_proxy'] = os.getenv('HTTP_PROXY')
 
 # Configure logging
 logging.basicConfig(
@@ -32,6 +30,53 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+def check_connectivity():
+    """Diagnose connectivity issues with Gemini API"""
+    try:
+        # Test DNS resolution
+        try:
+            ip = socket.gethostbyname('generativelanguage.googleapis.com')
+            logger.info(f"DNS resolution for Gemini API: {ip}")
+        except Exception as e:
+            logger.error(f"DNS resolution failed: {e}")
+        
+        # Test HTTP connectivity
+        try:
+            resp = requests.get('https://generativelanguage.googleapis.com/healthz', timeout=10)
+            logger.info(f"HTTP connectivity check: Status {resp.status_code}")
+        except Exception as e:
+            logger.error(f"HTTP connectivity test failed: {e}")
+    except Exception as e:
+        logger.error(f"Connectivity diagnostics failed: {e}")
+
+# Run connectivity check at startup
+check_connectivity()
+
+# Configure Gemini
+model = None
+try:
+    gemini_api_key = os.getenv('GEMINI_API_KEY')
+    if gemini_api_key:
+        logger.info("Gemini API key found, configuring client")
+        genai.configure(api_key=gemini_api_key)
+        
+        # Test the configuration
+        try:
+            model = genai.GenerativeModel('gemini-1.5-pro-latest')
+            logger.info("Gemini model initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize Gemini model: {e}")
+            model = None
+    else:
+        logger.warning("No Gemini API key found in environment variables")
+        model = None
+except ImportError as e:
+    logger.warning(f"Could not import Google Generative AI package: {e}")
+    model = None
+except Exception as e:
+    logger.error(f"Unexpected error configuring Gemini: {e}")
+    model = None
 
 class DatabaseConnectionManager:
     """Manages database connections and configuration"""
@@ -78,6 +123,53 @@ class GraphDatabaseInitializer:
             )
         )
         logger.info("Neo4j driver initialized")
+        
+        # Initialize circuit breaker for Gemini API
+        self._gemini_failures = 0
+        self._gemini_disabled_until = None
+
+    def _should_use_gemini(self):
+        """Determine if Gemini should be used based on failure history"""
+        if not model:
+            return False
+            
+        if self._gemini_disabled_until:
+            if datetime.now() < self._gemini_disabled_until:
+                logger.info(f"Gemini API temporarily disabled until {self._gemini_disabled_until}")
+                return False
+            # Reset circuit breaker
+            self._gemini_disabled_until = None
+            self._gemini_failures = 0
+            logger.info("Gemini API circuit breaker reset, will try again")
+        
+        return True
+
+    def _call_gemini_with_retry(self, prompt, max_retries=2, timeout=30):
+        """Call Gemini API with retry logic"""
+        if not self._should_use_gemini():
+            return None
+            
+        retries = 0
+        while retries <= max_retries:
+            try:
+                logger.info(f"Calling Gemini API (attempt {retries+1}/{max_retries+1})")
+                response = model.generate_content(prompt, timeout=timeout)
+                # Success, reset failure counter
+                self._gemini_failures = 0
+                return response
+            except Exception as e:
+                retries += 1
+                logger.warning(f"Gemini API call failed (attempt {retries}/{max_retries+1}): {e}")
+                if retries > max_retries:
+                    # Track failures for circuit breaker
+                    self._gemini_failures += 1
+                    if self._gemini_failures >= 5:
+                        # Disable for 30 minutes after 5 consecutive failures
+                        self._gemini_disabled_until = datetime.now() + timedelta(minutes=30)
+                        logger.warning(f"Temporarily disabled Gemini API until {self._gemini_disabled_until}")
+                    raise
+                time.sleep(2 * retries)  # Exponential backoff
+        return None
 
     def _create_indexes(self):
         """Create enhanced indexes in Neo4j"""
@@ -255,8 +347,8 @@ class GraphDatabaseInitializer:
                     'related': []
                 }
 
-            # If Gemini is available, try AI-enhanced processing
-            if model:
+            # Check if we should use Gemini for enhanced processing
+            if self._should_use_gemini():
                 prompt = f"""Return only a raw JSON object with these keys for this expertise list: {expertise_list}
                 {{
                     "standardized_concepts": [],
@@ -267,34 +359,32 @@ class GraphDatabaseInitializer:
                 Return the JSON object only, no markdown formatting, no code fences, no additional text."""
                 
                 try:
-                    response = model.generate_content(prompt)
+                    response = self._call_gemini_with_retry(prompt, max_retries=2, timeout=45)
                         
-                    if not response.text or not response.text.strip():
+                    if not response or not response.text or not response.text.strip():
                         logger.warning("Received empty response from Gemini, using direct mapping")
-                        return {
-                            'concepts': expertise_list,
-                            'areas': [],
-                            'methods': [],
-                            'related': []
-                        }
-
-                    cleaned_response = (response.text
-                                    .replace('```json', '')
-                                    .replace('```JSON', '')
-                                    .replace('```', '')
-                                    .strip())
-                    
-                    parsed = json.loads(cleaned_response)
-                    return {
-                        'concepts': parsed.get('standardized_concepts', expertise_list),
-                        'areas': parsed.get('research_areas', []),
-                        'methods': parsed.get('methods', []),
-                        'related': parsed.get('related_areas', [])
-                    }
+                    else:
+                        cleaned_response = (response.text
+                                        .replace('```json', '')
+                                        .replace('```JSON', '')
+                                        .replace('```', '')
+                                        .strip())
+                        
+                        try:
+                            parsed = json.loads(cleaned_response)
+                            logger.info("Successfully processed expertise with Gemini")
+                            return {
+                                'concepts': parsed.get('standardized_concepts', expertise_list),
+                                'areas': parsed.get('research_areas', []),
+                                'methods': parsed.get('methods', []),
+                                'related': parsed.get('related_areas', [])
+                            }
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Failed to parse Gemini response as JSON: {e}")
                 except Exception as e:
                     logger.warning(f"Error in Gemini API call: {e}, falling back to direct mapping")
             
-            # Fallback to simple heuristic method if AI is unavailable
+            # Fallback to heuristic method 
             logger.info("Using heuristic expertise mapping")
             
             # Simple heuristic categorization
@@ -305,6 +395,9 @@ class GraphDatabaseInitializer:
             method_keywords = ["method", "analysis", "technique", "approach", "framework", "assessment", "evaluation"]
             
             for expertise in expertise_list:
+                if not expertise:
+                    continue
+                    
                 lower_exp = expertise.lower()
                 
                 # Check if it might be a method
@@ -337,7 +430,7 @@ class GraphDatabaseInitializer:
             (expert_id, first_name, last_name, knowledge_expertise, designation, 
             domains, fields, theme, unit, orcid, is_active) = expert_data
             
-            expert_name = f"{first_name} {last_name}"
+            expert_name = f"{first_name} {last_name}" if first_name and last_name else "Unknown Expert"
 
             # Create basic expert node
             session.run("""
@@ -352,11 +445,11 @@ class GraphDatabaseInitializer:
             """, {
                 "id": str(expert_id),
                 "name": expert_name,
-                "designation": designation,
-                "theme": theme,
-                "unit": unit,
-                "orcid": orcid,
-                "is_active": is_active
+                "designation": designation or "",
+                "theme": theme or "",
+                "unit": unit or "",
+                "orcid": orcid or "",
+                "is_active": is_active if is_active is not None else False
             })
 
             # Process expertise if available
@@ -367,6 +460,9 @@ class GraphDatabaseInitializer:
             # Create field relationships if available
             if fields:
                 for field in fields:
+                    if not field:
+                        continue
+                        
                     session.run("""
                         MERGE (f:Field {name: $field})
                         MERGE (e:Expert {id: $expert_id})-[r:SPECIALIZES_IN]->(f)
@@ -380,6 +476,9 @@ class GraphDatabaseInitializer:
             # Create domain relationships if available
             if domains:
                 for domain in domains:
+                    if not domain:
+                        continue
+                        
                     session.run("""
                         MERGE (d:Domain {name: $domain})
                         MERGE (e:Expert {id: $expert_id})-[r:WORKS_IN_DOMAIN]->(d)
