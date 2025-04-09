@@ -99,10 +99,21 @@ async def process_recommendations(user_id: str, redis_client: Redis) -> Dict:
         logger.error(f"Unhandled error in recommendation process for user {user_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Comprehensive recommendation error")
 
-@router.get("/recommend/{user_id}")
+# Add this helper function to your recommend.py
+async def get_user_id(request: Request) -> str:
+    logger.debug("Extracting user ID from request headers")
+    user_id = request.headers.get("X-User-ID")
+    if not user_id:
+        logger.error("Missing required X-User-ID header in request")
+        raise HTTPException(status_code=400, detail="X-User-ID header is required")
+    logger.info(f"User ID extracted successfully: {user_id}")
+    return user_id
+
+# Then modify your endpoint from path parameter to header-based
+@router.get("/recommend")  # Changed from "/recommend/{user_id}"
 async def get_expert_recommendations(
-    user_id: str,
     request: Request,
+    user_id: str = Depends(get_user_id),  # Now getting from header via dependency
     redis_client: Redis = Depends(get_redis)
 ):
     """Get expert recommendations for the user based on their behavior"""
