@@ -388,7 +388,7 @@ class GoogleAutocompletePredictor:
                             break
                     
                     # Sort by score and take top matches
-                    trending_matches.sort(key=lambda x: x[1], reverse=True)
+                    trending_matches.sort(key=lambda x: -x[1], reverse=True)
                     
                     for suggestion, score in trending_matches[:remaining]:
                         # Only add if not already in suggestions
