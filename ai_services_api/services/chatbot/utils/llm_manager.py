@@ -230,7 +230,7 @@ class GeminiLLMManager:
             logger.error(f"Error fetching publications for expert {expert_id}: {e}")
             return []
 
-    def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
+    async def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
         """Format expert data into a structured context for LLM responses."""
         if not experts:
             return "No experts found matching the query."
@@ -279,7 +279,7 @@ class GeminiLLMManager:
             expert_id = expert.get('id')
             if expert_id:
                 try:
-                    # Get linked publications (this would be implemented in a separate method)
+                    # Get linked publications
                     linked_pubs = await self._get_expert_publications(expert_id, limit=3)
                     
                     if linked_pubs:
