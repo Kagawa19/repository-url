@@ -5,12 +5,12 @@ import os
 import time
 
 import redis
+from ai_services_api.services.search.core.personalization import safe_background_task
 from fastapi import HTTPException
 from typing import Any, List, Dict, Optional
 import logging
 from datetime import datetime
 import json
-from ai_services_api.services.message.core.db_pool import get_pooled_connection, return_connection, DatabaseConnection, safe_background_task 
 import uuid
 
 # Add this at the top of expert_search.py
@@ -33,13 +33,154 @@ import uuid
 
 # Configure logger
 logger = logging.getLogger(__name__)
+import os
+import asyncio
+import logging
+import psycopg2
+from typing import Optional, Dict, Any
+from datetime import datetime
+import uuid
+from urllib.parse import urlparse
 
+# Configure logger
+logger = logging.getLogger(__name__)
 
+def get_connection_params():
+    """Get database connection parameters from environment variables."""
+    database_url = os.getenv('DATABASE_URL')
+    
+    if database_url:
+        parsed_url = urlparse(database_url)
+        return {
+            'host': parsed_url.hostname,
+            'port': parsed_url.port,
+            'dbname': parsed_url.path[1:],  # Remove leading '/'
+            'user': parsed_url.username,
+            'password': parsed_url.password,
+            'connect_timeout': 10  # Timeout for connection attempt
+        }
+    else:
+        return {
+            'host': os.getenv('POSTGRES_HOST', 'postgres'),
+            'port': os.getenv('POSTGRES_PORT', '5432'),
+            'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
+            'user': os.getenv('POSTGRES_USER', 'postgres'),
+            'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres'),
+            'connect_timeout': 10  # Timeout for connection attempt
+        }
 
-async def record_search(conn, session_id: str, user_id: str, query: str, results: List[Dict], response_time: float):
-    """Record search analytics in the database."""
+def get_db_connection(dbname=None):
+    """Get a direct database connection."""
+    params = get_connection_params()
+    if dbname:
+        params['dbname'] = dbname 
+    
+    try:
+        conn = psycopg2.connect(**params)
+        logger.info(f"Successfully connected to database: {params['dbname']} at {params['host']}")
+        return conn
+    except psycopg2.OperationalError as e:
+        logger.error(f"Error connecting to the database: {e}")
+        logger.error(f"Connection params: {params}")
+        raise
+
+# Async context manager for database connections
+class AsyncDatabaseConnection:
+    """Async context manager for database connections."""
+    def __init__(self, dbname=None):
+        self.dbname = dbname
+        self.conn = None
+
+    async def __aenter__(self):
+        """Async enter method to get a database connection."""
+        try:
+            # Run database connection in a thread to avoid blocking
+            loop = asyncio.get_event_loop()
+            self.conn = await loop.run_in_executor(
+                None, 
+                get_db_connection, 
+                self.dbname
+            )
+            return self.conn
+        except Exception as e:
+            logger.error(f"Error in async database connection: {e}")
+            raise
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async exit method to close the database connection."""
+        if self.conn:
+            try:
+                # Run connection closing in a thread
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, self.conn.close)
+            except Exception as e:
+                logger.error(f"Error closing database connection: {e}")
+        return False  # Propagate any exceptions
+
+async def get_or_create_session(conn, user_id: str) -> str:
+    """Create a session for tracking user interactions."""
+    logger.info(f"Getting or creating session for user: {user_id}")
+
+    try:
+        # Generate a numeric session ID based on current timestamp
+        session_id = int(str(int(datetime.utcnow().timestamp()))[-8:])
+        logger.debug(f"Generated session ID: {session_id}")
+        
+        cur = conn.cursor()
+        
+        # Insert or retrieve existing session
+        cur.execute("""
+            INSERT INTO search_sessions 
+                (session_id, user_id, start_timestamp, is_active)
+            VALUES (%s, %s, CURRENT_TIMESTAMP, true)
+            ON CONFLICT (session_id) DO NOTHING
+            RETURNING session_id
+        """, (session_id, user_id))
+        
+        result = cur.fetchone()
+        conn.commit()
+        
+        # If no result, it means the session already existed
+        if not result:
+            # Retrieve the existing session
+            cur.execute("""
+                SELECT session_id 
+                FROM search_sessions 
+                WHERE session_id = %s AND user_id = %s
+            """, (session_id, user_id))
+            result = cur.fetchone()
+        
+        logger.debug(f"Session created/retrieved successfully: {session_id}")
+        return str(result[0]) if result else str(session_id)
+    
+    except Exception as e:
+        logger.error(f"Error creating/retrieving session: {str(e)}", exc_info=True)
+        conn.rollback()
+        raise
+    finally:
+        if 'cur' in locals():
+            cur.close()
+
+async def record_search(conn, session_id: str, user_id: str, query: str, results: list, response_time: float):
+    """
+    Record search analytics in the database.
+    
+    Args:
+        conn: Database connection
+        session_id: Session identifier
+        user_id: User identifier
+        query: Search query
+        results: Search results
+        response_time: Time taken to perform the search
+    
+    Returns:
+        int: Search record ID or None if recording failed
+    """
     logger.info(f"Recording search analytics - Session: {session_id}, User: {user_id}")
-    logger.debug(f"Recording search for query: {query} with {len(results)} results")
+    
+    if not conn:
+        logger.error("Cannot record search: No database connection provided")
+        return None
     
     cur = conn.cursor()
     try:
@@ -65,7 +206,6 @@ async def record_search(conn, session_id: str, user_id: str, query: str, results
         logger.debug(f"Created search analytics record with ID: {search_id}")
 
         # Record top 5 expert matches
-        logger.debug(f"Recording top 5 matches from {len(results)} total results")
         for rank, result in enumerate(results[:5], 1):
             cur.execute("""
                 INSERT INTO expert_search_matches
@@ -73,23 +213,94 @@ async def record_search(conn, session_id: str, user_id: str, query: str, results
                 VALUES (%s, %s, %s, %s)
             """, (
                 search_id,
-                result["id"],
+                result.get("id", "unknown"),
                 rank,
                 result.get("score", 0.0)
             ))
-            logger.debug(f"Recorded match - Expert ID: {result['id']}, Rank: {rank}")
+            logger.debug(f"Recorded match - Expert ID: {result.get('id')}, Rank: {rank}")
 
         conn.commit()
         logger.info(f"Successfully recorded all search data for search ID: {search_id}")
         return search_id
         
     except Exception as e:
-        conn.rollback()
         logger.error(f"Error recording search: {str(e)}", exc_info=True)
-        logger.debug(f"Search recording failed: {str(e)}")
-        raise
+        conn.rollback()
+        return None
     finally:
         cur.close()
+
+
+async def record_search(conn, session_id: str, user_id: str, query: str, results: list, response_time: float):
+    """
+    Record search analytics in the database.
+    
+    Args:
+        conn: Database connection
+        session_id: Session identifier
+        user_id: User identifier
+        query: Search query
+        results: Search results
+        response_time: Time taken to perform the search
+    
+    Returns:
+        int: Search record ID or None if recording failed
+    """
+    logger.info(f"Recording search analytics - Session: {session_id}, User: {user_id}")
+    
+    if not conn:
+        logger.error("Cannot record search: No database connection provided")
+        return None
+    
+    cur = conn.cursor()
+    try:
+        # Record search analytics
+        cur.execute("""
+            INSERT INTO search_analytics
+                (search_id, query, user_id, response_time,
+                 result_count, search_type, timestamp)
+            VALUES
+                ((SELECT id FROM search_sessions WHERE session_id = %s),
+                %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            RETURNING id
+        """, (
+            session_id,
+            query,
+            user_id,
+            response_time,
+            len(results),
+            'expert_search'
+        ))
+        
+        search_id = cur.fetchone()[0]
+        logger.debug(f"Created search analytics record with ID: {search_id}")
+
+        # Record top 5 expert matches
+        for rank, result in enumerate(results[:5], 1):
+            cur.execute("""
+                INSERT INTO expert_search_matches
+                    (search_id, expert_id, rank_position, similarity_score)
+                VALUES (%s, %s, %s, %s)
+            """, (
+                search_id,
+                result.get("id", "unknown"),
+                rank,
+                result.get("score", 0.0)
+            ))
+            logger.debug(f"Recorded match - Expert ID: {result.get('id')}, Rank: {rank}")
+
+        conn.commit()
+        logger.info(f"Successfully recorded all search data for search ID: {search_id}")
+        return search_id
+        
+    except Exception as e:
+        logger.error(f"Error recording search: {str(e)}", exc_info=True)
+        conn.rollback()
+        return None
+    finally:
+        cur.close()
+
+
 # search/utils.py
 
 import psycopg2  # or your DB connection library
@@ -153,45 +364,6 @@ async def get_connection_pool():
     params = get_connection_params()
     return await asyncpg.create_pool(**params)
 
-async def get_or_create_session(conn, user_id: str) -> str:
-    """Create a session for tracking user interactions."""
-    logger.info(f"Getting or creating session for user: {user_id}")
-
-    # Get connection from pool if available
-    pool = await get_connection_pool()
-    should_return_to_pool = False
-
-    if pool and conn is None:
-        try:
-            conn = await pool.acquire()
-            should_return_to_pool = True
-        except Exception as e:
-            logger.error(f"Error getting connection from pool: {e}")
-            # Fall back to the provided connection
-
-    try:
-        session_id = int(str(int(datetime.utcnow().timestamp()))[-8:])
-        logger.debug(f"Generated session ID: {session_id}")
-        
-        # Using asyncpg's execute method
-        result = await conn.fetchrow("""
-            INSERT INTO search_sessions 
-                (session_id, user_id, start_timestamp, is_active)
-            VALUES ($1, $2, CURRENT_TIMESTAMP, true)
-            RETURNING session_id
-        """, session_id, user_id)
-
-        # Commit is not necessary with asyncpg, as changes are automatically applied
-        logger.debug(f"Session created successfully with ID: {session_id}")
-        return str(result['session_id'])
-    except Exception as e:
-        logger.error(f"Error creating session: {str(e)}", exc_info=True)
-        logger.debug(f"Session creation failed: {str(e)}")
-        raise
-    finally:
-        # Return connection to pool if we got it from there
-        if should_return_to_pool and pool:
-            await pool.release(conn)
 
 
 async def process_expert_search(query: str, user_id: str, active_only: bool = True, k: int = 5) -> SearchResponse:
@@ -214,7 +386,7 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
     
     try:
         # Use the DatabaseConnection context manager for clean connection handling
-        with DatabaseConnection() as conn:
+        async with AsyncDatabaseConnection() as conn:
             # Create session
             try:
                 session_id = await get_or_create_session(conn, user_id)
@@ -343,7 +515,7 @@ async def process_expert_name_search(
     
     try:
         # Use DatabaseConnection context manager for clean connection handling
-        with DatabaseConnection() as conn:
+        async with AsyncDatabaseConnection() as conn:
             try:
                 session_id = await get_or_create_session(conn, user_id)
                 logger.debug(f"Created session: {session_id}")
@@ -463,7 +635,7 @@ async def process_expert_theme_search(
     
     try:
         # Use DatabaseConnection context manager for clean connection handling
-        with DatabaseConnection() as conn:
+        async with AsyncDatabaseConnection() as conn:
             try:
                 session_id = await get_or_create_session(conn, user_id)
                 logger.debug(f"Created session: {session_id}")
@@ -591,7 +763,7 @@ async def process_advanced_search(
     
     try:
         # Use DatabaseConnection context manager for clean connection handling
-        with DatabaseConnection() as conn:
+        async with AsyncDatabaseConnection() as conn:
             try:
                 session_id = await get_or_create_session(conn, user_id)
                 logger.debug(f"Created session: {session_id}")
@@ -809,7 +981,28 @@ async def _generate_refinements(query: str, results: List[Dict], search_manager)
         }
 # Properly implement background task with safe_background_task
 
-# Modified version of update_trending_suggestions to work with safe_background_task
+# 
+
+# Wrapper function to launch the background task with proper connection handling
+# Async background task wrapper
+async def safe_background_task(func, *args, **kwargs):
+    """
+    Wrapper to safely run background tasks with database connection management.
+    
+    Args:
+        func: Async function to run
+        *args: Positional arguments for the function
+        **kwargs: Keyword arguments for the function
+    """
+    try:
+        # Use async context manager to handle connection
+        async with AsyncDatabaseConnection() as conn:
+            # Call the function with the connection as the first argument
+            return await func(conn, *args, **kwargs)
+    except Exception as e:
+        logger.error(f"Error in background task {func.__name__}: {e}")
+
+# Example implementation of _update_trending_suggestions_task
 async def _update_trending_suggestions_task(conn, partial_query: str, selected_suggestion: str):
     """
     Background task implementation that accepts a connection.
@@ -889,15 +1082,14 @@ async def _update_trending_suggestions_task(conn, partial_query: str, selected_s
                 cur.close()
             except Exception as db_error:
                 logger.error(f"Error recording trending data in database: {db_error}")
-                if hasattr(conn, 'rollback'):
-                    conn.rollback()
+                conn.rollback()
         
         logger.info(f"Updated trending data for suggestion: {normalized_suggestion}")
         
     except Exception as e:
         logger.error(f"Error updating trending suggestions: {e}")
 
-# Wrapper function to launch the background task with proper connection handling
+# Wrapper function to launch the background task
 async def update_trending_suggestions(partial_query: str, selected_suggestion: str):
     """
     Update trending suggestions data - wrapper function that uses safe_background_task
@@ -915,6 +1107,77 @@ async def update_trending_suggestions(partial_query: str, selected_suggestion: s
         )
     except Exception as e:
         logger.error(f"Failed to start trending suggestions update task: {e}")
+
+# Similar pattern for recording search history
+async def _record_search_history_task(conn, user_id: str, query: str, result_count: int):
+    """
+    Record search in user history - implementation for safe_background_task.
+    
+    Args:
+        conn: Database connection (provided by safe_background_task)
+        user_id: User identifier
+        query: The search query
+        result_count: Number of results found
+    """
+    try:
+        # Connect to Redis for search history
+        redis_client = redis.Redis(
+            host=os.getenv('REDIS_HOST', 'localhost'),
+            port=int(os.getenv('REDIS_PORT', 6379)),
+            db=int(os.getenv('REDIS_HISTORY_DB', 3)),
+            decode_responses=True
+        )
+        
+        # Create history entry
+        history_entry = {
+            "query": query,
+            "timestamp": datetime.utcnow().isoformat(),
+            "result_count": result_count
+        }
+        
+        # Add to user-specific history list with limit
+        history_key = f"search_history:{user_id}"
+        redis_client.lpush(history_key, json.dumps(history_entry))
+        redis_client.ltrim(history_key, 0, 99)  # Keep most recent 100 searches
+        redis_client.expire(history_key, 86400 * 30)  # 30-day expiry
+        
+        # Also add to global search history for trending analytics
+        popular_key = "popular_searches"
+        redis_client.zincrby(popular_key, 1, query.lower())
+        redis_client.expire(popular_key, 86400 * 7)  # 7-day expiry for popular searches
+        
+        # Also record in the database if connection is provided
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO user_search_history
+                        (user_id, query, result_count, timestamp)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                """, (user_id, query, result_count))
+                conn.commit()
+                cur.close()
+            except Exception as db_error:
+                logger.error(f"Error recording search history in database: {db_error}")
+                conn.rollback()
+        
+    except Exception as e:
+        logger.error(f"Error recording search history: {e}")
+
+# Wrapper function for search history recording
+async def record_search_history(user_id: str, query: str, result_count: int):
+    """
+    Record search in user history - wrapper that uses safe_background_task.
+    
+    Args:
+        user_id: User identifier
+        query: The search query
+        result_count: Number of results found
+    """
+    try:
+        await safe_background_task(_record_search_history_task, user_id, query, result_count)
+    except Exception as e:
+        logger.error(f"Failed to start search history recording task: {e}")
 
 # Modified version of _record_search_history to work with safe_background_task
 async def _record_search_history_task(conn, user_id: str, query: str, result_count: int):
