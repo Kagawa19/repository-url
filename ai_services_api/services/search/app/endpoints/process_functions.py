@@ -524,15 +524,129 @@ import logging
 import uuid
 import json
 import traceback
-from ai_services_api.services.message.core.db_pool import (
-    DatabaseConnection, get_pooled_connection, return_connection, log_pool_status
-)
+
 from ai_services_api.services.search.core.models import PredictionResponse
 
 # Configure logger
 logger = logging.getLogger(__name__)
 
+import os
+import logging
+import psycopg2
+from typing import Optional, Tuple
+from urllib.parse import urlparse
 
+# Configure logger
+logger = logging.getLogger(__name__)
+
+def get_connection_params():
+    """Get database connection parameters from environment variables."""
+    database_url = os.getenv('DATABASE_URL')
+    
+    if database_url:
+        parsed_url = urlparse(database_url)
+        return {
+            'host': parsed_url.hostname,
+            'port': parsed_url.port,
+            'dbname': parsed_url.path[1:],  # Remove leading '/'
+            'user': parsed_url.username,
+            'password': parsed_url.password,
+            'connect_timeout': 10  # Timeout for connection attempt
+        }
+    else:
+        return {
+            'host': os.getenv('POSTGRES_HOST', 'postgres'),
+            'port': os.getenv('POSTGRES_PORT', '5432'),
+            'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
+            'user': os.getenv('POSTGRES_USER', 'postgres'),
+            'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres'),
+            'connect_timeout': 10  # Timeout for connection attempt
+        }
+
+def get_db_connection(dbname=None):
+    """Get a direct database connection."""
+    params = get_connection_params()
+    if dbname:
+        params['dbname'] = dbname 
+    
+    try:
+        conn = psycopg2.connect(**params)
+        logger.info(f"Successfully connected to database: {params['dbname']} at {params['host']}")
+        return conn
+    except psycopg2.OperationalError as e:
+        logger.error(f"Error connecting to the database: {e}")
+        logger.error(f"Connection params: {params}")
+        raise
+
+def close_connection(conn):
+    """Close the database connection."""
+    if conn:
+        conn.close()
+        logger.info("Connection closed.")
+
+# Simplified replacements for pool-related functions
+def get_pooled_connection() -> Tuple[Optional[psycopg2.extensions.connection], None, bool, str]:
+    """
+    Replacement for pooled connection method.
+    Returns a direct connection, with pool-related parameters set to None/False.
+    
+    Returns:
+        Tuple of (connection, None, False, connection_id)
+    """
+    try:
+        conn = get_db_connection()
+        conn_id = str(id(conn))  # Use connection's memory address as an ID
+        return conn, None, False, conn_id
+    except Exception as e:
+        logger.error(f"Error getting connection: {e}")
+        return None, None, False, ''
+
+def return_connection(conn, pool, using_pool, conn_id):
+    """
+    Replacement for returning connection to pool.
+    For direct connections, this simply closes the connection.
+    """
+    if conn:
+        try:
+            conn.close()
+            logger.info(f"Closed connection {conn_id}")
+        except Exception as e:
+            logger.error(f"Error closing connection {conn_id}: {e}")
+
+def log_pool_status():
+    """
+    Placeholder for pool status logging.
+    Does nothing for direct connections.
+    """
+    # No-op function for compatibility
+    pass
+
+class DatabaseConnection:
+    """
+    Context manager for database connections to maintain compatibility.
+    Uses direct connection instead of pooling.
+    """
+    def __init__(self, dbname=None):
+        self.dbname = dbname
+        self.conn = None
+
+    def __enter__(self):
+        """Enter the runtime context for database connection."""
+        try:
+            self.conn = get_db_connection(self.dbname)
+            return self.conn
+        except Exception as e:
+            logger.error(f"Error creating database connection: {e}")
+            raise
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit the runtime context for database connection."""
+        if self.conn:
+            try:
+                self.conn.close()
+            except Exception as e:
+                logger.error(f"Error closing database connection: {e}")
+        return False  # Propagate any exceptions
 
 def is_publication_title(suggestion: str, partial_query: str) -> bool:
     """
