@@ -5,7 +5,7 @@ import logging
 import json
 import psycopg2
 from redis.asyncio import Redis
-from ai_services_api.services.recommendation.services.expert_matching import ExpertMatchingService  # Import your updated service
+from ai_services_api.services.recommendation.services.expert_matching import ExpertMatchingService
 from ai_services_api.services.message.core.database import get_db_connection
 
 router = APIRouter()
@@ -32,14 +32,8 @@ async def get_redis():
     except Exception as e:
         logger.error(f"Failed to establish Redis connection: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Redis connection failed")
-
-async def get_test_user_id(request: Request) -> str:
-    """Return test user ID with logging"""
-    logger.info(f"Using test user ID: {TEST_USER_ID}")
-    return TEST_USER_ID
-
+    
 async def get_user_id(request: Request) -> str:
-    """Extract user ID from request headers with validation"""
     logger.debug("Extracting user ID from request headers")
     user_id = request.headers.get("X-User-ID")
     if not user_id:
@@ -47,6 +41,12 @@ async def get_user_id(request: Request) -> str:
         raise HTTPException(status_code=400, detail="X-User-ID header is required")
     logger.info(f"User ID extracted successfully: {user_id}")
     return user_id
+
+
+async def get_test_user_id(request: Request) -> str:
+    """Return test user ID with logging"""
+    logger.info(f"Using test user ID: {TEST_USER_ID}")
+    return TEST_USER_ID
 
 async def process_recommendations(user_id: str, redis_client: Redis) -> Dict:
     """Process expert recommendations with comprehensive logging and error handling"""
@@ -71,7 +71,6 @@ async def process_recommendations(user_id: str, redis_client: Redis) -> Dict:
         try:
             logger.info(f"Generating recommendations for user: {user_id}")
             
-            # Using the async method properly
             recommendations = await expert_matching.get_recommendations_for_user(user_id)
             
             response_data = {
@@ -103,18 +102,17 @@ async def process_recommendations(user_id: str, redis_client: Redis) -> Dict:
             raise HTTPException(status_code=500, detail=f"Expert matching error: {str(matching_err)}")
         
         finally:
-            # Use the async close method
-            await expert_matching.close()
+            expert_matching.close()
             logger.debug(f"Expert matching service closed for user {user_id}")
     
     except Exception as e:
         logger.error(f"Unhandled error in recommendation process for user {user_id}: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Recommendation error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Comprehensive recommendation error")
 
-@router.get("/recommend")
+@router.get("/recommend/{user_id}")
 async def get_expert_recommendations(
+    user_id: str,
     request: Request,
-    user_id: str = Depends(get_user_id),
     redis_client: Redis = Depends(get_redis)
 ):
     """Get expert recommendations for the user based on their behavior"""
@@ -124,7 +122,7 @@ async def get_expert_recommendations(
 @router.get("/test/recommend")
 async def test_get_expert_recommendations(
     request: Request,
-    user_id: str = Depends(get_test_user_id),
+    user_id: str = Depends(get_user_id),
     redis_client: Redis = Depends(get_redis)
 ):
     """Test endpoint for getting user recommendations"""
