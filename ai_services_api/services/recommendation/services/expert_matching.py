@@ -3,7 +3,7 @@ import logging
 import json
 from typing import List, Dict, Any
 from datetime import datetime
-from neo4j import GraphDatabase
+from neo4j import AsyncGraphDatabase  # Changed to AsyncGraphDatabase
 from dotenv import load_dotenv
 
 # Enhanced logging configuration
@@ -21,17 +21,17 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-class DatabaseConnectionManager:
+class AsyncDatabaseConnectionManager:
     @staticmethod
-    def get_neo4j_driver():
-        """Create a connection to Neo4j database with enhanced logging and error handling."""
+    async def get_neo4j_driver():
+        """Create an async connection to Neo4j database with enhanced logging and error handling."""
         neo4j_uri = os.getenv('NEO4J_URI', 'bolt://localhost:7687')
         neo4j_user = os.getenv('NEO4J_USER', 'neo4j')
         
         try:
-            logger.info(f"Attempting Neo4j connection to {neo4j_uri}")
+            logger.info(f"Attempting Neo4j async connection to {neo4j_uri}")
             
-            driver = GraphDatabase.driver(
+            driver = AsyncGraphDatabase.driver(
                 neo4j_uri,
                 auth=(
                     neo4j_user,
@@ -40,14 +40,14 @@ class DatabaseConnectionManager:
             )
             
             # Verify connection
-            with driver.session() as session:
-                session.run("MATCH (n) RETURN 1 LIMIT 1")
+            async with driver.session() as session:
+                await session.run("MATCH (n) RETURN 1 LIMIT 1")
             
-            logger.info(f"Neo4j connection established successfully for user: {neo4j_user}")
+            logger.info(f"Neo4j async connection established successfully for user: {neo4j_user}")
             return driver
         
         except Exception as e:
-            logger.error(f"Neo4j Connection Error: Unable to connect to {neo4j_uri}", exc_info=True)
+            logger.error(f"Neo4j Async Connection Error: Unable to connect to {neo4j_uri}", exc_info=True)
             raise
 
 class ExpertMatchingService:
@@ -60,8 +60,10 @@ class ExpertMatchingService:
         self.logger = logging.getLogger(__name__)
         
         try:
-            # Use provided driver or create a new one
-            self._neo4j_driver = driver or DatabaseConnectionManager.get_neo4j_driver()
+            # Use provided driver or create a new one (the driver creation will be async but init isn't)
+            # We'll handle actual connection in the get_recommendations_for_user method
+            self._neo4j_driver = driver
+            self.driver_provided = driver is not None
             self.logger.info("ExpertMatchingService initialized successfully")
         except Exception as e:
             self.logger.error("Failed to initialize ExpertMatchingService", exc_info=True)
@@ -85,8 +87,12 @@ class ExpertMatchingService:
         # Comprehensive query logging
         self.logger.info(f"Generating recommendations for user ID: {user_id}, limit: {limit}")
         
+        # If driver wasn't provided, create it now asynchronously
+        if not self.driver_provided:
+            self._neo4j_driver = await AsyncDatabaseConnectionManager.get_neo4j_driver()
+        
         try:
-            with self._neo4j_driver.session() as session:
+            async with self._neo4j_driver.session() as session:
                 # Verify expert exists and get baseline information
                 debug_query = """
                 MATCH (e:Expert {id: $expert_id})
@@ -102,8 +108,8 @@ class ExpertMatchingService:
                     COUNT(DISTINCT f) as field_count,
                     COUNT(DISTINCT d) as domain_count
                 """
-                debug_result = session.run(debug_query, {"expert_id": user_id})
-                debug_record = debug_result.single()
+                debug_result = await session.run(debug_query, {"expert_id": user_id})
+                debug_record = await debug_result.single()
                 
                 if not debug_record:
                     self.logger.warning(f"No expert found with ID: {user_id}")
@@ -267,8 +273,11 @@ class ExpertMatchingService:
                 }
                 
                 # Run recommendations with the appropriate parameters
-                result = session.run(query, params)
-                similar_experts = [record["result"] for record in result]
+                result = await session.run(query, params)
+                
+                # Need to change how we process results for async
+                records = await result.data()
+                similar_experts = [record["result"] for record in records]
                 
                 # Performance and result logging
                 end_time = datetime.utcnow()
@@ -296,11 +305,11 @@ class ExpertMatchingService:
             )
             return []
 
-    def close(self):
-        """Close database connections with logging"""
+    async def close(self):
+        """Close database connections with logging (async version)"""
         try:
-            if self._neo4j_driver:
-                self._neo4j_driver.close()
+            if not self.driver_provided and self._neo4j_driver:
+                await self._neo4j_driver.close()
                 self.logger.info("Neo4j connection closed successfully")
         except Exception as e:
             self.logger.error(f"Error closing Neo4j connection: {e}", exc_info=True)
