@@ -13,6 +13,7 @@ import math
 import asyncio
 
 import json
+from ai_services_api.services.search.core.database_predictor import DatabaseSuggestionGenerator
 import time
 import aiohttp
 import asyncio
@@ -155,7 +156,8 @@ class GoogleAutocompletePredictor:
             self.cache_ttl = 3600  # 1 hour cache lifetime
             self.cache_maxsize = 1000  # Maximum cache entries
             self.suggestion_cache = TTLCache(maxsize=self.cache_maxsize, ttl=self.cache_ttl)
-            
+            self.suggestion_generator = DatabaseSuggestionGenerator(connection_params)
+    
             # Create thread pool for CPU-bound tasks
             self.cpu_executor = ThreadPoolExecutor(max_workers=4)
             
@@ -946,8 +948,8 @@ class GoogleAutocompletePredictor:
 
     async def predict(self, partial_query: str, limit: int = 10, user_id: str = None) -> List[Dict[str, Any]]:
         """
-        Generate search suggestions with optimized parallel processing, latency control,
-        and adaptive response strategies that follow Google-like pattern prioritization.
+        Generate search suggestions with optimized parallel processing, 
+        database-driven suggestion generation, and adaptive response strategies.
         
         Args:
             partial_query: The partial query to get suggestions for
@@ -976,67 +978,31 @@ class GoogleAutocompletePredictor:
             
             # Create tasks for parallel execution
             cache_task = asyncio.create_task(self._check_cache(cache_key))
-            pattern_task = asyncio.create_task(self._generate_pattern_suggestions(normalized_query, limit))
+            
+            # Simultaneously generate database-driven suggestions
+            database_suggestions_task = asyncio.create_task(
+                self.suggestion_generator.generate_suggestions(
+                    normalized_query, 
+                    limit=limit * 2,  # Generate more to allow filtering
+                    context=None  # Adjust context if needed
+                )
+            )
             
             # First wait for cache - it's fastest
             cached_suggestions = await cache_task
+            
+            # Also get database suggestions
+            database_suggestions = await database_suggestions_task
+            
+            # Combine all suggestions
+            all_suggestions = []
+            
+            # Add cached suggestions first if available
             if cached_suggestions:
-                # Even if we have cached suggestions, filter them to prioritize prefix matches
-                direct_completions = []
-                related_suggestions = []
-                
-                for suggestion in cached_suggestions:
-                    if suggestion.get("text", "").lower().startswith(normalized_query.lower()):
-                        suggestion["type"] = "completion"
-                        direct_completions.append(suggestion)
-                    elif normalized_query.lower() in suggestion.get("text", "").lower():
-                        suggestion["type"] = "related"
-                        related_suggestions.append(suggestion)
-                
-                # Sort by score within each group
-                direct_completions.sort(key=lambda x: x.get("score", 0), reverse=True)
-                related_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
-                
-                # Prioritize direct completions
-                filtered_suggestions = direct_completions[:int(limit * 0.7)]
-                remaining_slots = limit - len(filtered_suggestions)
-                
-                if remaining_slots > 0 and related_suggestions:
-                    filtered_suggestions.extend(related_suggestions[:remaining_slots])
-                
-                processing_time = time.time() - start_time
-                self._update_latency_metric(processing_time)
-                self.logger.info(f"Returning filtered cached suggestions for '{normalized_query}' ({processing_time:.3f}s)")
-                return filtered_suggestions[:limit]
+                all_suggestions.extend(cached_suggestions)
             
-            # Next get pattern suggestions - they're next fastest
-            pattern_suggestions = await pattern_task
-            
-            # Start faiss task only after checking cache
-            faiss_task = asyncio.create_task(self._generate_faiss_suggestions(normalized_query, limit))
-            
-            # Start personalization in background
-            personalization_task = None
-            if user_id:
-                try:
-                    personalization_task = asyncio.create_task(
-                        self._personalize_suggestions_async(pattern_suggestions, user_id, normalized_query)
-                    )
-                except Exception as e:
-                    self.logger.error(f"Error starting personalization: {e}")
-            
-            # Wait for FAISS with timeout
-            try:
-                faiss_suggestions = await asyncio.wait_for(faiss_task, timeout=0.3)
-                # Combine with pattern suggestions
-                all_suggestions = pattern_suggestions + faiss_suggestions
-            except (asyncio.TimeoutError, Exception) as e:
-                # Just use pattern suggestions if FAISS times out or errors
-                if isinstance(e, asyncio.TimeoutError):
-                    self.logger.warning(f"FAISS search timed out for '{normalized_query}'")
-                else:
-                    self.logger.error(f"FAISS search error: {e}")
-                all_suggestions = pattern_suggestions
+            # Add database suggestions
+            all_suggestions.extend(database_suggestions)
             
             # Filter and prioritize suggestions like Google
             direct_completions = []
@@ -1044,14 +1010,10 @@ class GoogleAutocompletePredictor:
             
             for suggestion in all_suggestions:
                 suggestion_text = suggestion.get("text", "").lower()
+                suggestion_score = suggestion.get("score", 0.5)
                 
-                # Let type field override if available
-                if suggestion.get("type") == "completion":
-                    direct_completions.append(suggestion)
-                elif suggestion.get("type") == "related":
-                    related_suggestions.append(suggestion)
-                # Otherwise decide based on text matching
-                elif suggestion_text.startswith(normalized_query.lower()):
+                # Prefix match priority
+                if suggestion_text.startswith(normalized_query.lower()):
                     suggestion["type"] = "completion"
                     direct_completions.append(suggestion)
                 elif normalized_query.lower() in suggestion_text:
@@ -1079,14 +1041,17 @@ class GoogleAutocompletePredictor:
             except Exception as e:
                 self.logger.error(f"Error in background cache update: {e}")
             
-            # Apply personalization later if available
-            if personalization_task:
+            # Apply personalization if user_id provided
+            if user_id:
                 try:
-                    asyncio.create_task(
-                        self._apply_personalization_later(combined_suggestions, personalization_task, user_id, normalized_query, limit)
+                    personalized_suggestions = await self._personalize_suggestions_async(
+                        combined_suggestions, 
+                        user_id, 
+                        normalized_query
                     )
+                    combined_suggestions = personalized_suggestions
                 except Exception as e:
-                    self.logger.error(f"Error in background personalization: {e}")
+                    self.logger.error(f"Personalization error: {e}")
             
             processing_time = time.time() - start_time
             self._update_latency_metric(processing_time)
@@ -1095,23 +1060,32 @@ class GoogleAutocompletePredictor:
             )
             
             return combined_suggestions[:limit]
-                
+                    
         except Exception as e:
             processing_time = time.time() - start_time
             self._update_latency_metric(processing_time)
             self.logger.error(f"Error predicting suggestions: {e}")
             
-            # Ensure we always return something
+            # Fallback to database suggestions if everything else fails
             self.metrics["fallbacks_used"] += 1
-            pattern_suggestions = await self._generate_pattern_suggestions(normalized_query, limit)
+            try:
+                fallback_suggestions = await self.suggestion_generator.generate_suggestions(
+                    normalized_query, 
+                    limit=limit,
+                    context=None
+                )
+                
+                # Filter fallback suggestions to prioritize prefix matches
+                direct_matches = [
+                    s for s in fallback_suggestions 
+                    if s.get("text", "").lower().startswith(normalized_query.lower())
+                ]
+                
+                return direct_matches[:limit] or fallback_suggestions[:limit]
             
-            # Filter even the fallback suggestions to prioritize prefix matches
-            direct_matches = [s for s in pattern_suggestions if s.get("text", "").lower().startswith(normalized_query.lower())]
-            if direct_matches:
-                return direct_matches[:limit]
-            
-            return pattern_suggestions[:limit]
-
+            except Exception as fallback_error:
+                self.logger.error(f"Fallback suggestion generation failed: {fallback_error}")
+                return []
     def _calculate_text_overlap_score(self, query: str, text: str) -> float:
         """Calculate text overlap score for boosting relevant matches."""
         query_lower = query.lower()

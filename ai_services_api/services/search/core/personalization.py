@@ -431,8 +431,8 @@ async def personalize_suggestions(
             if not text.startswith(partial_query.lower()):
                 continue
                 
-            base_score = suggestion.get("score", 0.5)
-            source = suggestion.get("source", "")
+            base_score = suggestion.get("score", suggestion.get("original_score", 0.5))
+            source = suggestion.get("source", suggestion.get("type", ""))
             
             # Calculate boost based on term frequency in user history
             history_boost = 0.0
