@@ -487,8 +487,43 @@ class GraphDatabaseInitializer:
             logger.error(f"Error creating semantic relationships for expert {expert_id}: {e}")
             raise
 
-    def initialize_graph(self):
+    # Modified method to be asynchronous
+    async def initialize_graph(self):
         """Initialize the graph with experts and their relationships"""
+        try:
+            # Create indexes first
+            self._create_indexes()
+            
+            # Fetch experts data
+            experts_data = self._fetch_experts_data()
+            
+            if not experts_data:
+                logger.warning("No experts data found to process")
+                return False
+
+            # Process each expert
+            with self._neo4j_driver.session() as session:
+                for expert_data in experts_data:
+                    try:
+                        self.create_expert_node(session, expert_data)
+                    except Exception as e:
+                        logger.error(f"Error processing expert data: {e}")
+                        continue
+
+                # Add adaptive relationships based on historical data
+                search_patterns, message_patterns = self._process_historical_data()
+                self._create_adaptive_relationships(session, search_patterns, message_patterns)
+
+            logger.info("Graph initialization complete with adaptive relationships!")
+            return True
+
+        except Exception as e:
+            logger.error(f"Graph initialization failed: {e}")
+            return False
+
+    # Non-async version for direct calls
+    def initialize_graph_sync(self):
+        """Initialize the graph with experts and their relationships - synchronous version"""
         try:
             # Create indexes first
             self._create_indexes()
