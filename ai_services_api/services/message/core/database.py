@@ -32,7 +32,7 @@ def get_connection_params():
     else:
         in_docker = os.getenv('DOCKER_ENV', 'false').lower() == 'true'
         return {
-            'host': os.getenv('POSTGRES_HOST', 'postgres'),  # Default to 'postgres' in Docker
+            'host': os.getenv('POSTGRES_HOST', 'postgres'),  # Changed from 'localhost' to 'postgres'
             'port': os.getenv('POSTGRES_PORT', '5432'),
             'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
             'user': os.getenv('POSTGRES_USER', 'postgres'),
