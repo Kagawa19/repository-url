@@ -1195,6 +1195,18 @@ class GeminiLLMManager:
                 'clarification': None
             }
             
+            # Check for expert names in the query (high priority)
+            # Look for capitalized words that might be names
+            name_pattern = r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b'
+            name_matches = re.findall(name_pattern, original_message)
+            
+            # If we have a name match and the query contains expert-related terms
+            if name_matches and any(term in message for term in ["expert", "researcher", "profile", "about", "who is", "looking for"]):
+                logger.info(f"Detected expert name request: {name_matches[0]}")
+                result['intent'] = QueryIntent.EXPERT
+                result['confidence'] = 0.95  # High confidence for expert name requests
+                return result
+            
             # First check for specific publication title requests - these should be highest priority
             specific_pub_patterns = [
                 r'summarize the publication (.+)',
@@ -1215,6 +1227,28 @@ class GeminiLLMManager:
                     logger.info(f"Detected specific publication title request: {match.group(1)}")
                     result['intent'] = QueryIntent.PUBLICATION
                     result['confidence'] = 0.95  # High confidence for specific publication requests
+                    return result
+            
+            # Check for expert-specific requests
+            expert_patterns = [
+                r'expert (?:on|in|about) (.+)',
+                r'researcher (?:on|in|about) (.+)',
+                r'expert profile',
+                r'researcher profile',
+                r'experts at aphrc',
+                r'researchers at aphrc',
+                r'find expert',
+                r'find researcher',
+                r'aphrc staff',
+                r'team member',
+                r'specialist in'
+            ]
+            
+            for pattern in expert_patterns:
+                if re.search(pattern, message, re.IGNORECASE):
+                    logger.info(f"Detected expert request pattern: {pattern}")
+                    result['intent'] = QueryIntent.EXPERT
+                    result['confidence'] = 0.9
                     return result
             
             # Check for publication list requests as a high-priority pattern
@@ -1284,6 +1318,20 @@ class GeminiLLMManager:
                     (r'site map', 0.9),
                     (r'homepage', 0.9),
                     (r'menu', 0.8)
+                ],
+                QueryIntent.EXPERT: [
+                    (r'expert', 1.0),
+                    (r'researcher', 1.0),
+                    (r'scientist', 0.9),
+                    (r'staff member', 0.9),
+                    (r'team member', 0.9),
+                    (r'faculty', 0.8),
+                    (r'who works on', 0.8),
+                    (r'who studies', 0.8),
+                    (r'who researches', 0.8),
+                    (r'specialist in', 0.8),
+                    (r'expertise in', 0.8),
+                    (r'person who', 0.7)
                 ]
             }
             
@@ -1322,13 +1370,22 @@ class GeminiLLMManager:
                         result['intent'] = QueryIntent.PUBLICATION
                         result['confidence'] = 0.7  # Reasonable confidence for publication-related terms
                         return result
+                        
+                # Check for any expert-related terms to bias toward expert intent
+                for expert_term in ["expert", "researcher", "profile", "scientist", "staff"]:
+                    if expert_term in message:
+                        logger.info(f"Low confidence but found expert term '{expert_term}', defaulting to expert intent")
+                        result['intent'] = QueryIntent.EXPERT
+                        result['confidence'] = 0.7  # Reasonable confidence for expert-related terms
+                        return result
                 
-                # If no publication terms and confidence is truly low, ask for clarification
+                # If no specific terms and confidence is truly low, ask for clarification
                 logger.info(f"Low confidence ({max_score}) for intent detection, requesting clarification")
                 result['clarification'] = (
                     "Could you clarify what you're looking for? For example:\n"
                     "- For publications: 'Find papers about maternal health' or 'List 5 publications from 2020'\n"
-                    "- For website navigation: 'Where can I find research datasets?' or 'How do I access reports?'"
+                    "- For website navigation: 'Where can I find research datasets?' or 'How do I access reports?'\n"
+                    "- For expert profiles: 'Tell me about Dr. John Smith' or 'Find experts in maternal health'"
                 )
             
             # Set final result
