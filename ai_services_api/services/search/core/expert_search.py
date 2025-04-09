@@ -10,7 +10,7 @@ from typing import Any, List, Dict, Optional
 import logging
 from datetime import datetime
 import json
-from ai_services_api.services.message.core.db_pool import get_pooled_connection, return_connection, DatabaseConnection, safe_background_task
+from ai_services_api.services.message.core.db_pool import get_pooled_connection, return_connection, DatabaseConnection, safe_background_task 
 import uuid
 
 # Add this at the top of expert_search.py
@@ -21,6 +21,7 @@ from ai_services_api.services.search.indexing.index_creator import ExpertSearchI
 from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
 from ai_services_api.services.message.core.database import get_db_connection
 from ai_services_api.services.search.core.models import ExpertSearchResult, SearchResponse
+
 from fastapi import HTTPException
 from typing import Any, List, Dict, Optional
 import logging
@@ -89,6 +90,54 @@ async def record_search(conn, session_id: str, user_id: str, query: str, results
         raise
     finally:
         cur.close()
+# search/utils.py
+
+import psycopg2  # or your DB connection library
+from typing import List, Dict
+
+def fetch_suggestions_from_db(conn, search_input: str) -> List[Dict]:
+    """
+    Queries resources and experts tables for matches based on search_input.
+    This replaces reliance on history when user starts typing.
+
+    Args:
+        db_conn: Active database connection
+        search_input (str): The user’s typed search string
+
+    Returns:
+        List[Dict]: Combined list of matching suggestions
+    """
+    curr = conn.cursor()
+
+    query = """
+    SELECT 'resource' AS type, r.id, r.title AS label
+    FROM resources_resource r
+    WHERE 
+        r.title ILIKE %s OR
+        r.abstract ILIKE %s OR
+        r.summary ILIKE %s OR
+        r.description ILIKE %s
+
+    UNION
+
+    SELECT 'expert' AS type, e.id, 
+           CONCAT(e.first_name, ' ', e.last_name, ' - ', COALESCE(e.designation, '')) AS label
+    FROM experts_expert e
+    WHERE 
+        e.first_name ILIKE %s OR
+        e.last_name ILIKE %s OR
+        e.designation ILIKE %s OR
+        e.bio ILIKE %s
+
+    ORDER BY label ASC
+    LIMIT 15;
+    """
+
+    like_query = f"%{search_input}%"
+    curr.execute(query, [like_query] * 8)
+    results = curr.fetchall()
+
+    return [{"type": row[0], "id": row[1], "label": row[2]} for row in results]
 
 
 # Create a connection pool as a module-level singleton
@@ -161,10 +210,9 @@ async def get_or_create_session(conn, user_id: str) -> str:
         if should_return_to_pool and pool:
             pool.putconn(conn)
 
-# Optimized version of process_expert_search
 async def process_expert_search(query: str, user_id: str, active_only: bool = True, k: int = 5) -> SearchResponse:
     """
-    Process expert search with optimized connection handling using DatabaseConnection.
+    Process expert search, returning suggestions for user input and performing full search.
     
     Args:
         query (str): Search query
@@ -173,7 +221,7 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
         k (int): Number of results to return
     
     Returns:
-        SearchResponse: Search results including optional refinements
+        SearchResponse: Search results including suggested matches
     """
     logger.info(f"Processing expert search - Query: {query}, User: {user_id}")
     
@@ -196,19 +244,22 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
             is_complex_query = len(query.split()) > 3 or any(c in query for c in [':', '&', '|', '"', "'"])
             
             try:
-                search_manager = ExpertSearchIndexManager()
-                
-                # For complex queries, run in thread pool to avoid blocking
-                if is_complex_query:
+                # Search execution (autocomplete vs full search)
+                if query:
+                    # If query is relatively short/simple, check for autocomplete suggestions first
                     loop = asyncio.get_event_loop()
-                    results = await loop.run_in_executor(
-                        None,  # Use default executor
-                        lambda: search_manager.search_experts(query, k=k, active_only=active_only)
+                    suggestions = await loop.run_in_executor(
+                        None,  # Default executor
+                        lambda: fetch_suggestions_from_db(conn, query)
                     )
-                else:
-                    # For simple queries, run directly
-                    results = search_manager.search_experts(query, k=k, active_only=active_only)
                     
+                    # If query is complex, perform full search for experts and resources
+                    if is_complex_query:
+                        search_manager = ExpertSearchIndexManager()
+                        results = search_manager.search_experts(query, k=k, active_only=active_only)
+                    else:
+                        results = suggestions  # For simple queries, provide suggestions immediately
+
                 logger.info(f"Search found {len(results)} results")
                 
                 # Append search to user history in background with safe_background_task
@@ -229,17 +280,17 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
             try:
                 formatted_results = [
                     ExpertSearchResult(
-                        id=str(result.get('id', 'unknown')),
-                        first_name=result.get('first_name', ''),
-                        last_name=result.get('last_name', ''),
-                        designation=result.get('designation', ''),
-                        theme=result.get('theme', ''),
-                        unit=result.get('unit', ''),
-                        contact=result.get('contact', ''),
-                        is_active=result.get('is_active', True),
-                        score=result.get('score'),
-                        bio=result.get('bio'),
-                        knowledge_expertise=result.get('knowledge_expertise', [])
+                        id=str(result.get('id', 'unknown')) if isinstance(result, dict) else result[1],
+                        first_name=result.get('first_name', '') if isinstance(result, dict) else '',
+                        last_name=result.get('last_name', '') if isinstance(result, dict) else '',
+                        designation=result.get('designation', '') if isinstance(result, dict) else '',
+                        theme=result.get('theme', '') if isinstance(result, dict) else '',
+                        unit=result.get('unit', '') if isinstance(result, dict) else '',
+                        contact=result.get('contact', '') if isinstance(result, dict) else '',
+                        is_active=result.get('is_active', True) if isinstance(result, dict) else True,
+                        score=result.get('score') if isinstance(result, dict) else 0.0,
+                        bio=result.get('bio', '') if isinstance(result, dict) else '',
+                        knowledge_expertise=result.get('knowledge_expertise', []) if isinstance(result, dict) else []
                     ) for result in results
                 ]
             except Exception as format_error:
@@ -252,55 +303,13 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
                 except Exception as record_error:
                     logger.error(f"Error recording search: {record_error}", exc_info=True)
             
-            # Generate refinement suggestions in parallel with returning results
-            refinements = {}
-            refinement_future = asyncio.create_task(
-                _generate_refinements(query, results, search_manager)
-            )
-            
-            # Use shared memory cache for repeated queries
-            cache_key = f"refinements:{hashlib.md5(query.encode()).hexdigest()}"
-            try:
-                # Check if we have this in cache
-                if hasattr(search_manager, 'redis_client'):
-                    cached_refinements = search_manager.redis_client.get(cache_key)
-                    if cached_refinements:
-                        refinements = json.loads(cached_refinements)
-            except Exception as cache_error:
-                logger.error(f"Cache error: {cache_error}")
-                
-            # If no refinements from cache, wait for the future (with timeout)
-            if not refinements:
-                try:
-                    refinements = await asyncio.wait_for(refinement_future, timeout=0.2)
-                    # Cache the result
-                    if hasattr(search_manager, 'redis_client') and refinements:
-                        try:
-                            search_manager.redis_client.setex(
-                                cache_key,
-                                1800,  # 30 minute cache
-                                json.dumps(refinements)
-                            )
-                        except Exception as cache_error:
-                            logger.error(f"Cache storage error: {cache_error}")
-                except asyncio.TimeoutError:
-                    logger.warning("Refinement generation timed out")
-                    # Use empty default
-                    refinements = {
-                        "filters": [],
-                        "related_queries": [],
-                        "expertise_areas": []
-                    }
-                except Exception as refine_error:
-                    logger.error(f"Error waiting for refinements: {refine_error}")
-            
-            # Prepare response
+            # Prepare response with formatted results
             response = SearchResponse(
                 total_results=len(formatted_results),
                 experts=formatted_results,
                 user_id=user_id,
                 session_id=session_id,
-                refinements=refinements
+                refinements={}  # We are not generating refinements now
             )
             
             # Log total processing time
@@ -319,12 +328,9 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
             experts=[],
             user_id=user_id,
             session_id=session_id,
-            refinements={
-                "filters": [],
-                "related_queries": [],
-                "expertise_areas": []
-            }
+            refinements={}
         )
+
 
 # Optimized version of process_expert_name_search
 async def process_expert_name_search(

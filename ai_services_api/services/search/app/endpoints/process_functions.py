@@ -40,10 +40,6 @@ async def process_query_prediction(
     """Process query prediction with improved connection pooling."""
     logger.info(f"Processing query prediction - Query: '{partial_query}', User: {user_id}, Context: {context}")
     
-    valid_contexts = ["name", "theme", "designation", None]
-    if context and context not in valid_contexts[:-1]:
-        raise ValueError(f"Invalid context. Must be one of {', '.join(valid_contexts[:-1])}")
-    
     # Initial connection values
     conn = None
     pool = None
@@ -57,9 +53,8 @@ async def process_query_prediction(
     try:
         # First check if we can get results from cache
         redis = await get_redis()
-        cache_key = f"google_autocomplete:{context or ''}:{partial_query}"
+        cache_key = f"google_autocomplete:{partial_query}"  # context removed from key
         
-        # Try to get cached result first to avoid database connections if possible
         cache_hit = False
         if redis:
             try:
@@ -72,21 +67,14 @@ async def process_query_prediction(
                     confidence_scores = cached_data.get("confidence_scores", [])
                     predictions = [s["text"] for s in suggestion_objects]
                     
-                    if context:
-                        predictions, confidence_scores = filter_predictions_by_context(
-                            predictions, confidence_scores, partial_query, context
-                        )
-                    
-                    # We'll need a DB connection for personalization
+                    # Get DB connection for personalization
                     logger.info("Getting connection for personalization after cache hit")
                     conn, pool, using_pool, conn_id = get_pooled_connection()
                     
                     try:
-                        # Get session ID
                         session_id = await get_or_create_session(conn, user_id)
                         logger.debug(f"Created session: {session_id}")
                         
-                        # Personalize suggestions
                         personalized_suggestions = await personalize_suggestions(
                             [{"text": pred, "score": score} for pred, score in zip(predictions, confidence_scores)],
                             user_id, 
@@ -95,7 +83,6 @@ async def process_query_prediction(
                         predictions = [s["text"] for s in personalized_suggestions]
                         confidence_scores = [s.get("score", 0.5) for s in personalized_suggestions]
                         
-                        # Record in database
                         if predictions:
                             await record_prediction(
                                 conn,
@@ -111,17 +98,14 @@ async def process_query_prediction(
                         logger.error(f"Personalization error for cached results: {personalize_error}")
                         logger.error(f"Stacktrace: {traceback.format_exc()}")
                     finally:
-                        # Always return the connection when done
                         if conn:
                             logger.info(f"Returning connection {conn_id} after cache personalization")
                             return_connection(conn, pool, using_pool, conn_id)
-                            conn = None  # Prevent duplicate returns
+                            conn = None
                     
-                    # Generate refinements
                     refinements_dict = generate_predictive_refinements(partial_query, predictions)
                     refinements_list = extract_refinements_list(refinements_dict)
                     
-                    # Return cache results
                     if cache_hit:
                         logger.info(f"Returning cached results for '{partial_query}' ({len(predictions)} predictions)")
                         return PredictionResponse(
@@ -136,32 +120,21 @@ async def process_query_prediction(
                 logger.error(f"Cache retrieval error: {cache_error}")
                 logger.error(f"Cache error stacktrace: {traceback.format_exc()}")
         
-        # No cache hit, need to get fresh data
+        # No cache hit
         logger.info("No cache hit, getting fresh predictions")
         
-        # Use the context manager for database connection
         with DatabaseConnection() as conn:
-            # The context manager will automatically return the connection when done
             logger.info("Using DatabaseConnection context manager")
             
             try:
-                # Get session ID
                 session_id = await get_or_create_session(conn, user_id)
                 logger.debug(f"Created session: {session_id}")
                 
-                # Get predictions from API
                 predictor = await get_predictor()
                 suggestion_objects = await predictor.predict(partial_query, limit=10)
                 predictions = [s["text"] for s in suggestion_objects]
                 confidence_scores = [s.get("score", 0.5) for s in suggestion_objects]
                 
-                # Apply context filtering if needed
-                if context:
-                    predictions, confidence_scores = filter_predictions_by_context(
-                        predictions, confidence_scores, partial_query, context
-                    )
-                
-                # Personalize suggestions
                 try:
                     personalized_suggestions = await personalize_suggestions(
                         [{"text": pred, "score": score} for pred, score in zip(predictions, confidence_scores)],
@@ -176,7 +149,6 @@ async def process_query_prediction(
                 
                 logger.debug(f"Generated {len(predictions)} predictions: {predictions}")
                 
-                # Cache the results
                 if redis and predictions:
                     try:
                         cache_data = {
@@ -191,11 +163,9 @@ async def process_query_prediction(
                     except Exception as cache_error:
                         logger.error(f"Cache storage error: {cache_error}")
                 
-                # Generate refinements
                 refinements_dict = generate_predictive_refinements(partial_query, predictions)
                 refinements_list = extract_refinements_list(refinements_dict)
                 
-                # Record prediction in the database
                 if predictions:
                     await record_prediction(
                         conn,
@@ -223,12 +193,10 @@ async def process_query_prediction(
     except Exception as e:
         logger.exception(f"Unexpected error in process_query_prediction: {e}")
         
-        # Initialize empty lists for fallback response
         predictions = []
         confidence_scores = []
         refinements_list = []
         
-        # Log final pool status
         log_pool_status()
         
         return PredictionResponse(
@@ -239,7 +207,6 @@ async def process_query_prediction(
             total_suggestions=len(predictions)
         )
     finally:
-        # Log final pool status
         log_pool_status()
 
 # Helper function to extract refinements list
