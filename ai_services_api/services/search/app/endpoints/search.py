@@ -18,6 +18,7 @@ import uuid
 from ai_services_api.services.search.core.models import PredictionResponse, SearchResponse
 from ai_services_api.services.search.app.endpoints.process_functions import process_query_prediction, process_query_prediction
 from ai_services_api.services.search.core.expert_search import (
+    process_advanced_search,
     process_expert_name_search,
     process_expert_theme_search,
     process_expert_designation_search
@@ -152,7 +153,7 @@ async def advanced_search(
             )
         
         # Fallback to a general search if no specific type is matched
-        return await process_expert_search(
+        return await process_advanced_search(
             query, 
             user_id, 
             active_only, 
