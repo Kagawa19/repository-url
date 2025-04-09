@@ -329,51 +329,97 @@ class MessageHandler:
             raise
 
     def _format_publication_response(self, text):
-        """Special formatter for publication list responses."""
-        # First, extract the introductory text
-        intro_match = re.match(r'^(.*?)\s*\d+\.', text, re.DOTALL)
+        """Special formatter for publication list responses that creates clean, structured output."""
+        # Remove markdown heading symbols
+        text = re.sub(r'#{1,6}\s*', '', text)
+        
+        # Fix spaces in DOI links
+        text = re.sub(r'(https?://doi\.org/\s*)([\d\.]+(/\s*)?[^\s\)]*)', lambda m: m.group(1).replace(' ', '') + m.group(2).replace(' ', ''), text)
+        text = re.sub(r'(10\.\s*\d+\s*/\s*[^\s\)]+)', lambda m: m.group(1).replace(' ', ''), text)
+        
+        # Remove duplicate content at the end
+        duplicate_patterns = [
+            r'These publications address different aspects of.*?\.',
+            r'Research Domains:.*?(?=\n|\Z)',
+            r'Summary:.*?(?=\n|\Z)'
+        ]
+        
+        for pattern in duplicate_patterns:
+            matches = list(re.finditer(pattern, text))
+            if len(matches) > 1:
+                # Keep only the first instance
+                first_match_end = matches[0].end()
+                for match in matches[1:]:
+                    text = text[:match.start()] + text[match.end():]
+                    
+        # Extract the introduction
+        intro_match = re.search(r'^(.*?)(?=\d+\.|$)', text, re.DOTALL)
         intro = intro_match.group(1).strip() if intro_match else ""
         
-        # Split by numbered items
-        parts = re.split(r'(\d+\.)', text)
-        if len(parts) < 3:
-            return text  # Not a properly structured list
+        # Split publications by numbered items
+        items = re.split(r'(\d+\.)', text)
+        if len(items) < 3:  # Not a properly structured list
+            return text
         
+        # Start with the introduction
         formatted_parts = [intro] if intro else []
         
-        # Rebuild with proper formatting
-        current_item = ""
-        for i, part in enumerate(parts):
-            if re.match(r'\d+\.', part):
-                # Start of a new item
-                if current_item:
-                    formatted_parts.append(current_item.strip())
-                current_item = part
-            elif i > 0 and re.match(r'\d+\.', parts[i-1]):
-                # Content of an item
-                lines = []
+        # Process each publication
+        current_pub = ""
+        for i, item in enumerate(items):
+            if re.match(r'\d+\.', item):
+                # Start of a new publication
+                if current_pub:
+                    formatted_parts.append(current_pub.strip())
+                current_pub = item
+            elif i > 0 and re.match(r'\d+\.', items[i-1]):
+                # Content following a publication number
+                # Extract and format key fields
+                content = item.strip()
                 
-                # Format title
-                title_match = re.search(r'(.*?)(Authors:|$)', part, re.DOTALL)
-                if title_match:
-                    title = title_match.group(1).strip()
-                    lines.append(title)
+                # Format the title
+                title_match = re.search(r'^(.+?)(?=\s*-\s*Authors:|\s*-\s*Publication|\s*-\s*DOI:|\s*-\s*Research|\s*-\s*Summary:|\Z)', content, re.DOTALL)
+                title = title_match.group(1).strip() if title_match else content
                 
-                # Format other fields
-                for field in ["Authors:", "Publication Year:", "DOI:", "Research Domains:"]:
-                    field_match = re.search(f'({field})(.*?)(?=(Authors:|Publication Year:|DOI:|Research Domains:|$))', part, re.DOTALL)
-                    if field_match:
-                        field_content = field_match.group(2).strip()
-                        lines.append(f"{field} {field_content}")
+                # Build structured output with fields aligned
+                lines = [title]
                 
-                current_item += "\n" + "\n".join(lines)
+                # Extract each field
+                field_patterns = [
+                    (r'-\s*Authors:\s*(.+?)(?=\s*-\s*|\Z)', "Authors: "),
+                    (r'-\s*Publication Year:\s*(.+?)(?=\s*-\s*|\Z)', "Publication Year: "),
+                    (r'-\s*DOI:\s*\[?(.+?)\]?(?=\s*-\s*|\Z)', "DOI: ")
+                ]
+                
+                for pattern, field_name in field_patterns:
+                    match = re.search(pattern, content, re.DOTALL)
+                    if match:
+                        field_content = match.group(1).strip()
+                        # Clean up any markdown link formatting
+                        field_content = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', field_content)
+                        lines.append(f"{field_name}{field_content}")
+                
+                # Combine publication content
+                current_pub += "\n" + "\n".join(lines)
         
-        # Add the last item
-        if current_item:
-            formatted_parts.append(current_item.strip())
+        # Add the last publication
+        if current_pub:
+            formatted_parts.append(current_pub.strip())
         
         # Join with double newlines for clear separation
-        return "\n\n".join(formatted_parts)
+        formatted_text = "\n\n".join(formatted_parts)
+        
+        # Final cleanup - remove any remaining markdown or excess whitespace
+        formatted_text = re.sub(r'\*\*|\*', '', formatted_text)  # Remove bold/italic markers
+        formatted_text = re.sub(r'\n{3,}', '\n\n', formatted_text)  # Normalize multiple newlines
+        formatted_text = re.sub(r'\s+$', '', formatted_text, flags=re.MULTILINE)  # Remove trailing whitespace
+        
+        # Remove any summary and research domains sections if this is just meant to be a list
+        if "list" in formatted_text.lower() or len(items) > 3:  # Likely a list request
+            formatted_text = re.sub(r'\s*-\s*Summary:.*?(?=\n\n|\Z)', '', formatted_text)
+            formatted_text = re.sub(r'\s*-\s*Research Domains:.*?(?=\n\n|\Z)', '', formatted_text)
+        
+        return formatted_text
 
     async def send_message_async(self, message: str, user_id: str, session_id: str = None):
         """
