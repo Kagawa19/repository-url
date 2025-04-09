@@ -19,7 +19,7 @@ import psycopg2.pool
 
 from ai_services_api.services.search.indexing.index_creator import ExpertSearchIndexManager
 from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
-from ai_services_api.services.message.core.database import get_db_connection
+from ai_services_api.services.message.core.database import get_connection_params, get_db_connection
 from ai_services_api.services.search.core.models import ExpertSearchResult, SearchResponse
 
 from fastapi import HTTPException
@@ -140,75 +140,59 @@ def fetch_suggestions_from_db(conn, search_input: str) -> List[Dict]:
     return [{"type": row[0], "id": row[1], "label": row[2]} for row in results]
 
 
-# Create a connection pool as a module-level singleton
-@lru_cache(maxsize=1)
-def get_connection_pool(min_conn=5, max_conn=20):
-    """Create or return a connection pool singleton."""
-    try:
-        # Use the existing database connection parameters
-        from ai_services_api.services.message.core.database import get_db_connection
-        # Get a sample connection to extract connection parameters
-        sample_conn = get_db_connection()
-        conn_params = sample_conn.get_dsn_parameters()
-        sample_conn.close()
-        
-        # Create the connection pool with the same parameters
-        pool = psycopg2.pool.ThreadedConnectionPool(
-            min_conn, 
-            max_conn,
-            user=conn_params.get('user'),
-            password=conn_params.get('password'),
-            host=conn_params.get('host'),
-            port=conn_params.get('port'),
-            database=conn_params.get('dbname')
-        )
-        return pool
-    except Exception as e:
-        logger.error(f"Error creating connection pool: {e}")
-        # Fall back to original connection method if pool creation fails
-        return None
+
+import asyncpg
+import logging
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+async def get_connection_pool():
+    """Get the async connection pool."""
+    # Assuming you have a method to fetch connection params.
+    params = get_connection_params()
+    return await asyncpg.create_pool(**params)
 
 async def get_or_create_session(conn, user_id: str) -> str:
     """Create a session for tracking user interactions."""
     logger.info(f"Getting or creating session for user: {user_id}")
-    
+
     # Get connection from pool if available
-    pool = get_connection_pool()
+    pool = await get_connection_pool()
     should_return_to_pool = False
-    
+
     if pool and conn is None:
         try:
-            conn = pool.getconn()
+            conn = await pool.acquire()
             should_return_to_pool = True
         except Exception as e:
             logger.error(f"Error getting connection from pool: {e}")
             # Fall back to the provided connection
-    
-    cur = conn.cursor()
+
     try:
         session_id = int(str(int(datetime.utcnow().timestamp()))[-8:])
         logger.debug(f"Generated session ID: {session_id}")
         
-        cur.execute("""
+        # Using asyncpg's execute method
+        result = await conn.fetchrow("""
             INSERT INTO search_sessions 
                 (session_id, user_id, start_timestamp, is_active)
-            VALUES (%s, %s, CURRENT_TIMESTAMP, true)
+            VALUES ($1, $2, CURRENT_TIMESTAMP, true)
             RETURNING session_id
-        """, (session_id, user_id))
-        
-        conn.commit()
+        """, session_id, user_id)
+
+        # Commit is not necessary with asyncpg, as changes are automatically applied
         logger.debug(f"Session created successfully with ID: {session_id}")
-        return str(session_id)
+        return str(result['session_id'])
     except Exception as e:
-        conn.rollback()
         logger.error(f"Error creating session: {str(e)}", exc_info=True)
         logger.debug(f"Session creation failed: {str(e)}")
         raise
     finally:
-        cur.close()
         # Return connection to pool if we got it from there
         if should_return_to_pool and pool:
-            pool.putconn(conn)
+            await pool.release(conn)
+
 
 async def process_expert_search(query: str, user_id: str, active_only: bool = True, k: int = 5) -> SearchResponse:
     """
