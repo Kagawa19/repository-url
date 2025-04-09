@@ -85,27 +85,24 @@ def get_pooled_connection() -> Tuple[Optional[Any], Optional[Any], bool]:
 def return_connection(conn, pool, using_pool):
     """
     Safely return a connection to the pool or close it if not using pool.
-    
-    Args:
-        conn: The database connection to return
-        pool: The connection pool (or None for direct connections)
-        using_pool: Boolean flag indicating if the connection came from the pool
     """
     if conn:
         try:
             if using_pool and pool:
-                pool.putconn(conn)
-                logger.debug("Returned connection to pool")
+                try:
+                    pool.putconn(conn)
+                    logger.debug("Returned connection to pool")
+                except Exception as e:
+                    logger.error(f"Error returning connection to pool: {str(e)}")
+                    # Don't try to close it if returning to pool failed
             else:
-                conn.close()
-                logger.debug("Closed direct database connection")
+                try:
+                    conn.close()
+                    logger.debug("Closed direct database connection")
+                except Exception as e:
+                    logger.error(f"Error closing connection: {str(e)}")
         except Exception as e:
-            logger.error(f"Error returning connection: {str(e)}")
-            # Try to close the connection anyway
-            try:
-                conn.close()
-            except:
-                pass
+            logger.error(f"Error in return_connection: {str(e)}")
 
 class DatabaseConnection:
     """Context manager for safely handling database connections."""
