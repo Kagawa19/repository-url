@@ -25,7 +25,7 @@ def get_connection_pool(min_conn=30, max_conn=500):
         db_params = {
             'user': os.getenv('DB_USER', conn_params.get('postgres')),
             'password': os.getenv('DB_PASSWORD', conn_params.get('p0stgres')),
-            'host': os.getenv('DB_HOST', conn_params.get('localhost')),
+            'host': os.getenv('DB_HOST', conn_params.get('postgres')),
             'port': os.getenv('DB_PORT', conn_params.get('5342')),
             'database': os.getenv('DB_NAME', conn_params.get('aphrc'))
         }
