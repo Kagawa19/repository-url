@@ -25,24 +25,6 @@ from ai_services_api.services.search.core.expert_search import (
 )
 # Add this to your application's startup code (e.g., in your main.py or __init__.py)
 import logging
-from ai_services_api.services.message.core.db_pool import get_connection_pool
-
-logger = logging.getLogger(__name__)
-
-# Explicitly initialize the pool during startup
-logger.info("Initializing database connection pool...")
-pool = get_connection_pool()
-if pool:
-    logger.info("Successfully initialized connection pool")
-else:
-    logger.error("Failed to initialize connection pool - will use direct connections")
-
-# Configure logger
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # Configure logger
 logging.basicConfig(

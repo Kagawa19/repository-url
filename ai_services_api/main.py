@@ -13,17 +13,6 @@ from ai_services_api.controllers.autocomplete_router import api_router as autoco
 from ai_services_api.controllers.analytics_router import api_router as analytics_router
 # Add this to your application's startup code (e.g., in your main.py or __init__.py)
 import logging
-from ai_services_api.services.message.core.db_pool import get_connection_pool
-
-logger = logging.getLogger(__name__)
-
-# Explicitly initialize the pool during startup
-logger.info("Initializing database connection pool...")
-pool = get_connection_pool()
-if pool:
-    logger.info("Successfully initialized connection pool")
-else:
-    logger.error("Failed to initialize connection pool - will use direct connections")
 
 
 # Define allowed GET routes
