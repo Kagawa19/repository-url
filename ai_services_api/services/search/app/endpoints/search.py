@@ -16,7 +16,7 @@ import logging
 import uuid
 
 from ai_services_api.services.search.core.models import PredictionResponse, SearchResponse
-from ai_services_api.services.search.app.endpoints.process_functions import process_advanced_query_prediction, process_advanced_query_prediction
+from ai_services_api.services.search.app.endpoints.process_functions import process_advanced_query_prediction
 from ai_services_api.services.search.core.expert_search import (
     process_expert_search,
     process_expert_name_search,
@@ -52,8 +52,66 @@ async def get_test_user_id(request: Request) -> str:
     logger.debug("Using test user ID")
     return TEST_USER_ID
 
+# Add the new endpoint to match /experts/search/{query}
+@router.get("/experts/search/{query}")
+async def search_experts(
+    query: str,
+    request: Request,
+    user_id: str = Depends(get_user_id),
+    active_only: bool = True,
+    k: int = 5
+):
+    """
+    Search for experts by query.
+    """
+    logger.info(f"Expert search request - User: {user_id}, Query: {query}")
+    
+    try:
+        # Use the process_expert_search function
+        search_response = await process_expert_search(
+            query=query,
+            user_id=user_id,
+            active_only=active_only,
+            k=k
+        )
+        
+        return search_response
+    
+    except Exception as e:
+        logger.error(f"Error in expert search: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail="An error occurred while processing the expert search"
+        )
 
-
+# Add the new endpoint to match /experts/predict/{partial_query}
+@router.get("/experts/predict/{partial_query}")
+async def predict_query(
+    partial_query: str,
+    request: Request,
+    user_id: str = Depends(get_user_id),
+    limit: int = 10
+):
+    """
+    Generate query predictions based on partial input.
+    """
+    logger.info(f"Received query prediction request - Partial query: {partial_query}")
+    
+    try:
+        # Process query prediction without specifying search_type (general prediction)
+        return await process_advanced_query_prediction(
+            partial_query, 
+            user_id, 
+            search_type=None, 
+            limit=limit
+        )
+    
+    except Exception as e:
+        logger.error(f"Error in query prediction: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"An error occurred while generating predictions: {str(e)}"
+        )
 
 @router.get("/advanced_search")
 async def advanced_search(
@@ -150,7 +208,6 @@ async def advanced_predict_query(
     logger.info(f"Received advanced query prediction request - Partial query: {partial_query}, Search Type: {search_type}")
     
     # Validate search type
-    # Validate search type
     valid_search_types = ["name", "theme", "designation", "publication", None]
     if search_type and search_type not in valid_search_types[:-1]:
         raise HTTPException(
@@ -173,6 +230,7 @@ async def advanced_predict_query(
             status_code=500, 
             detail=f"An error occurred while generating predictions: {str(e)}"
         )
+
 @router.post("/experts/track-suggestion")
 async def track_suggestion(
     request: Request,

@@ -728,7 +728,7 @@ async def process_expert_theme_search(
             }
         )
 
-#
+
 
 
 async def _generate_refinements(query: str, results: List[Dict], search_manager) -> Dict:
