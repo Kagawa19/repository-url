@@ -27,7 +27,7 @@ from ai_services_api.services.search.core.expert_search import (
 import logging
 from ai_services_api.services.message.core.db_pool import get_connection_pool
 
-
+logger = logging.getLogger(__name__)
 
 # Explicitly initialize the pool during startup
 logger.info("Initializing database connection pool...")
