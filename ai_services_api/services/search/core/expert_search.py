@@ -9,6 +9,7 @@ from typing import Any, List, Dict, Optional
 import logging
 from datetime import datetime
 import json
+from ai_services_api.services.message.core.db_pool import get_pooled_connection, DatabaseConnection
 import uuid
 
 # Add this at the top of expert_search.py

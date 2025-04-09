@@ -6,6 +6,7 @@ import time
 from typing import List, Dict, Any, Optional, Tuple
 import json
 from datetime import datetime
+from ai_services_api.services.message.core.db_pool import get_pooled_connection, DatabaseConnection
 
 import redis
 

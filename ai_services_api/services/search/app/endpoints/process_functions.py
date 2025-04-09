@@ -6,6 +6,7 @@ import json
 import uuid
 import asyncio
 from redis import asyncio as aioredis
+from ai_services_api.services.message.core.db_pool import get_pooled_connection, DatabaseConnection
 
 from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
 from ai_services_api.services.message.core.database import get_db_connection
@@ -101,16 +102,37 @@ async def _record_prediction_async(conn, session_id: str, user_id: str, partial_
 
 
 async def record_prediction(conn, session_id: str, user_id: str, partial_query: str, predictions: List[str], confidence_scores: List[float]):
-    """Record prediction in database for analytics."""
+    """
+    Record prediction in database for analytics.
+    Uses an existing connection instead of creating a new one.
+    """
+    if not conn:
+        logger.error("Cannot record prediction: No database connection provided")
+        return
+        
     try:
-        # Create a background task for recording to avoid blocking the response
-        asyncio.create_task(
-            _record_prediction_async(conn, session_id, user_id, partial_query, predictions, confidence_scores)
-        )
-    except Exception as e:
-        logger.error(f"Failed to create background task for recording prediction: {e}")
-
-
+        # Create a cursor for this operation using the existing connection
+        cur = conn.cursor()
+        try:
+            for pred, conf in zip(predictions, confidence_scores):
+                cur.execute("""
+                    INSERT INTO query_predictions
+                        (partial_query, predicted_query, confidence_score, 
+                        user_id, timestamp)
+                    VALUES 
+                        (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                """, (partial_query, pred, conf, user_id))
+            
+            conn.commit()
+            logger.info("Successfully recorded all predictions")
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error recording prediction: {str(e)}", exc_info=True)
+        finally:
+            cur.close()
+    except Exception as conn_error:
+        logger.error(f"Connection error in record_prediction: {conn_error}")
+    # Note: We don't close the connection here since it was passed in
 
 def generate_predictive_refinements(partial_query: str, predictions: List[str]) -> Dict[str, Any]:
     """Generate refinement suggestions based on partial query and predictions."""
@@ -165,6 +187,7 @@ async def process_query_prediction(
     user_id: str, 
     context: Optional[str] = None
 ) -> PredictionResponse:
+    """Process query prediction with improved connection pooling."""
     logger.info(f"Processing query prediction - Query: '{partial_query}', User: {user_id}, Context: {context}")
     
     valid_contexts = ["name", "theme", "designation", None]
@@ -172,6 +195,8 @@ async def process_query_prediction(
         raise ValueError(f"Invalid context. Must be one of {', '.join(valid_contexts[:-1])}")
     
     conn = None
+    pool = None
+    using_pool = False
     session_id = str(uuid.uuid4())[:8]
     
     redis = await get_redis()
@@ -179,6 +204,7 @@ async def process_query_prediction(
     try:
         cache_key = f"google_autocomplete:{context or ''}:{partial_query}"
         
+        # Try to get cached result first
         if redis:
             try:
                 cached_result = await redis.get(cache_key)
@@ -195,6 +221,9 @@ async def process_query_prediction(
                             predictions, confidence_scores, partial_query, context
                         )
                     
+                    # Get a connection for personalization
+                    conn, pool, using_pool = get_pooled_connection()
+                    
                     try:
                         personalized_suggestions = await personalize_suggestions(
                             [{"text": pred, "score": score} for pred, score in zip(predictions, confidence_scores)],
@@ -205,29 +234,16 @@ async def process_query_prediction(
                         confidence_scores = [s.get("score", 0.5) for s in personalized_suggestions]
                     except Exception as personalize_error:
                         logger.error(f"Personalization error for cached results: {personalize_error}")
+                    finally:
+                        # Always return connection to the pool
+                        return_connection(conn, pool, using_pool)
+                        conn = None
                     
                     refinements_dict = generate_predictive_refinements(partial_query, predictions)
                     
                     # Convert refinements to a flat list of strings as expected by PredictionResponse
-                    refinements_list = []
-                    if isinstance(refinements_dict, dict):
-                        # Extract related queries if they exist
-                        if "related_queries" in refinements_dict and isinstance(refinements_dict["related_queries"], list):
-                            refinements_list.extend(refinements_dict["related_queries"])
-                        
-                        # Extract expertise areas if they exist
-                        if "expertise_areas" in refinements_dict and isinstance(refinements_dict["expertise_areas"], list):
-                            refinements_list.extend(refinements_dict["expertise_areas"])
-                        
-                        # Extract values from filters if they exist
-                        if "filters" in refinements_dict and isinstance(refinements_dict["filters"], list):
-                            for filter_item in refinements_dict["filters"]:
-                                if isinstance(filter_item, dict) and "values" in filter_item:
-                                    if isinstance(filter_item["values"], list):
-                                        refinements_list.extend(filter_item["values"])
-                                    else:
-                                        refinements_list.append(str(filter_item["values"]))
-
+                    refinements_list = extract_refinements_list(refinements_dict)
+                    
                     return PredictionResponse(
                         predictions=predictions,
                         confidence_scores=confidence_scores,
@@ -239,96 +255,91 @@ async def process_query_prediction(
             except Exception as cache_error:
                 logger.error(f"Cache retrieval error: {cache_error}", exc_info=True)
         
+        # No cache hit - get a connection for database operations
+        conn, pool, using_pool = get_pooled_connection()
+        
         try:
-            conn = get_db_connection()
+            # Use a single database connection for the whole operation
             session_id = await get_or_create_session(conn, user_id)
             logger.debug(f"Created session: {session_id}")
-        except Exception as db_error:
-            logger.error(f"Database connection error: {db_error}", exc_info=True)
-        
-        predictor = await get_predictor()
-        suggestion_objects = await predictor.predict(partial_query, limit=10)
-        predictions = [s["text"] for s in suggestion_objects]
-        confidence_scores = [s.get("score", 0.5) for s in suggestion_objects]
-        
-        if context:
-            predictions, confidence_scores = filter_predictions_by_context(
-                predictions, confidence_scores, partial_query, context
-            )
-        
-        try:
-            personalized_suggestions = await personalize_suggestions(
-                [{"text": pred, "score": score} for pred, score in zip(predictions, confidence_scores)],
-                user_id, 
-                partial_query
-            )
-            predictions = [s["text"] for s in personalized_suggestions]
-            confidence_scores = [s.get("score", 0.5) for s in personalized_suggestions]
-        except Exception as personalize_error:
-            logger.error(f"Personalization error for fresh results: {personalize_error}")
-        
-        logger.debug(f"Generated {len(predictions)} predictions: {predictions}")
-        
-        if redis and predictions:
+            
+            # Get predictions from API
+            predictor = await get_predictor()
+            suggestion_objects = await predictor.predict(partial_query, limit=10)
+            predictions = [s["text"] for s in suggestion_objects]
+            confidence_scores = [s.get("score", 0.5) for s in suggestion_objects]
+            
+            if context:
+                predictions, confidence_scores = filter_predictions_by_context(
+                    predictions, confidence_scores, partial_query, context
+                )
+            
+            # Personalize suggestions
             try:
-                cache_data = {
-                    "suggestions": [
-                        {"text": pred, "score": score} 
-                        for pred, score in zip(predictions, confidence_scores)
-                    ],
-                    "confidence_scores": confidence_scores
-                }
-                await redis.setex(cache_key, 900, json.dumps(cache_data))
-                logger.debug(f"Cached predictions for: {partial_query}")
-            except Exception as cache_error:
-                logger.error(f"Cache storage error: {cache_error}", exc_info=True)
-        
-        refinements_dict = generate_predictive_refinements(partial_query, predictions)
-        
-        # Convert refinements to a flat list of strings as expected by PredictionResponse
-        refinements_list = []
-        if isinstance(refinements_dict, dict):
-            # Extract related queries if they exist
-            if "related_queries" in refinements_dict and isinstance(refinements_dict["related_queries"], list):
-                refinements_list.extend(refinements_dict["related_queries"])
+                personalized_suggestions = await personalize_suggestions(
+                    [{"text": pred, "score": score} for pred, score in zip(predictions, confidence_scores)],
+                    user_id, 
+                    partial_query
+                )
+                predictions = [s["text"] for s in personalized_suggestions]
+                confidence_scores = [s.get("score", 0.5) for s in personalized_suggestions]
+            except Exception as personalize_error:
+                logger.error(f"Personalization error for fresh results: {personalize_error}")
             
-            # Extract expertise areas if they exist
-            if "expertise_areas" in refinements_dict and isinstance(refinements_dict["expertise_areas"], list):
-                refinements_list.extend(refinements_dict["expertise_areas"])
+            logger.debug(f"Generated {len(predictions)} predictions: {predictions}")
             
-            # Extract values from filters if they exist
-            if "filters" in refinements_dict and isinstance(refinements_dict["filters"], list):
-                for filter_item in refinements_dict["filters"]:
-                    if isinstance(filter_item, dict) and "values" in filter_item:
-                        if isinstance(filter_item["values"], list):
-                            refinements_list.extend(filter_item["values"])
-                        else:
-                            refinements_list.append(str(filter_item["values"]))
-
-        if conn and predictions:
-            await record_prediction(
-                conn,
-                session_id,
-                user_id,
-                partial_query,
-                predictions,
-                confidence_scores
+            # Cache the results
+            if redis and predictions:
+                try:
+                    cache_data = {
+                        "suggestions": [
+                            {"text": pred, "score": score} 
+                            for pred, score in zip(predictions, confidence_scores)
+                        ],
+                        "confidence_scores": confidence_scores
+                    }
+                    await redis.setex(cache_key, 900, json.dumps(cache_data))
+                    logger.debug(f"Cached predictions for: {partial_query}")
+                except Exception as cache_error:
+                    logger.error(f"Cache storage error: {cache_error}", exc_info=True)
+            
+            refinements_dict = generate_predictive_refinements(partial_query, predictions)
+            refinements_list = extract_refinements_list(refinements_dict)
+            
+            # Record prediction in the same database connection
+            if predictions:
+                await record_prediction(
+                    conn,
+                    session_id,
+                    user_id,
+                    partial_query,
+                    predictions,
+                    confidence_scores
+                )
+            
+            return PredictionResponse(
+                predictions=predictions,
+                confidence_scores=confidence_scores,
+                user_id=user_id,
+                refinements=refinements_list,
+                total_suggestions=len(predictions)
             )
-        
-        return PredictionResponse(
-            predictions=predictions,
-            confidence_scores=confidence_scores,
-            user_id=user_id,
-            refinements=refinements_list,
-            total_suggestions=len(predictions)
-        )
+        finally:
+            # Always return the connection to the pool when done
+            return_connection(conn, pool, using_pool)
+            conn = None
     
     except Exception as e:
         logger.exception(f"Unexpected error in process_query_prediction: {e}")
+        
+        # Ensure connection is returned to the pool even on error
+        if conn:
+            return_connection(conn, pool, using_pool)
+        
         # Initialize empty lists for fallback response
         predictions = []
         confidence_scores = []
-        refinements_list = []  # Empty list of strings for refinements
+        refinements_list = []
         
         return PredictionResponse(
             predictions=predictions,
@@ -337,6 +348,30 @@ async def process_query_prediction(
             refinements=refinements_list,
             total_suggestions=len(predictions)
         )
+
+# Helper function to extract refinements list
+def extract_refinements_list(refinements_dict):
+    """Extract a flat list of refinements from the refinements dictionary."""
+    refinements_list = []
+    if isinstance(refinements_dict, dict):
+        # Extract related queries if they exist
+        if "related_queries" in refinements_dict and isinstance(refinements_dict["related_queries"], list):
+            refinements_list.extend(refinements_dict["related_queries"])
+        
+        # Extract expertise areas if they exist
+        if "expertise_areas" in refinements_dict and isinstance(refinements_dict["expertise_areas"], list):
+            refinements_list.extend(refinements_dict["expertise_areas"])
+        
+        # Extract values from filters if they exist
+        if "filters" in refinements_dict and isinstance(refinements_dict["filters"], list):
+            for filter_item in refinements_dict["filters"]:
+                if isinstance(filter_item, dict) and "values" in filter_item:
+                    if isinstance(filter_item["values"], list):
+                        refinements_list.extend(filter_item["values"])
+                    else:
+                        refinements_list.append(str(filter_item["values"]))
+    
+    return refinements_list
 
 def is_publication_title(suggestion: str, partial_query: str) -> bool:
     """
