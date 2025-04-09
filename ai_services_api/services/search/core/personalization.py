@@ -193,7 +193,7 @@ async def get_user_expertise_areas(user_id: str) -> List[str]:
                         potential_areas[word] = potential_areas.get(word, 0) + 1
             
             # Return top 5 most frequent terms as likely expertise areas
-            sorted_areas = sorted(potential_areas.items(), key=lambda x: -x[1], reverse=True)
+            sorted_areas = sorted(potential_areas.items(), key=lambda x: x[1], reverse=True)
             cur.close()
             return [area[0] for area in sorted_areas[:5]]
         
@@ -483,7 +483,7 @@ async def personalize_suggestions(
             })
         
         # Sort by personalized score
-        personalized_suggestions.sort(key=lambda x: -x.get("score", 0), reverse=True)
+        personalized_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
         
         return personalized_suggestions
         
@@ -846,7 +846,7 @@ async def get_trending_suggestions(partial_query: str, limit: int = 5) -> List[D
                 })
         
         # Sort by score and return top results
-        matching_suggestions.sort(key=lambda x: -x.get("score", 0), reverse=True)
+        matching_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
         return matching_suggestions[:limit]
         
     except Exception as e:
