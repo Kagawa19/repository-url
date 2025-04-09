@@ -10,7 +10,7 @@ from typing import Tuple, Optional, Any
 logger = logging.getLogger(__name__)
 
 @lru_cache(maxsize=1)
-def get_connection_pool(min_conn=30, max_conn=500):
+def get_connection_pool(min_conn=5, max_conn=500):
     """Create or return a connection pool singleton with better connection management."""
     try:
         # Import inside function to avoid circular imports
