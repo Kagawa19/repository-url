@@ -230,8 +230,221 @@ class GeminiLLMManager:
             logger.error(f"Error fetching publications for expert {expert_id}: {e}")
             return []
 
+    # 2. Update _get_all_expert_keys method in GeminiLLMManager
+
+    async def _get_all_expert_keys(self):
+        """Helper method to get all expert keys from Redis with improved error handling."""
+        try:
+            if not self.redis_manager:
+                logger.warning("Redis manager not available, cannot retrieve expert keys")
+                return []
+                
+            patterns = [
+                'meta:expert:*'  # Primary pattern for expert data
+            ]
+            
+            all_keys = []
+            
+            # For each pattern, scan Redis for matching keys
+            for pattern in patterns:
+                cursor = 0
+                pattern_keys = []
+                
+                while True:
+                    try:
+                        cursor, batch = self.redis_manager.redis_text.scan(
+                            cursor=cursor, 
+                            match=pattern, 
+                            count=100
+                        )
+                        pattern_keys.extend(batch)
+                        
+                        if cursor == 0:
+                            break
+                    except Exception as scan_error:
+                        logger.warning(f"Error scanning with pattern '{pattern}': {scan_error}")
+                        break
+                
+                logger.info(f"Found {len(pattern_keys)} keys with pattern '{pattern}'")
+                all_keys.extend(pattern_keys)
+            
+            # Remove any duplicates
+            unique_keys = list(set(all_keys))
+            
+            logger.info(f"Found {len(unique_keys)} total unique expert keys in Redis")
+            return unique_keys
+            
+        except Exception as e:
+            logger.error(f"Error retrieving expert keys: {e}")
+            return []
+
+    # 3. Update get_relevant_experts method to better handle empty results
+
+    async def get_relevant_experts(self, query: str, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Retrieve experts from Redis with advanced matching and better error handling."""
+        try:
+            if not self.redis_manager:
+                logger.warning("Redis manager not available, cannot retrieve experts")
+                return [], "Our expert database is currently unavailable. Please try again later."
+            
+            # Get all expert keys
+            expert_keys = await self._get_all_expert_keys()
+            
+            if not expert_keys:
+                # Try to create expert index if no keys found
+                logger.warning("No expert keys found in Redis. Attempting to create expert index.")
+                try:
+                    # Run synchronously since the Redis manager methods aren't async
+                    expert_index_created = self.redis_manager.create_expert_redis_index()
+                    if expert_index_created:
+                        logger.info("Successfully created expert index. Retrying expert key retrieval.")
+                        expert_keys = await self._get_all_expert_keys()
+                    else:
+                        logger.warning("Failed to create expert index.")
+                except Exception as index_error:
+                    logger.error(f"Error creating expert index: {index_error}")
+                    
+                # If still no keys, return with helpful message
+                if not expert_keys:
+                    return [], "No expert profiles found in the database. Our expert directory may still be in development."
+            
+            # Parse specific requests for expert counts
+            count_pattern = r'(\d+)\s+experts?'
+            count_match = re.search(count_pattern, query, re.IGNORECASE)
+            requested_count = int(count_match.group(1)) if count_match else limit
+            
+            # Extract potential name from query with improved patterns
+            name_match = self._extract_name_from_query(query)
+            expertise_terms = self._extract_expertise_terms(query)
+            
+            # Create query embedding for semantic search if model available
+            query_embedding = None
+            if self.redis_manager.embedding_model is not None:
+                try:
+                    query_embedding = self.redis_manager.embedding_model.encode(query)
+                except Exception as e:
+                    logger.error(f"Error creating query embedding: {e}")
+                    # Continue with keyword search only
+            
+            # Comprehensive expert retrieval with hybrid approach
+            matched_experts = []
+            keyword_scores = {}
+            semantic_scores = {}
+            
+            # Clean query terms (remove stopwords)
+            stopwords = self._get_stopwords()
+            query_terms = {word.lower() for word in query.split() if word.lower() not in stopwords}
+            
+            for key in expert_keys:
+                try:
+                    # Retrieve expert metadata
+                    raw_metadata = self.redis_manager.redis_text.hgetall(key)
+                    
+                    # Skip entries without essential metadata
+                    if not raw_metadata or 'name' not in raw_metadata:
+                        continue
+                    
+                    # Extract expert ID for tracking
+                    expert_id = raw_metadata.get('id', '')
+                    
+                    # Parse JSON fields safely
+                    expertise_data = {}
+                    if 'expertise' in raw_metadata:
+                        try:
+                            expertise_data = json.loads(raw_metadata['expertise'])
+                        except json.JSONDecodeError:
+                            # If JSON parsing fails, use as-is
+                            expertise_data = raw_metadata.get('expertise', {})
+                    
+                    # Reconstruct metadata
+                    metadata = {
+                        'id': expert_id,
+                        'name': raw_metadata.get('name', ''),
+                        'first_name': raw_metadata.get('first_name', ''),
+                        'last_name': raw_metadata.get('last_name', ''),
+                        'expertise': expertise_data,
+                    }
+                    
+                    # 1. KEYWORD MATCHING SCORE
+                    keyword_score = self._calculate_expert_keyword_score(
+                        metadata, query_terms, name_match, expertise_terms
+                    )
+                    
+                    # 2. SEMANTIC SIMILARITY SCORE (if embedding available)
+                    semantic_score = 0.0
+                    if query_embedding is not None:
+                        expert_embedding_bytes = self.redis_manager.redis_binary.get(f"emb:expert:{expert_id}")
+                        if expert_embedding_bytes:
+                            expert_embedding = np.frombuffer(expert_embedding_bytes, dtype=np.float32)
+                            # Calculate cosine similarity
+                            semantic_score = np.dot(query_embedding, expert_embedding) / (
+                                np.linalg.norm(query_embedding) * np.linalg.norm(expert_embedding)
+                            )
+                    
+                    # 3. COMBINE SCORES (70% keyword, 30% semantic when available)
+                    if semantic_score > 0:
+                        combined_score = 0.7 * keyword_score + 0.3 * semantic_score
+                    else:
+                        combined_score = keyword_score
+                    
+                    # Save scores for logging/debugging
+                    keyword_scores[expert_id] = keyword_score
+                    semantic_scores[expert_id] = semantic_score
+                    
+                    # Add to results if score is positive
+                    if combined_score > 0:
+                        # Attach match score for later sorting
+                        metadata['_match_score'] = combined_score
+                        matched_experts.append(metadata)
+                
+                except Exception as e:
+                    logger.error(f"Error processing expert {key}: {e}")
+            
+            # Sort experts by match score
+            sorted_experts = sorted(
+                matched_experts,
+                key=lambda x: x.get('_match_score', 0),
+                reverse=True
+            )
+            
+            # Limit to requested count
+            top_experts = sorted_experts[:requested_count]
+            
+            # Remove internal match score before returning
+            for expert in top_experts:
+                expert.pop('_match_score', None)
+            
+            logger.info(f"Found {len(top_experts)} experts matching query")
+            
+            # Log the search results with scores for debugging
+            if len(matched_experts) > 0:
+                top_scores = sorted(
+                    [(expert_id, keyword_scores.get(expert_id, 0), semantic_scores.get(expert_id, 0)) 
+                    for expert_id in keyword_scores.keys()],
+                    key=lambda x: x[1] + x[2],
+                    reverse=True
+                )[:5]
+                logger.debug(f"Top expert scores: {top_scores}")
+            
+            # If we found no matching experts, provide a better suggestion
+            if not top_experts:
+                if name_match:
+                    return [], f"I couldn't find any expert profiles matching '{name_match}'. Try searching for a research topic instead, like 'experts in maternal health'."
+                elif expertise_terms:
+                    return [], f"I couldn't find experts specifically in {', '.join(expertise_terms)}. Try broadening your search or using more general terms."
+                else:
+                    return [], "I couldn't find expert profiles matching your query. Try being more specific, like 'experts in health policy' or 'researcher John Smith'."
+            
+            return top_experts, None
+        
+        except Exception as e:
+            logger.error(f"Error retrieving experts: {e}")
+            return [], "We encountered an error searching for experts. Please try again with a simpler query."
+
+    # 4. Update the format_expert_context method to better handle empty expertise data
+
     async def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
-        """Format expert data into a structured context for LLM responses."""
+        """Format expert data into a structured context for LLM responses with better error handling."""
         if not experts:
             return "No experts found matching the query."
         
@@ -244,7 +457,7 @@ class GeminiLLMManager:
         else:
             context_parts = ["Found the following relevant expert:"]
         
-        # Process each expert
+        # Process each expert with comprehensive formatting
         for idx, expert in enumerate(experts, 1):
             # Create a formatted expert entry
             expert_parts = []
@@ -258,7 +471,7 @@ class GeminiLLMManager:
                 expert_parts.append(f"{prefix}Name: {name}")
                 prefix = "" if not is_list_format else prefix
             
-            # EXPERTISE - Format areas of expertise
+            # EXPERTISE - Format areas of expertise with better error handling
             expertise = expert.get('expertise', {})
             if expertise:
                 expertise_sections = []
@@ -266,14 +479,30 @@ class GeminiLLMManager:
                 if isinstance(expertise, dict):
                     for area, details in expertise.items():
                         if isinstance(details, list) and details:
-                            expertise_sections.append(f"{area.title()}: {', '.join(str(d) for d in details if d)}")
+                            # Filter out None or empty values
+                            valid_details = [str(d) for d in details if d]
+                            if valid_details:
+                                expertise_sections.append(f"{area.title()}: {', '.join(valid_details)}")
                         elif isinstance(details, str) and details.strip():
                             expertise_sections.append(f"{area.title()}: {details}")
+                        elif isinstance(details, (int, float)):
+                            expertise_sections.append(f"{area.title()}: {details}")
+                elif isinstance(expertise, list):
+                    # Handle case where expertise is a list
+                    valid_items = [str(item) for item in expertise if item]
+                    if valid_items:
+                        expertise_sections.append(f"Areas of Expertise: {', '.join(valid_items)}")
+                elif isinstance(expertise, str) and expertise.strip():
+                    # Handle case where expertise is a string
+                    expertise_sections.append(f"Expertise: {expertise}")
                 
                 if expertise_sections:
                     expert_parts.append(f"{prefix}Areas of Expertise:")
                     for section in expertise_sections:
                         expert_parts.append(f"{prefix}  • {section}")
+                else:
+                    # Add a default if no expertise data is available
+                    expert_parts.append(f"{prefix}Areas of Expertise: Information not available")
             
             # Add any PUBLICATIONS linked to this expert
             expert_id = expert.get('id')
@@ -308,6 +537,7 @@ class GeminiLLMManager:
     - Mention their research focus areas when relevant
     - If publications are listed, you can reference them as examples of their work
     - IMPORTANT: Only discuss information explicitly provided in the expert profiles
+    - If certain information is not available, clearly indicate this rather than inventing details
     """
 
         # Join everything with double newlines for better separation
@@ -406,159 +636,7 @@ class GeminiLLMManager:
         
         return score
 
-    async def _get_all_expert_keys(self):
-        """Helper method to get all expert keys from Redis."""
-        try:
-            patterns = [
-                'meta:expert:*'  # Pattern used for storing expert data
-            ]
-            
-            all_keys = []
-            
-            # For each pattern, scan Redis for matching keys
-            for pattern in patterns:
-                cursor = 0
-                pattern_keys = []
-                
-                while cursor != 0 or len(pattern_keys) == 0:
-                    try:
-                        cursor, batch = self.redis_manager.redis_text.scan(
-                            cursor=cursor, 
-                            match=pattern, 
-                            count=100
-                        )
-                        pattern_keys.extend(batch)
-                        
-                        if cursor == 0:
-                            break
-                    except Exception as scan_error:
-                        logger.warning(f"Error scanning with pattern '{pattern}': {scan_error}")
-                        break
-                
-                logger.info(f"Found {len(pattern_keys)} keys with pattern '{pattern}'")
-                all_keys.extend(pattern_keys)
-            
-            # Remove any duplicates
-            unique_keys = list(set(all_keys))
-            
-            logger.info(f"Found {len(unique_keys)} total unique expert keys in Redis")
-            return unique_keys
-            
-        except Exception as e:
-            logger.error(f"Error retrieving expert keys: {e}")
-            return []
-
-    async def get_relevant_experts(self, query: str, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        """Retrieve experts from Redis with hybrid search combining keyword and semantic matching."""
-        try:
-            if not self.redis_manager:
-                logger.warning("Redis manager not available, cannot retrieve experts")
-                return [], "Our expert database is currently unavailable. Please try again later."
-            
-            # Get all expert keys
-            expert_keys = await self._get_all_expert_keys()
-            
-            if not expert_keys:
-                return [], "No expert profiles found in the database."
-            
-            # Parse specific requests for expert counts
-            count_pattern = r'(\d+)\s+experts?'
-            count_match = re.search(count_pattern, query, re.IGNORECASE)
-            requested_count = int(count_match.group(1)) if count_match else limit
-            
-            # Extract potential name from query
-            name_match = self._extract_name_from_query(query)
-            expertise_terms = self._extract_expertise_terms(query)
-            
-            # Create query embedding for semantic search if model available
-            query_embedding = None
-            if self.redis_manager.embedding_model is not None:
-                try:
-                    query_embedding = self.redis_manager.embedding_model.encode(query)
-                except Exception as e:
-                    logger.error(f"Error creating query embedding: {e}")
-            
-            # Retrieve and score experts
-            matched_experts = []
-            
-            # Remove stopwords from query
-            stopwords = self._get_stopwords()
-            query_terms = {word.lower() for word in query.split() if word.lower() not in stopwords}
-            
-            for key in expert_keys:
-                try:
-                    # Retrieve expert metadata
-                    raw_metadata = self.redis_manager.redis_text.hgetall(key)
-                    
-                    # Skip entries without essential metadata
-                    if not raw_metadata or 'name' not in raw_metadata:
-                        continue
-                    
-                    # Extract expert ID
-                    expert_id = raw_metadata.get('id', '')
-                    
-                    # Reconstruct metadata
-                    metadata = {
-                        'id': expert_id,
-                        'name': raw_metadata.get('name', ''),
-                        'first_name': raw_metadata.get('first_name', ''),
-                        'last_name': raw_metadata.get('last_name', ''),
-                        'expertise': self._safe_json_load(raw_metadata.get('expertise', '{}')),
-                    }
-                    
-                    # Calculate match score
-                    keyword_score = self._calculate_expert_keyword_score(
-                        metadata, query_terms, name_match, expertise_terms
-                    )
-                    
-                    # Add semantic scoring if available
-                    semantic_score = 0.0
-                    if query_embedding is not None:
-                        expert_embedding_bytes = self.redis_manager.redis_binary.get(f"emb:expert:{expert_id}")
-                        if expert_embedding_bytes:
-                            expert_embedding = np.frombuffer(expert_embedding_bytes, dtype=np.float32)
-                            # Calculate cosine similarity
-                            semantic_score = np.dot(query_embedding, expert_embedding) / (
-                                np.linalg.norm(query_embedding) * np.linalg.norm(expert_embedding)
-                            )
-                    
-                    # Combine scores (70% keyword, 30% semantic when available)
-                    if semantic_score > 0:
-                        combined_score = 0.7 * keyword_score + 0.3 * semantic_score
-                    else:
-                        combined_score = keyword_score
-                    
-                    # Add to results if score is positive
-                    if combined_score > 0:
-                        # Attach match score for later sorting
-                        metadata['_match_score'] = combined_score
-                        matched_experts.append(metadata)
-                
-                except Exception as e:
-                    logger.error(f"Error processing expert {key}: {e}")
-            
-            # Sort experts by match score
-            sorted_experts = sorted(
-                matched_experts,
-                key=lambda x: x.get('_match_score', 0),
-                reverse=True
-            )
-            
-            # Limit to requested count
-            top_experts = sorted_experts[:requested_count]
-            
-            # Remove internal match score before returning
-            for expert in top_experts:
-                expert.pop('_match_score', None)
-            
-            logger.info(f"Found {len(top_experts)} experts matching query")
-            
-            return top_experts, None
-        
-        except Exception as e:
-            logger.error(f"Error retrieving experts: {e}")
-            return [], "We encountered an error searching for experts. Try simplifying your query."
-
+  
     def get_gemini_model(self):
         """Initialize and return the Gemini model with built-in retry logic."""
         return ChatGoogleGenerativeAI(
