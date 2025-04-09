@@ -16,7 +16,7 @@ import logging
 import uuid
 
 from ai_services_api.services.search.core.models import PredictionResponse, SearchResponse
-from ai_services_api.services.search.app.endpoints.process_functions import process_query_prediction, process_query_prediction,
+from ai_services_api.services.search.app.endpoints.process_functions import process_query_prediction, process_query_prediction
 from ai_services_api.services.search.core.expert_search import (
     process_expert_name_search,
     process_expert_theme_search,
