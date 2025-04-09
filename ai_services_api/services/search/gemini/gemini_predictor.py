@@ -133,6 +133,7 @@ class GoogleAutocompletePredictor:
         # Directly use os.getenv to get the API key from .env
         key = os.getenv('GEMINI_API_KEY')
         
+        
         if not key:
             raise ValueError(
                 "GEMINI_API_KEY not found in .env file. "
@@ -172,6 +173,23 @@ class GoogleAutocompletePredictor:
             
             # Initialize trending suggestions tracker
             self.trending_suggestions = {}
+
+            self.redis_binary = None
+            if redis_config:
+                try:
+                    # Create a separate Redis client for binary operations
+                    self.redis_binary = redis.Redis(
+                        host=redis_config.get('host', 'localhost'),
+                        port=redis_config.get('port', 6379),
+                        db=redis_config.get('db', 0),
+                        password=redis_config.get('password', None),
+                        decode_responses=False  # Important for binary operations
+                    )
+                    # Test connection
+                    self.redis_binary.ping()
+                except Exception as e:
+                    self.logger.error(f"Failed to connect to Redis binary client: {e}")
+                    self.redis_binary = None
             
             # Create background task for trie updates if Redis available
             if self.redis_client:
