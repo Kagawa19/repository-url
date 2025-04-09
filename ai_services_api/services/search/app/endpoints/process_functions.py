@@ -1,3 +1,5 @@
+import os
+import redis
 from fastapi import HTTPException
 from typing import Any, List, Dict, Optional, Tuple
 import logging
@@ -6,13 +8,16 @@ import json
 import uuid
 import asyncio
 from redis import asyncio as aioredis
+import traceback
 
 from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
 from ai_services_api.services.message.core.database import get_db_connection
 from ai_services_api.services.search.core.models import PredictionResponse
-from ai_services_api.services.search.core.personalization import personalize_suggestions
+from ai_services_api.services.search.core.personalization import get_selected_suggestions, get_trending_suggestions, get_user_search_history, personalize_suggestions
 from ai_services_api.services.message.core.db_pool import get_pooled_connection, return_connection, DatabaseConnection
-
+from ai_services_api.services.message.core.db_pool import (
+    DatabaseConnection, get_pooled_connection, return_connection, log_pool_status, safe_background_task
+)
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -23,176 +28,9 @@ _predictor = None
 # Global Redis instance
 _redis = None
 
-async def get_redis():
-    """Get or create Redis connection."""
-    global _redis
-    if _redis is None:
-        try:
-            # Create Redis connection
-            _redis = await aioredis.Redis.from_url("redis://redis:6379/0", decode_responses=True)
-            logger.info("Redis connection established successfully")
-        except Exception as e:
-            logger.error(f"Redis connection failed: {e}", exc_info=True)
-            _redis = None
-    return _redis
-
-async def get_predictor():
-    """Get or create predictor instance (singleton pattern)."""
-    global _predictor
-    if _predictor is None:
-        _predictor = GoogleAutocompletePredictor()
-    return _predictor
-
-# Record session and prediction in database for analytics
-async def get_or_create_session(conn, user_id: str) -> str:
-    """Create a session for tracking user interactions."""
-    logger.info(f"Getting or creating session for user: {user_id}")
-    cur = conn.cursor()
-    try:
-        session_id = int(str(int(datetime.utcnow().timestamp()))[-8:])
-        logger.debug(f"Generated session ID: {session_id}")
-        
-        cur.execute("""
-            INSERT INTO search_sessions 
-                (session_id, user_id, start_timestamp, is_active)
-            VALUES (%s, %s, CURRENT_TIMESTAMP, true)
-            RETURNING session_id
-        """, (session_id, user_id))
-        
-        conn.commit()
-        logger.debug(f"Session created successfully with ID: {session_id}")
-        return str(session_id)
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"Error creating session: {str(e)}", exc_info=True)
-        logger.debug(f"Session creation failed: {str(e)}")
-        raise
-    finally:
-        cur.close()
-
-async def _record_prediction_async(conn, session_id: str, user_id: str, partial_query: str, predictions: List[str], confidence_scores: List[float]):
-    """Asynchronous helper for recording predictions in the database."""
-    logger.info(f"Recording predictions for user {user_id}, session {session_id}")
-    
-    # Create a new cursor for this async task to avoid connection issues
-    try:
-        cur = conn.cursor()
-        try:
-            for pred, conf in zip(predictions, confidence_scores):
-                cur.execute("""
-                    INSERT INTO query_predictions
-                        (partial_query, predicted_query, confidence_score, 
-                        user_id, timestamp)
-                    VALUES 
-                        (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-                """, (partial_query, pred, conf, user_id))
-            
-            conn.commit()
-            logger.info("Successfully recorded all predictions")
-        except Exception as e:
-            conn.rollback()
-            logger.error(f"Error recording prediction: {str(e)}", exc_info=True)
-        finally:
-            cur.close()
-    except Exception as conn_error:
-        logger.error(f"Connection error in record_prediction: {conn_error}")
-    # Note: Don't close the connection here as it might be used elsewhere
 
 
 
-async def record_prediction(conn, session_id: str, user_id: str, partial_query: str, predictions: List[str], confidence_scores: List[float]):
-    """
-    Record prediction in database for analytics.
-    Uses an existing connection instead of creating a new one.
-    """
-    if not conn:
-        logger.error("Cannot record prediction: No database connection provided")
-        return
-        
-    try:
-        # Create a cursor for this operation using the existing connection
-        cur = conn.cursor()
-        try:
-            for pred, conf in zip(predictions, confidence_scores):
-                cur.execute("""
-                    INSERT INTO query_predictions
-                        (partial_query, predicted_query, confidence_score, 
-                        user_id, timestamp)
-                    VALUES 
-                        (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-                """, (partial_query, pred, conf, user_id))
-            
-            conn.commit()
-            logger.info("Successfully recorded all predictions")
-        except Exception as e:
-            conn.rollback()
-            logger.error(f"Error recording prediction: {str(e)}", exc_info=True)
-        finally:
-            cur.close()
-    except Exception as conn_error:
-        logger.error(f"Connection error in record_prediction: {conn_error}")
-    # Note: We don't close the connection here since it was passed in
-
-def generate_predictive_refinements(partial_query: str, predictions: List[str]) -> Dict[str, Any]:
-    """Generate refinement suggestions based on partial query and predictions."""
-    try:
-        # Generate related filters and expertise areas
-        related_filters = []
-        
-        # Add a filter for query type if we have predictions
-        if predictions:
-            related_filters.append({
-                "type": "query_type",
-                "label": "Query Suggestions",
-                "values": predictions[:3]
-            })
-        
-        # Extract potential expertise areas from predictions
-        expertise_areas = set()
-        for prediction in predictions:
-            words = prediction.lower().split()
-            for word in words:
-                if len(word) > 3 and word != partial_query.lower():
-                    expertise_areas.add(word.capitalize())
-        
-        # Make sure we have some expertise areas even if extraction failed
-        if len(expertise_areas) < 3 and partial_query:
-            expertise_areas.add(partial_query.capitalize())
-        
-        # Remove duplicates while preserving order
-        expertise_areas = list(dict.fromkeys(expertise_areas))[:5]
-        
-        # Construct refinements
-        refinements = {
-            "filters": related_filters,
-            "related_queries": predictions[:5],
-            "expertise_areas": expertise_areas
-        }
-        
-        logger.info(f"Generated predictive refinements for query: {partial_query}")
-        return refinements
-    
-    except Exception as e:
-        logger.error(f"Error in predictive refinements: {e}")
-        # Return a minimal valid structure even on error
-        return {
-            "filters": [],
-            "related_queries": predictions[:5] if predictions else [],
-            "expertise_areas": []
-        }
-    
-from typing import Any, List, Dict, Optional
-import logging
-import uuid
-import json
-import traceback
-from ai_services_api.services.message.core.db_pool import (
-    DatabaseConnection, get_pooled_connection, return_connection, log_pool_status
-)
-from ai_services_api.services.search.core.models import PredictionResponse
-
-# Configure logger
-logger = logging.getLogger(__name__)
 
 async def process_query_prediction(
     partial_query: str, 
@@ -428,29 +266,307 @@ def extract_refinements_list(refinements_dict):
     
     return refinements_list
 
-# Helper function to extract refinements list
-def extract_refinements_list(refinements_dict):
-    """Extract a flat list of refinements from the refinements dictionary."""
-    refinements_list = []
-    if isinstance(refinements_dict, dict):
-        # Extract related queries if they exist
-        if "related_queries" in refinements_dict and isinstance(refinements_dict["related_queries"], list):
-            refinements_list.extend(refinements_dict["related_queries"])
-        
-        # Extract expertise areas if they exist
-        if "expertise_areas" in refinements_dict and isinstance(refinements_dict["expertise_areas"], list):
-            refinements_list.extend(refinements_dict["expertise_areas"])
-        
-        # Extract values from filters if they exist
-        if "filters" in refinements_dict and isinstance(refinements_dict["filters"], list):
-            for filter_item in refinements_dict["filters"]:
-                if isinstance(filter_item, dict) and "values" in filter_item:
-                    if isinstance(filter_item["values"], list):
-                        refinements_list.extend(filter_item["values"])
-                    else:
-                        refinements_list.append(str(filter_item["values"]))
+async def get_context_popular_queries(context: str, limit: int = 5) -> List[str]:
+    """
+    Get popular queries specific to a context type.
+    Optimized to use the DatabaseConnection context manager.
     
-    return refinements_list
+    Args:
+        context: Context type (name, theme, designation, publication)
+        limit: Maximum number of items to return
+        
+    Returns:
+        List of popular queries for this context
+    """
+    try:
+        popular_queries = []
+        
+        with DatabaseConnection() as conn:
+            cur = conn.cursor()
+            
+            # Get popular searches filtered by context
+            if context == "name":
+                # For name searches, look for patterns like "John Smith" or queries with "Name:"
+                cur.execute("""
+                    SELECT query, COUNT(*) as frequency
+                    FROM search_analytics
+                    WHERE 
+                        (query LIKE '% %' AND length(query) < 30) OR
+                        query LIKE 'name:%'
+                    GROUP BY query
+                    ORDER BY frequency DESC
+                    LIMIT %s
+                """, (limit,))
+                
+            elif context == "theme":
+                # For theme searches, look for queries that were used in theme search
+                cur.execute("""
+                    SELECT query, COUNT(*) as frequency
+                    FROM search_analytics
+                    WHERE 
+                        query LIKE 'theme:%' OR
+                        search_type = 'theme'
+                    GROUP BY query
+                    ORDER BY frequency DESC
+                    LIMIT %s
+                """, (limit,))
+                
+            elif context == "designation":
+                # For designation searches
+                cur.execute("""
+                    SELECT query, COUNT(*) as frequency
+                    FROM search_analytics
+                    WHERE 
+                        query LIKE 'designation:%' OR
+                        search_type = 'designation'
+                    GROUP BY query
+                    ORDER BY frequency DESC
+                    LIMIT %s
+                """, (limit,))
+                
+            elif context == "publication":
+                # For publication searches
+                cur.execute("""
+                    SELECT query, COUNT(*) as frequency
+                    FROM search_analytics
+                    WHERE 
+                        query LIKE 'publication:%' OR
+                        search_type = 'publication'
+                    GROUP BY query
+                    ORDER BY frequency DESC
+                    LIMIT %s
+                """, (limit,))
+                
+            else:
+                # For general searches
+                cur.execute("""
+                    SELECT query, COUNT(*) as frequency
+                    FROM search_analytics
+                    WHERE query NOT LIKE '%:%'  -- Exclude prefixed queries
+                    GROUP BY query
+                    ORDER BY frequency DESC
+                    LIMIT %s
+                """, (limit,))
+                
+            # Process results
+            for row in cur.fetchall():
+                query = row[0]
+                
+                # Clean up query - remove context prefix if present
+                if context and query.lower().startswith(f"{context}:"):
+                    query = query[len(context)+1:].strip()
+                
+                if query and query.strip():
+                    popular_queries.append(query.strip())
+                    
+            cur.close()
+            return popular_queries
+                
+    except Exception as db_error:
+        logger.error(f"Database error in context popular queries: {db_error}")
+        
+        # Fall back to Redis if available
+        try:
+            redis_client = redis.Redis(
+                host=os.getenv('REDIS_HOST', 'localhost'),
+                port=int(os.getenv('REDIS_PORT', 6379)),
+                db=int(os.getenv('REDIS_TRENDING_DB', 2)),
+                decode_responses=True
+            )
+            
+            # Try to get context-specific trending from Redis
+            context_key = f"trending_context:{context or 'general'}"
+            trending = redis_client.zrevrange(context_key, 0, limit-1)
+            
+            if trending:
+                return trending
+        except Exception as redis_error:
+            logger.error(f"Redis error in context popular queries: {redis_error}")
+        
+        # If all else fails, return hardcoded defaults based on context
+        if context == "name":
+            return ["John Smith", "Jane Doe", "Michael Johnson", "David Williams", "Sara Chen"]
+        elif context == "theme":
+            return ["Neuroscience", "Data Science", "Artificial Intelligence", "Psychology", "Biochemistry"]
+        elif context == "designation":
+            return ["Professor", "Researcher", "Director", "Scientist", "Student"]
+        elif context == "publication":
+            return ["Journal of Neuroscience", "Nature", "Science", "IEEE Transactions", "PLOS ONE"]
+        else:
+            return ["Research", "Science", "Technology", "Medicine", "Engineering"]
+
+async def get_redis():
+    """Get or create Redis connection."""
+    global _redis
+    if _redis is None:
+        try:
+            # Create Redis connection
+            _redis = await aioredis.Redis.from_url("redis://redis:6379/0", decode_responses=True)
+            logger.info("Redis connection established successfully")
+        except Exception as e:
+            logger.error(f"Redis connection failed: {e}", exc_info=True)
+            _redis = None
+    return _redis
+
+async def get_predictor():
+    """Get or create predictor instance (singleton pattern)."""
+    global _predictor
+    if _predictor is None:
+        _predictor = GoogleAutocompletePredictor()
+    return _predictor
+
+# Record session and prediction in database for analytics
+async def get_or_create_session(conn, user_id: str) -> str:
+    """Create a session for tracking user interactions."""
+    logger.info(f"Getting or creating session for user: {user_id}")
+    cur = conn.cursor()
+    try:
+        session_id = int(str(int(datetime.utcnow().timestamp()))[-8:])
+        logger.debug(f"Generated session ID: {session_id}")
+        
+        cur.execute("""
+            INSERT INTO search_sessions 
+                (session_id, user_id, start_timestamp, is_active)
+            VALUES (%s, %s, CURRENT_TIMESTAMP, true)
+            RETURNING session_id
+        """, (session_id, user_id))
+        
+        conn.commit()
+        logger.debug(f"Session created successfully with ID: {session_id}")
+        return str(session_id)
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error creating session: {str(e)}", exc_info=True)
+        logger.debug(f"Session creation failed: {str(e)}")
+        raise
+    finally:
+        cur.close()
+
+async def _record_prediction_async(conn, session_id: str, user_id: str, partial_query: str, predictions: List[str], confidence_scores: List[float]):
+    """Asynchronous helper for recording predictions in the database."""
+    logger.info(f"Recording predictions for user {user_id}, session {session_id}")
+    
+    # Create a new cursor for this async task to avoid connection issues
+    try:
+        cur = conn.cursor()
+        try:
+            for pred, conf in zip(predictions, confidence_scores):
+                cur.execute("""
+                    INSERT INTO query_predictions
+                        (partial_query, predicted_query, confidence_score, 
+                        user_id, timestamp)
+                    VALUES 
+                        (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                """, (partial_query, pred, conf, user_id))
+            
+            conn.commit()
+            logger.info("Successfully recorded all predictions")
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error recording prediction: {str(e)}", exc_info=True)
+        finally:
+            cur.close()
+    except Exception as conn_error:
+        logger.error(f"Connection error in record_prediction: {conn_error}")
+    # Note: Don't close the connection here as it might be used elsewhere
+
+
+
+async def record_prediction(conn, session_id: str, user_id: str, partial_query: str, predictions: List[str], confidence_scores: List[float]):
+    """
+    Record prediction in database for analytics.
+    Uses an existing connection instead of creating a new one.
+    """
+    if not conn:
+        logger.error("Cannot record prediction: No database connection provided")
+        return
+        
+    try:
+        # Create a cursor for this operation using the existing connection
+        cur = conn.cursor()
+        try:
+            for pred, conf in zip(predictions, confidence_scores):
+                cur.execute("""
+                    INSERT INTO query_predictions
+                        (partial_query, predicted_query, confidence_score, 
+                        user_id, timestamp)
+                    VALUES 
+                        (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                """, (partial_query, pred, conf, user_id))
+            
+            conn.commit()
+            logger.info("Successfully recorded all predictions")
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error recording prediction: {str(e)}", exc_info=True)
+        finally:
+            cur.close()
+    except Exception as conn_error:
+        logger.error(f"Connection error in record_prediction: {conn_error}")
+    # Note: We don't close the connection here since it was passed in
+
+def generate_predictive_refinements(partial_query: str, predictions: List[str]) -> Dict[str, Any]:
+    """Generate refinement suggestions based on partial query and predictions."""
+    try:
+        # Generate related filters and expertise areas
+        related_filters = []
+        
+        # Add a filter for query type if we have predictions
+        if predictions:
+            related_filters.append({
+                "type": "query_type",
+                "label": "Query Suggestions",
+                "values": predictions[:3]
+            })
+        
+        # Extract potential expertise areas from predictions
+        expertise_areas = set()
+        for prediction in predictions:
+            words = prediction.lower().split()
+            for word in words:
+                if len(word) > 3 and word != partial_query.lower():
+                    expertise_areas.add(word.capitalize())
+        
+        # Make sure we have some expertise areas even if extraction failed
+        if len(expertise_areas) < 3 and partial_query:
+            expertise_areas.add(partial_query.capitalize())
+        
+        # Remove duplicates while preserving order
+        expertise_areas = list(dict.fromkeys(expertise_areas))[:5]
+        
+        # Construct refinements
+        refinements = {
+            "filters": related_filters,
+            "related_queries": predictions[:5],
+            "expertise_areas": expertise_areas
+        }
+        
+        logger.info(f"Generated predictive refinements for query: {partial_query}")
+        return refinements
+    
+    except Exception as e:
+        logger.error(f"Error in predictive refinements: {e}")
+        # Return a minimal valid structure even on error
+        return {
+            "filters": [],
+            "related_queries": predictions[:5] if predictions else [],
+            "expertise_areas": []
+        }
+    
+from typing import Any, List, Dict, Optional
+import logging
+import uuid
+import json
+import traceback
+from ai_services_api.services.message.core.db_pool import (
+    DatabaseConnection, get_pooled_connection, return_connection, log_pool_status
+)
+from ai_services_api.services.search.core.models import PredictionResponse
+
+# Configure logger
+logger = logging.getLogger(__name__)
+
+
 
 def is_publication_title(suggestion: str, partial_query: str) -> bool:
     """
@@ -992,144 +1108,6 @@ def is_person_name(suggestion: str, partial_query: str) -> bool:
     
     return True
 
-async def get_context_popular_queries(context: str, limit: int = 5) -> List[str]:
-    """
-    Get popular queries specific to a context type.
-    
-    Args:
-        context: Context type (name, theme, designation, publication)
-        limit: Maximum number of items to return
-        
-    Returns:
-        List of popular queries for this context
-    """
-    try:
-        # Get database connection
-        conn = get_db_connection()
-        popular_queries = []
-        
-        try:
-            with conn.cursor() as cur:
-                # Get popular searches filtered by context
-                # This assumes you have a way to identify context in search_analytics table
-                # If not, we can use pattern matching
-                
-                if context == "name":
-                    # For name searches, look for patterns like "John Smith" or queries with "Name:"
-                    cur.execute("""
-                        SELECT query, COUNT(*) as frequency
-                        FROM search_analytics
-                        WHERE 
-                            (query LIKE '% %' AND length(query) < 30) OR
-                            query LIKE 'name:%'
-                        GROUP BY query
-                        ORDER BY frequency DESC
-                        LIMIT %s
-                    """, (limit,))
-                    
-                elif context == "theme":
-                    # For theme searches, look for queries that were used in theme search
-                    cur.execute("""
-                        SELECT query, COUNT(*) as frequency
-                        FROM search_analytics
-                        WHERE 
-                            query LIKE 'theme:%' OR
-                            search_type = 'theme'
-                        GROUP BY query
-                        ORDER BY frequency DESC
-                        LIMIT %s
-                    """, (limit,))
-                    
-                elif context == "designation":
-                    # For designation searches
-                    cur.execute("""
-                        SELECT query, COUNT(*) as frequency
-                        FROM search_analytics
-                        WHERE 
-                            query LIKE 'designation:%' OR
-                            search_type = 'designation'
-                        GROUP BY query
-                        ORDER BY frequency DESC
-                        LIMIT %s
-                    """, (limit,))
-                    
-                elif context == "publication":
-                    # For publication searches
-                    cur.execute("""
-                        SELECT query, COUNT(*) as frequency
-                        FROM search_analytics
-                        WHERE 
-                            query LIKE 'publication:%' OR
-                            search_type = 'publication'
-                        GROUP BY query
-                        ORDER BY frequency DESC
-                        LIMIT %s
-                    """, (limit,))
-                    
-                else:
-                    # For general searches
-                    cur.execute("""
-                        SELECT query, COUNT(*) as frequency
-                        FROM search_analytics
-                        WHERE query NOT LIKE '%:%'  -- Exclude prefixed queries
-                        GROUP BY query
-                        ORDER BY frequency DESC
-                        LIMIT %s
-                    """, (limit,))
-                    
-                # Process results
-                for row in cur.fetchall():
-                    query = row[0]
-                    
-                    # Clean up query - remove context prefix if present
-                    if context and query.lower().startswith(f"{context}:"):
-                        query = query[len(context)+1:].strip()
-                    
-                    if query and query.strip():
-                        popular_queries.append(query.strip())
-                        
-            return popular_queries
-                
-        except Exception as db_error:
-            logger.error(f"Database error in context popular queries: {db_error}")
-            # Fall back to Redis if available
-            if hasattr(redis, 'Redis'):
-                try:
-                    redis_client = redis.Redis(
-                        host=os.getenv('REDIS_HOST', 'localhost'),
-                        port=int(os.getenv('REDIS_PORT', 6379)),
-                        db=int(os.getenv('REDIS_TRENDING_DB', 2)),
-                        decode_responses=True
-                    )
-                    
-                    # Try to get context-specific trending from Redis
-                    context_key = f"trending_context:{context or 'general'}"
-                    trending = redis_client.zrevrange(context_key, 0, limit-1)
-                    
-                    if trending:
-                        return trending
-                except Exception as redis_error:
-                    logger.error(f"Redis error in context popular queries: {redis_error}")
-            
-            # If all else fails, return hardcoded defaults based on context
-            if context == "name":
-                return ["John Smith", "Jane Doe", "Michael Johnson", "David Williams", "Sara Chen"]
-            elif context == "theme":
-                return ["Neuroscience", "Data Science", "Artificial Intelligence", "Psychology", "Biochemistry"]
-            elif context == "designation":
-                return ["Professor", "Researcher", "Director", "Scientist", "Student"]
-            elif context == "publication":
-                return ["Journal of Neuroscience", "Nature", "Science", "IEEE Transactions", "PLOS ONE"]
-            else:
-                return ["Research", "Science", "Technology", "Medicine", "Engineering"]
-        
-        finally:
-            if conn:
-                conn.close()
-            
-    except Exception as e:
-        logger.error(f"Error getting context popular queries: {e}", exc_info=True)
-        return []
 
 async def generate_dynamic_refinements(
     partial_query: str,

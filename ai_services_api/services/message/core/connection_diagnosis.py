@@ -4,6 +4,8 @@ import traceback
 import time
 from functools import wraps
 
+from ai_services_api.services.message.core.db_pool import get_pooled_connection, return_connection
+
 logger = logging.getLogger(__name__)
 
 # Dictionary to track which functions are creating connections

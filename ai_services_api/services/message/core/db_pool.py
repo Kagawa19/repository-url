@@ -67,7 +67,7 @@ def get_connection_pool(min_conn=200, max_conn=500):
         # Fall back to original connection method if pool creation fails
         return None
 
-def get_pooled_connection() -> Tuple[Optional[Any], Optional[Any], bool]:
+def get_pooled_connection() -> Tuple[Any, Optional[Any], bool, str]:
     """
     Get a connection from the pool with proper error handling.
     
@@ -76,6 +76,7 @@ def get_pooled_connection() -> Tuple[Optional[Any], Optional[Any], bool]:
         - database connection
         - pool reference (or None if direct connection)
         - boolean flag indicating if pool was used
+        - connection ID for tracking
     """
     pool = get_connection_pool()
     conn = None
@@ -140,6 +141,12 @@ def get_pooled_connection() -> Tuple[Optional[Any], Optional[Any], bool]:
 def return_connection(conn, pool, using_pool, conn_id=None):
     """
     Safely return a connection to the pool or close it if not using pool.
+    
+    Args:
+        conn: Database connection to return/close
+        pool: Connection pool (or None for direct connections)
+        using_pool: Whether the connection came from the pool
+        conn_id: Connection tracking ID (optional)
     """
     if conn_id and conn_id in connection_tracker:
         logger.info(f"Returning connection {conn_id} (created {time.time() - connection_tracker[conn_id]['created_at']:.1f}s ago)")
@@ -231,26 +238,16 @@ def log_pool_status():
     else:
         logger.info("Pool status unavailable - pool may not be initialized")
 
-# Updated example function with better error handling
-async def example_db_operation():
-    """Example of how to use the connection context manager."""
-    try:
-        with DatabaseConnection() as conn:
-            # Use the connection here
-            cur = conn.cursor()
-            cur.execute("SELECT 1")
-            result = cur.fetchone()
-            cur.close()
-            return result
-    except Exception as e:
-        logger.error(f"Database operation failed: {str(e)}")
-        logger.error(f"Database operation stacktrace: {traceback.format_exc()}")
-        return None
-
-# Updated background task function
 async def safe_background_task(func, *args, **kwargs):
     """
     Safely run a function as a background task with its own database connection.
+    
+    Args:
+        func: The async function to run as a background task
+        *args, **kwargs: Arguments to pass to the function
+    
+    Returns:
+        asyncio.Task object representing the background task
     """
     conn = None
     pool = None
@@ -286,3 +283,19 @@ async def safe_background_task(func, *args, **kwargs):
         logger.error(f"Failed to create background task: {str(e)}")
         logger.error(f"Background task creation stacktrace: {traceback.format_exc()}")
         raise
+
+# Example usage
+async def example_db_operation():
+    """Example of how to use the connection context manager."""
+    try:
+        with DatabaseConnection() as conn:
+            # Use the connection here
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            result = cur.fetchone()
+            cur.close()
+            return result
+    except Exception as e:
+        logger.error(f"Database operation failed: {str(e)}")
+        logger.error(f"Database operation stacktrace: {traceback.format_exc()}")
+        return None

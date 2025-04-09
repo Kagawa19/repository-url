@@ -6,7 +6,7 @@ import time
 from typing import List, Dict, Any, Optional, Tuple
 import json
 from datetime import datetime
-from ai_services_api.services.message.core.db_pool import get_pooled_connection, return_connection, DatabaseConnection
+from ai_services_api.services.message.core.db_pool import get_pooled_connection, return_connection, DatabaseConnection, safe_background_task
 import redis
 
 from ai_services_api.services.message.core.database import get_db_connection
@@ -14,94 +14,185 @@ from ai_services_api.services.message.core.database import get_db_connection
 # Configure logger
 logger = logging.getLogger(__name__)
 
-async def get_user_search_history(user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+# Modified version of update_trending_suggestions to work with safe_background_task
+async def _update_trending_suggestions_task(conn, partial_query: str, selected_suggestion: str):
     """
-    Get recent search history for a user from the database.
+    Background task implementation that accepts a connection.
+    This version is designed to be used with safe_background_task.
     
     Args:
-        user_id: User identifier
-        limit: Maximum number of history items to return
-    
-    Returns:
-        List of recent searches with their timestamps
-    """
-    logger.info(f"Retrieving search history for user {user_id}")
-    conn = None
-    
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Query to get recent searches with timestamp
-        cur.execute("""
-            SELECT sa.query, sa.timestamp 
-            FROM search_analytics sa
-            JOIN search_sessions ss ON sa.search_id = ss.id
-            WHERE ss.user_id = %s
-            ORDER BY sa.timestamp DESC
-            LIMIT %s
-        """, (user_id, limit))
-        
-        history = []
-        rows = cur.fetchall()
-        for row in rows:
-            history.append({
-                "query": row[0],
-                "timestamp": row[1].isoformat() if row[1] else None
-            })
-        
-        logger.info(f"Retrieved {len(history)} search history items for user {user_id}")
-        return history
-    
-    except Exception as e:
-        logger.error(f"Error fetching search history: {e}")
-        return []
-    finally:
-        if conn:
-            conn.close()
-
-async def track_selected_suggestion(user_id: str, partial_query: str, selected_suggestion: str):
-    """
-    Track which suggestion the user selected to improve future personalization
-    and update trending suggestions.
-    
-    Args:
-        user_id: User identifier
+        conn: Database connection (provided by safe_background_task)
         partial_query: The partial query that was typed
         selected_suggestion: The suggestion that was selected
     """
-    logger.info(f"Tracking selected suggestion for user {user_id}")
-    
-    conn = None
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Record the selection in the database
-        cur.execute("""
-            INSERT INTO suggestion_selections
-                (user_id, partial_query, selected_suggestion, timestamp)
-            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
-            RETURNING id
-        """, (user_id, partial_query, selected_suggestion))
-        
-        selection_id = cur.fetchone()[0]
-        
-        # Update trending suggestions in a separate background task
-        asyncio.create_task(
-            update_trending_suggestions(partial_query, selected_suggestion)
+        # Connect to Redis for trending data
+        redis_client = redis.Redis(
+            host=os.getenv('REDIS_HOST', 'localhost'),
+            port=int(os.getenv('REDIS_PORT', 6379)), 
+            db=int(os.getenv('REDIS_TRENDING_DB', 2)),
+            decode_responses=True
         )
         
-        conn.commit()
-        logger.info(f"Successfully recorded suggestion selection with ID {selection_id}")
+        current_time = int(time.time())
+        
+        # Normalize the query and suggestion
+        normalized_query = partial_query.lower().strip()
+        normalized_suggestion = selected_suggestion.lower().strip()
+        
+        # Update trending data with different time windows
+        # 1-hour trending (short-term)
+        hour_trending_key = f"trending:hour:{int(current_time / 3600)}"
+        redis_client.zincrby(hour_trending_key, 1, normalized_suggestion)
+        # Set expiration for 2 hours (to ensure overlap)
+        redis_client.expire(hour_trending_key, 7200)
+        
+        # 24-hour trending (medium-term)
+        day_trending_key = f"trending:day:{int(current_time / 86400)}"
+        redis_client.zincrby(day_trending_key, 1, normalized_suggestion)
+        # Set expiration for 48 hours (to ensure overlap)
+        redis_client.expire(day_trending_key, 172800)
+        
+        # Update query-specific trending
+        query_trending_key = f"trending:query:{normalized_query}"
+        redis_client.zincrby(query_trending_key, 1, normalized_suggestion)
+        redis_client.expire(query_trending_key, 604800)  # 1 week
+        
+        # Update popularity weights for hybrid ranking
+        popularity_key = f"query_popularity:{normalized_query}"
+        
+        # Get existing popularity data or create new
+        popularity_data = redis_client.get(popularity_key)
+        popularity_weights = json.loads(popularity_data) if popularity_data else {}
+        
+        # Update weight for this suggestion
+        current_weight = popularity_weights.get(normalized_suggestion, 0)
+        popularity_weights[normalized_suggestion] = min(1.0, current_weight + 0.05)
+        
+        # Apply decay to other suggestions
+        for suggestion in popularity_weights:
+            if suggestion != normalized_suggestion:
+                popularity_weights[suggestion] *= 0.99  # Slight decay
+        
+        # Store updated popularity weights
+        redis_client.setex(
+            popularity_key,
+            604800,  # 1 week
+            json.dumps(popularity_weights)
+        )
+        
+        # Record this update in the database for analytics
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO suggestion_selections_analytics
+                        (query, suggestion, timestamp)
+                    VALUES (%s, %s, CURRENT_TIMESTAMP)
+                """, (normalized_query, normalized_suggestion))
+                conn.commit()
+                cur.close()
+            except Exception as db_error:
+                logger.error(f"Error recording trending data in database: {db_error}")
+                if hasattr(conn, 'rollback'):
+                    conn.rollback()
+        
+        logger.info(f"Updated trending data for suggestion: {normalized_suggestion}")
         
     except Exception as e:
-        logger.error(f"Error tracking suggestion selection: {e}")
+        logger.error(f"Error updating trending suggestions: {e}")
+
+# Wrapper function to launch the background task with proper connection handling
+async def update_trending_suggestions(partial_query: str, selected_suggestion: str):
+    """
+    Update trending suggestions data - wrapper function that uses safe_background_task
+    for proper connection management.
+    
+    Args:
+        partial_query: The partial query that was typed
+        selected_suggestion: The suggestion that was selected
+    """
+    try:
+        await safe_background_task(
+            _update_trending_suggestions_task, 
+            partial_query, 
+            selected_suggestion
+        )
+    except Exception as e:
+        logger.error(f"Failed to start trending suggestions update task: {e}")
+
+# Modified version of _record_search_history to work with safe_background_task
+async def _record_search_history_task(conn, user_id: str, query: str, result_count: int):
+    """
+    Record search in user history - implementation for safe_background_task.
+    
+    Args:
+        conn: Database connection (provided by safe_background_task)
+        user_id: User identifier
+        query: The search query
+        result_count: Number of results found
+    """
+    try:
+        # Connect to Redis for search history
+        redis_client = redis.Redis(
+            host=os.getenv('REDIS_HOST', 'localhost'),
+            port=int(os.getenv('REDIS_PORT', 6379)),
+            db=int(os.getenv('REDIS_HISTORY_DB', 3)),
+            decode_responses=True
+        )
+        
+        # Create history entry
+        history_entry = {
+            "query": query,
+            "timestamp": datetime.utcnow().isoformat(),
+            "result_count": result_count
+        }
+        
+        # Add to user-specific history list with limit
+        history_key = f"search_history:{user_id}"
+        redis_client.lpush(history_key, json.dumps(history_entry))
+        redis_client.ltrim(history_key, 0, 99)  # Keep most recent 100 searches
+        redis_client.expire(history_key, 86400 * 30)  # 30-day expiry
+        
+        # Also add to global search history for trending analytics
+        popular_key = "popular_searches"
+        redis_client.zincrby(popular_key, 1, query.lower())
+        redis_client.expire(popular_key, 86400 * 7)  # 7-day expiry for popular searches
+        
+        # Also record in the database if connection is provided
         if conn:
-            conn.rollback()
-    finally:
-        if conn:
-            conn.close()
+            try:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO user_search_history
+                        (user_id, query, result_count, timestamp)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                """, (user_id, query, result_count))
+                conn.commit()
+                cur.close()
+            except Exception as db_error:
+                logger.error(f"Error recording search history in database: {db_error}")
+                if hasattr(conn, 'rollback'):
+                    conn.rollback()
+        
+    except Exception as e:
+        logger.error(f"Error recording search history: {e}")
+
+# Wrapper function for _record_search_history with safe_background_task
+async def record_search_history(user_id: str, query: str, result_count: int):
+    """
+    Record search in user history - wrapper that uses safe_background_task.
+    
+    Args:
+        user_id: User identifier
+        query: The search query
+        result_count: Number of results found
+    """
+    try:
+        await safe_background_task(_record_search_history_task, user_id, query, result_count)
+    except Exception as e:
+        logger.error(f"Failed to start search history recording task: {e}")
+
 
 async def personalize_suggestions(
     suggestions: List[Dict[str, Any]], 
@@ -270,9 +361,57 @@ async def personalize_suggestions(
     
     return personalized_suggestions
 
+
+# Optimized Method #1: get_user_search_history
+async def get_user_search_history(user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Get recent search history for a user from the database.
+    Optimized to use the DatabaseConnection context manager.
+    
+    Args:
+        user_id: User identifier
+        limit: Maximum number of history items to return
+    
+    Returns:
+        List of recent searches with their timestamps
+    """
+    logger.info(f"Retrieving search history for user {user_id}")
+    
+    try:
+        with DatabaseConnection() as conn:
+            cur = conn.cursor()
+            
+            # Query to get recent searches with timestamp
+            cur.execute("""
+                SELECT sa.query, sa.timestamp 
+                FROM search_analytics sa
+                JOIN search_sessions ss ON sa.search_id = ss.id
+                WHERE ss.user_id = %s
+                ORDER BY sa.timestamp DESC
+                LIMIT %s
+            """, (user_id, limit))
+            
+            history = []
+            rows = cur.fetchall()
+            for row in rows:
+                history.append({
+                    "query": row[0],
+                    "timestamp": row[1].isoformat() if row[1] else None
+                })
+            
+            cur.close()
+            logger.info(f"Retrieved {len(history)} search history items for user {user_id}")
+            return history
+    
+    except Exception as e:
+        logger.error(f"Error fetching search history: {e}")
+        return []
+
+# Optimized Method #2: get_selected_suggestions_with_times
 async def get_selected_suggestions_with_times(user_id: str, limit: int = 10) -> List[Tuple[str, str]]:
     """
     Get recently selected suggestions for a user with timestamps.
+    Optimized to use the DatabaseConnection context manager.
     
     Args:
         user_id: User identifier
@@ -281,32 +420,32 @@ async def get_selected_suggestions_with_times(user_id: str, limit: int = 10) -> 
     Returns:
         List of tuples containing (selected_suggestion, timestamp)
     """
-    conn = None
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Query to get recent selections with timestamps
-        cur.execute("""
-            SELECT selected_suggestion, timestamp
-            FROM suggestion_selections
-            WHERE user_id = %s
-            ORDER BY timestamp DESC
-            LIMIT %s
-        """, (user_id, limit))
-        
-        return [(row[0], row[1].isoformat() if row[1] else None) for row in cur.fetchall()]
+        with DatabaseConnection() as conn:
+            cur = conn.cursor()
+            
+            # Query to get recent selections with timestamps
+            cur.execute("""
+                SELECT selected_suggestion, timestamp
+                FROM suggestion_selections
+                WHERE user_id = %s
+                ORDER BY timestamp DESC
+                LIMIT %s
+            """, (user_id, limit))
+            
+            result = [(row[0], row[1].isoformat() if row[1] else None) for row in cur.fetchall()]
+            cur.close()
+            return result
         
     except Exception as e:
         logger.error(f"Error fetching selected suggestions with timestamps: {e}")
         return []
-    finally:
-        if conn:
-            conn.close()
 
+# Optimized Method #3: get_user_expertise_areas
 async def get_user_expertise_areas(user_id: str) -> List[str]:
     """
     Get expertise areas for a user based on profile or past behavior.
+    Optimized to use the DatabaseConnection context manager.
     
     Args:
         user_id: User identifier
@@ -314,58 +453,347 @@ async def get_user_expertise_areas(user_id: str) -> List[str]:
     Returns:
         List of expertise areas
     """
-    conn = None
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Try to get explicit expertise areas from user profile
-        cur.execute("""
-            SELECT expertise_areas 
-            FROM user_profiles
-            WHERE user_id = %s
-        """, (user_id,))
-        
-        row = cur.fetchone()
-        if row and row[0]:
-            try:
-                # Try to parse as JSON array
-                return json.loads(row[0])
-            except:
-                # If not valid JSON, treat as comma-separated list
-                return [area.strip() for area in row[0].split(',') if area.strip()]
-        
-        # If no explicit areas, derive from most common search areas
-        cur.execute("""
-            SELECT sa.query
-            FROM search_analytics sa
-            JOIN search_sessions ss ON sa.search_id = ss.id
-            WHERE ss.user_id = %s
-            ORDER BY sa.timestamp DESC
-            LIMIT 50
-        """, (user_id,))
-        
-        # Extract potential expertise areas from search queries
-        potential_areas = {}
-        for row in cur.fetchall():
-            query = row[0].lower()
-            words = query.split()
+        with DatabaseConnection() as conn:
+            cur = conn.cursor()
             
-            # Count word frequency
-            for word in words:
-                if len(word) > 3:  # Only consider significant words
-                    potential_areas[word] = potential_areas.get(word, 0) + 1
-        
-        # Return top 5 most frequent terms as likely expertise areas
-        sorted_areas = sorted(potential_areas.items(), key=lambda x: x[1], reverse=True)
-        return [area[0] for area in sorted_areas[:5]]
+            # Try to get explicit expertise areas from user profile
+            cur.execute("""
+                SELECT expertise_areas 
+                FROM user_profiles
+                WHERE user_id = %s
+            """, (user_id,))
+            
+            row = cur.fetchone()
+            if row and row[0]:
+                try:
+                    # Try to parse as JSON array
+                    return json.loads(row[0])
+                except:
+                    # If not valid JSON, treat as comma-separated list
+                    return [area.strip() for area in row[0].split(',') if area.strip()]
+            
+            # If no explicit areas, derive from most common search areas
+            cur.execute("""
+                SELECT sa.query
+                FROM search_analytics sa
+                JOIN search_sessions ss ON sa.search_id = ss.id
+                WHERE ss.user_id = %s
+                ORDER BY sa.timestamp DESC
+                LIMIT 50
+            """, (user_id,))
+            
+            # Extract potential expertise areas from search queries
+            potential_areas = {}
+            for row in cur.fetchall():
+                query = row[0].lower()
+                words = query.split()
+                
+                # Count word frequency
+                for word in words:
+                    if len(word) > 3:  # Only consider significant words
+                        potential_areas[word] = potential_areas.get(word, 0) + 1
+            
+            # Return top 5 most frequent terms as likely expertise areas
+            sorted_areas = sorted(potential_areas.items(), key=lambda x: x[1], reverse=True)
+            cur.close()
+            return [area[0] for area in sorted_areas[:5]]
         
     except Exception as e:
         logger.error(f"Error fetching user expertise areas: {e}")
         return []
-    finally:
-        if conn:
-            conn.close()
+
+# Optimized Method #4: get_collaborative_suggestions
+async def get_collaborative_suggestions(
+    user_id: str, 
+    partial_query: str, 
+    limit: int = 5
+) -> List[Dict[str, Any]]:
+    """
+    Get suggestions based on collaborative filtering of user behavior.
+    Optimized to use the DatabaseConnection context manager.
+    
+    Args:
+        user_id: User identifier
+        partial_query: Partial query to find similar queries for
+        limit: Maximum number of suggestions to return
+        
+    Returns:
+        List of collaboratively filtered suggestions
+    """
+    logger.info(f"Getting collaborative suggestions for user {user_id} and query '{partial_query}'")
+    
+    try:
+        with DatabaseConnection() as conn:
+            cur = conn.cursor()
+            
+            # Step 1: Find similar users who searched for similar queries
+            # First, get this user's recent searches
+            cur.execute("""
+                SELECT sa.query 
+                FROM search_analytics sa
+                JOIN search_sessions ss ON sa.search_id = ss.id
+                WHERE ss.user_id = %s
+                ORDER BY sa.timestamp DESC
+                LIMIT 10
+            """, (user_id,))
+            
+            user_searches = [row[0].lower() for row in cur.fetchall()]
+            
+            # If user has no search history, return empty list
+            if not user_searches:
+                return []
+                
+            # Find similar users who searched for the same things
+            placeholders = ','.join(['%s'] * len(user_searches))
+            
+            # This query finds users who searched for similar things
+            cur.execute(f"""
+                WITH similar_users AS (
+                    SELECT DISTINCT ss.user_id, COUNT(*) as overlap_count
+                    FROM search_analytics sa
+                    JOIN search_sessions ss ON sa.search_id = ss.id
+                    WHERE LOWER(sa.query) IN ({placeholders})
+                    AND ss.user_id != %s
+                    GROUP BY ss.user_id
+                    ORDER BY overlap_count DESC
+                    LIMIT 50
+                )
+                SELECT sa.query, COUNT(*) as frequency
+                FROM search_analytics sa
+                JOIN search_sessions ss ON sa.search_id = ss.id
+                JOIN similar_users su ON ss.user_id = su.user_id
+                WHERE LOWER(sa.query) LIKE %s
+                AND LOWER(sa.query) NOT IN ({placeholders})
+                GROUP BY sa.query
+                ORDER BY frequency DESC
+                LIMIT %s
+            """, user_searches + [user_id, f'%{partial_query.lower()}%'] + user_searches + [limit])
+            
+            collaborative_suggestions = []
+            for row in cur.fetchall():
+                suggestion_text = row[0]
+                frequency = row[1]
+                
+                # Normalize score between 0.6 and 0.9
+                normalized_score = 0.6 + min(0.3, frequency / 10.0)
+                
+                collaborative_suggestions.append({
+                    "text": suggestion_text,
+                    "source": "collaborative",
+                    "score": normalized_score
+                })
+            
+            cur.close()
+            return collaborative_suggestions
+        
+    except Exception as e:
+        logger.error(f"Error getting collaborative suggestions: {e}")
+        return []
+
+# Optimized Method #5: get_selected_suggestions
+async def get_selected_suggestions(user_id: str, limit: int = 10) -> List[str]:
+    """
+    Get recently selected suggestions for a user.
+    Optimized to use the DatabaseConnection context manager.
+    
+    Args:
+        user_id: User identifier
+        limit: Maximum number of items to return
+        
+    Returns:
+        List of selected suggestion texts
+    """
+    try:
+        with DatabaseConnection() as conn:
+            cur = conn.cursor()
+            
+            # Query to get recent selections
+            cur.execute("""
+                SELECT selected_suggestion
+                FROM suggestion_selections
+                WHERE user_id = %s
+                ORDER BY timestamp DESC
+                LIMIT %s
+            """, (user_id, limit))
+            
+            result = [row[0] for row in cur.fetchall()]
+            cur.close()
+            return result
+        
+    except Exception as e:
+        logger.error(f"Error fetching selected suggestions: {e}")
+        return []
+
+# Optimized Method #6: track_selected_suggestion
+async def track_selected_suggestion(user_id: str, partial_query: str, selected_suggestion: str):
+    """
+    Track which suggestion the user selected to improve future personalization
+    and update trending suggestions.
+    Optimized to use the DatabaseConnection context manager.
+    
+    Args:
+        user_id: User identifier
+        partial_query: The partial query that was typed
+        selected_suggestion: The suggestion that was selected
+    """
+    logger.info(f"Tracking selected suggestion for user {user_id}")
+    
+    try:
+        with DatabaseConnection() as conn:
+            cur = conn.cursor()
+            
+            # Record the selection in the database
+            cur.execute("""
+                INSERT INTO suggestion_selections
+                    (user_id, partial_query, selected_suggestion, timestamp)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                RETURNING id
+            """, (user_id, partial_query, selected_suggestion))
+            
+            selection_id = cur.fetchone()[0]
+            conn.commit()
+            logger.info(f"Successfully recorded suggestion selection with ID {selection_id}")
+            
+            # Update trending suggestions in a separate background task
+            # Background task now uses safe_background_task for proper connection management
+            asyncio.create_task(
+                update_trending_suggestions(partial_query, selected_suggestion)
+            )
+            
+    except Exception as e:
+        logger.error(f"Error tracking suggestion selection: {e}")
+
+# Optimized Method #7: get_context_popular_queries
+async def get_context_popular_queries(context: str, limit: int = 5) -> List[str]:
+    """
+    Get popular queries specific to a context type.
+    Optimized to use the DatabaseConnection context manager.
+    
+    Args:
+        context: Context type (name, theme, designation, publication)
+        limit: Maximum number of items to return
+        
+    Returns:
+        List of popular queries for this context
+    """
+    try:
+        popular_queries = []
+        
+        with DatabaseConnection() as conn:
+            cur = conn.cursor()
+            
+            # Get popular searches filtered by context
+            if context == "name":
+                # For name searches, look for patterns like "John Smith" or queries with "Name:"
+                cur.execute("""
+                    SELECT query, COUNT(*) as frequency
+                    FROM search_analytics
+                    WHERE 
+                        (query LIKE '% %' AND length(query) < 30) OR
+                        query LIKE 'name:%'
+                    GROUP BY query
+                    ORDER BY frequency DESC
+                    LIMIT %s
+                """, (limit,))
+                
+            elif context == "theme":
+                # For theme searches, look for queries that were used in theme search
+                cur.execute("""
+                    SELECT query, COUNT(*) as frequency
+                    FROM search_analytics
+                    WHERE 
+                        query LIKE 'theme:%' OR
+                        search_type = 'theme'
+                    GROUP BY query
+                    ORDER BY frequency DESC
+                    LIMIT %s
+                """, (limit,))
+                
+            elif context == "designation":
+                # For designation searches
+                cur.execute("""
+                    SELECT query, COUNT(*) as frequency
+                    FROM search_analytics
+                    WHERE 
+                        query LIKE 'designation:%' OR
+                        search_type = 'designation'
+                    GROUP BY query
+                    ORDER BY frequency DESC
+                    LIMIT %s
+                """, (limit,))
+                
+            elif context == "publication":
+                # For publication searches
+                cur.execute("""
+                    SELECT query, COUNT(*) as frequency
+                    FROM search_analytics
+                    WHERE 
+                        query LIKE 'publication:%' OR
+                        search_type = 'publication'
+                    GROUP BY query
+                    ORDER BY frequency DESC
+                    LIMIT %s
+                """, (limit,))
+                
+            else:
+                # For general searches
+                cur.execute("""
+                    SELECT query, COUNT(*) as frequency
+                    FROM search_analytics
+                    WHERE query NOT LIKE '%:%'  -- Exclude prefixed queries
+                    GROUP BY query
+                    ORDER BY frequency DESC
+                    LIMIT %s
+                """, (limit,))
+                
+            # Process results
+            for row in cur.fetchall():
+                query = row[0]
+                
+                # Clean up query - remove context prefix if present
+                if context and query.lower().startswith(f"{context}:"):
+                    query = query[len(context)+1:].strip()
+                
+                if query and query.strip():
+                    popular_queries.append(query.strip())
+                    
+            cur.close()
+            return popular_queries
+                
+    except Exception as db_error:
+        logger.error(f"Database error in context popular queries: {db_error}")
+        
+        # Fall back to Redis if available
+        try:
+            redis_client = redis.Redis(
+                host=os.getenv('REDIS_HOST', 'localhost'),
+                port=int(os.getenv('REDIS_PORT', 6379)),
+                db=int(os.getenv('REDIS_TRENDING_DB', 2)),
+                decode_responses=True
+            )
+            
+            # Try to get context-specific trending from Redis
+            context_key = f"trending_context:{context or 'general'}"
+            trending = redis_client.zrevrange(context_key, 0, limit-1)
+            
+            if trending:
+                return trending
+        except Exception as redis_error:
+            logger.error(f"Redis error in context popular queries: {redis_error}")
+        
+        # If all else fails, return hardcoded defaults based on context
+        if context == "name":
+            return ["John Smith", "Jane Doe", "Michael Johnson", "David Williams", "Sara Chen"]
+        elif context == "theme":
+            return ["Neuroscience", "Data Science", "Artificial Intelligence", "Psychology", "Biochemistry"]
+        elif context == "designation":
+            return ["Professor", "Researcher", "Director", "Scientist", "Student"]
+        elif context == "publication":
+            return ["Journal of Neuroscience", "Nature", "Science", "IEEE Transactions", "PLOS ONE"]
+        else:
+            return ["Research", "Science", "Technology", "Medicine", "Engineering"]
+        
 
 async def get_trending_suggestions(partial_query: str, limit: int = 5) -> List[Dict[str, Any]]:
     """
@@ -520,133 +948,4 @@ async def update_trending_suggestions(partial_query: str, selected_suggestion: s
     except Exception as e:
         logger.error(f"Error updating trending suggestions: {e}")
 
-
-
-
-async def get_collaborative_suggestions(
-    user_id: str, 
-    partial_query: str, 
-    limit: int = 5
-) -> List[Dict[str, Any]]:
-    """
-    Get suggestions based on collaborative filtering of user behavior.
-    
-    Args:
-        user_id: User identifier
-        partial_query: Partial query to find similar queries for
-        limit: Maximum number of suggestions to return
-        
-    Returns:
-        List of collaboratively filtered suggestions
-    """
-    logger.info(f"Getting collaborative suggestions for user {user_id} and query '{partial_query}'")
-    
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Step 1: Find similar users who searched for similar queries
-        # This is a simplified collaborative filtering approach for search
-        
-        # First, get this user's recent searches
-        cur.execute("""
-            SELECT sa.query 
-            FROM search_analytics sa
-            JOIN search_sessions ss ON sa.search_id = ss.id
-            WHERE ss.user_id = %s
-            ORDER BY sa.timestamp DESC
-            LIMIT 10
-        """, (user_id,))
-        
-        user_searches = [row[0].lower() for row in cur.fetchall()]
-        
-        # If user has no search history, return empty list
-        if not user_searches:
-            return []
-            
-        # Find similar users who searched for the same things
-        placeholders = ','.join(['%s'] * len(user_searches))
-        
-        # This query finds users who searched for similar things
-        # It's intentionally simplified for compatibility
-        cur.execute(f"""
-            WITH similar_users AS (
-                SELECT DISTINCT ss.user_id, COUNT(*) as overlap_count
-                FROM search_analytics sa
-                JOIN search_sessions ss ON sa.search_id = ss.id
-                WHERE LOWER(sa.query) IN ({placeholders})
-                AND ss.user_id != %s
-                GROUP BY ss.user_id
-                ORDER BY overlap_count DESC
-                LIMIT 50
-            )
-            SELECT sa.query, COUNT(*) as frequency
-            FROM search_analytics sa
-            JOIN search_sessions ss ON sa.search_id = ss.id
-            JOIN similar_users su ON ss.user_id = su.user_id
-            WHERE LOWER(sa.query) LIKE %s
-            AND LOWER(sa.query) NOT IN ({placeholders})
-            GROUP BY sa.query
-            ORDER BY frequency DESC
-            LIMIT %s
-        """, user_searches + [user_id, f'%{partial_query.lower()}%'] + user_searches + [limit])
-        
-        collaborative_suggestions = []
-        for row in cur.fetchall():
-            suggestion_text = row[0]
-            frequency = row[1]
-            
-            # Normalize score between 0.6 and 0.9
-            # This keeps collaborative suggestions competitive but not dominant
-            normalized_score = 0.6 + min(0.3, frequency / 10.0)
-            
-            collaborative_suggestions.append({
-                "text": suggestion_text,
-                "source": "collaborative",
-                "score": normalized_score
-            })
-        
-        return collaborative_suggestions
-        
-    except Exception as e:
-        logger.error(f"Error getting collaborative suggestions: {e}")
-        return []
-    finally:
-        if conn:
-            conn.close()
-
-async def get_selected_suggestions(user_id: str, limit: int = 10) -> List[str]:
-    """
-    Get recently selected suggestions for a user.
-    
-    Args:
-        user_id: User identifier
-        limit: Maximum number of items to return
-        
-    Returns:
-        List of selected suggestion texts
-    """
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Query to get recent selections
-        cur.execute("""
-            SELECT selected_suggestion
-            FROM suggestion_selections
-            WHERE user_id = %s
-            ORDER BY timestamp DESC
-            LIMIT %s
-        """, (user_id, limit))
-        
-        return [row[0] for row in cur.fetchall()]
-        
-    except Exception as e:
-        logger.error(f"Error fetching selected suggestions: {e}")
-        return []
-    finally:
-        if conn:
-            conn.close()
 
