@@ -32,7 +32,7 @@ def get_connection_params():
     else:
         in_docker = os.getenv('DOCKER_ENV', 'false').lower() == 'true'
         return {
-            'host': os.getenv('POSTGRES_HOST', 'localhost'),
+            'host': os.getenv('POSTGRES_HOST', 'postgres'),  # Changed from 'localhost' to 'postgres'
             'port': os.getenv('POSTGRES_PORT', '5432'),
             'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
             'user': os.getenv('POSTGRES_USER', 'postgres'),
@@ -66,6 +66,37 @@ def get_db_pool(min_conn=10, max_conn=50, dbname=None):
     
     return _DB_POOL
 
+# This class tracks if a connection comes from a pool
+class PooledConnection:
+    """Wrapper for a database connection that returns it to the pool on close."""
+    
+    def __init__(self, connection, pool=None, from_pool=False):
+        self.connection = connection
+        self.pool = pool
+        self.from_pool = from_pool
+        self.closed = False
+    
+    def close(self):
+        """Return connection to the pool or close it directly."""
+        if self.closed:
+            return
+            
+        if self.from_pool and self.pool:
+            try:
+                self.pool.putconn(self.connection)
+                logger.debug("Connection returned to pool")
+            except Exception as e:
+                logger.error(f"Error returning connection to pool: {e}")
+                self.connection.close()
+        else:
+            self.connection.close()
+            
+        self.closed = True
+    
+    def __getattr__(self, name):
+        """Delegate all other attribute access to the underlying connection."""
+        return getattr(self.connection, name)
+
 def get_db_connection(dbname=None):
     """Get a database connection from the pool or create a new one if pool fails."""
     pool = get_db_pool(dbname=dbname)
@@ -79,19 +110,8 @@ def get_db_connection(dbname=None):
             
             logger.info(f"Successfully got connection from pool")
             
-            # Return connection with custom close method to return to pool
-            orig_close = conn.close
-            def pooled_close():
-                try:
-                    pool.putconn(conn)
-                    logger.debug("Connection returned to pool")
-                except Exception as e:
-                    logger.error(f"Error returning connection to pool: {e}")
-                    orig_close()
-            
-            # Replace the close method
-            conn.close = pooled_close
-            return conn
+            # Return wrapped connection
+            return PooledConnection(conn, pool, True)
             
         except Exception as pool_error:
             logger.error(f"Error getting connection from pool: {pool_error}")
@@ -108,7 +128,9 @@ def get_db_connection(dbname=None):
             # Explicitly set the schema
             cur.execute('SET search_path TO public')
         logger.info(f"Successfully connected to database: {params['dbname']} at {params['host']}")
-        return conn
+        
+        # Return wrapped connection
+        return PooledConnection(conn)
     except psycopg2.OperationalError as e:
         logger.error(f"Error connecting to the database: {e}")
         logger.error(f"Connection params: {params}")
@@ -121,6 +143,22 @@ def close_connection_pool():
         logger.info("Closing database connection pool")
         _DB_POOL.closeall()
         _DB_POOL = None
+
+# Context manager for easier connection handling
+class DatabaseConnection:
+    """Context manager for database connections."""
+    
+    def __init__(self, dbname=None):
+        self.dbname = dbname
+        self.conn = None
+        
+    def __enter__(self):
+        self.conn = get_db_connection(self.dbname)
+        return self.conn
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.conn:
+            self.conn.close()
 
 if __name__ == "__main__":
     try:
