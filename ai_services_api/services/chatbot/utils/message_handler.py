@@ -20,14 +20,17 @@ class MessageHandler:
     @staticmethod
     def clean_response_text(text: str) -> str:
         """
-        Clean and format the response text with DOI preservation.
+        Clean and format the response text with improved structure preservation.
         
         Args:
             text (str): The input text with markdown formatting
             
         Returns:
-            str: Cleaned and reformatted text
+            str: Cleaned and reformatted text that preserves structure for lists
         """
+        # Check if text is part of a structured publication list
+        is_publication_item = bool(re.search(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:|Research Domains:)', text))
+        
         # Explicit DOI URL protection pattern
         doi_url_pattern = r'(https?://doi\.org/10\.\d+/[^\s]+)'
         doi_pattern = r'(10\.\d+/[^\s]+)'
@@ -40,10 +43,37 @@ class MessageHandler:
         if re.match(r'^DOI:', text.strip()):
             return text.strip()
         
+        # Handle structured publication data differently
+        if is_publication_item:
+            # For publication data, preserve line structure but clean up extra whitespace
+            cleaned = text
+            
+            # Fix line breaks to ensure each field is on its own line
+            for field in ['Title:', 'Authors:', 'Publication Year:', 'DOI:', 'Abstract:', 'Summary:', 'Research Domains:', 'Citation:']:
+                # Ensure field starts on a new line
+                if field in cleaned and not re.search(f'(\n|^){field}', cleaned):
+                    cleaned = cleaned.replace(field, f'\n{field}')
+            
+            # Clean up extra whitespace while preserving line structure
+            lines = [line.strip() for line in cleaned.split('\n')]
+            cleaned = '\n'.join(lines)
+            
+            # Remove markdown bold marks
+            cleaned = cleaned.replace('**', '')
+            
+            return cleaned
+        
         # Skip cleaning for numbered publication list items
         if re.match(r'^\d+\.\s+Title:', text.strip()):
             cleaned = text.replace('\n**', ' ')
             cleaned = cleaned.replace('**', '')
+            
+            # Ensure each field is on a new line
+            for field in ['Title:', 'Authors:', 'Publication Year:', 'DOI:', 'Abstract:', 'Summary:', 'Research Domains:']:
+                pattern = f'({field})'
+                replacement = f'\n{field}'
+                cleaned = re.sub(pattern, replacement, cleaned)
+            
             return cleaned.strip()
         
         # Temporarily protect DOI URLs
@@ -97,7 +127,7 @@ class MessageHandler:
     
     async def process_stream_response(self, response_stream):
         """
-        Process the streaming response with enhanced formatting, structure preservation, and metadata handling.
+        Process the streaming response with enhanced formatting and structure preservation.
         
         Args:
             response_stream: Async generator of response chunks
@@ -109,6 +139,7 @@ class MessageHandler:
         metadata = None
         in_publication_list = False
         list_count = 0
+        publication_buffer = ""
         
         try:
             async for chunk in response_stream:
@@ -152,38 +183,66 @@ class MessageHandler:
                     
                 buffer += text
                 
-                # Detect publication lists (unique preservation logic)
-                list_pattern = r'\d+\.\s+Title:'
-                if re.search(list_pattern, buffer) and not in_publication_list:
-                    in_publication_list = True
-                    list_count += 1
+                # Detect publication lists
+                if re.search(r'\d+\.\s+Title:', buffer) or re.search(r'Title:', buffer):
+                    if not in_publication_list:
+                        in_publication_list = True
+                        publication_buffer = buffer
+                        buffer = ""
+                        continue
+                    else:
+                        publication_buffer += text
+                        
+                        # Check if we have a complete publication entry or multiple entries
+                        if re.search(r'\n\d+\.', publication_buffer):
+                            # Multiple entries detected, try to split
+                            entries = re.split(r'(?=\d+\.\s+Title:)', publication_buffer)
+                            if len(entries) > 1:
+                                # Process all but the last entry
+                                for entry in entries[:-1]:
+                                    if entry.strip():
+                                        cleaned_entry = self.clean_response_text(entry)
+                                        yield cleaned_entry
+                                
+                                # Keep the last entry in the buffer
+                                publication_buffer = entries[-1]
+                            
+                        # Check if entry appears complete (has multiple fields and ending line)
+                        elif len(re.findall(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', publication_buffer)) >= 3 and '\n\n' in publication_buffer:
+                            # This looks like a complete entry
+                            cleaned_entry = self.clean_response_text(publication_buffer)
+                            yield cleaned_entry
+                            publication_buffer = ""
+                            in_publication_list = False
+                            
+                        continue
                 
-                # Unique list handling logic
-                if in_publication_list:
-                    # Try to find complete list items
-                    items = re.split(r'(?=\d+\.\s+Title:)', buffer)
-                    if len(items) > 1:
-                        # Keep the last (potentially incomplete) item in buffer
-                        complete_items = items[:-1]
-                        buffer = items[-1]
+                # If we were in a publication list but now we're not, yield the publication buffer
+                if in_publication_list and not re.search(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', text):
+                    if publication_buffer.strip():
+                        cleaned_entry = self.clean_response_text(publication_buffer)
+                        yield cleaned_entry
+                    publication_buffer = ""
+                    in_publication_list = False
+                
+                # Normal sentence processing for non-publication content
+                if not in_publication_list:
+                    # Check if buffer contains complete sentences
+                    sentences = re.split(r'(?<=[.!?])\s+', buffer)
+                    if len(sentences) > 1:
+                        # Process all but the last sentence
+                        for sentence in sentences[:-1]:
+                            if sentence.strip():
+                                cleaned_sentence = self.clean_response_text(sentence)
+                                yield cleaned_sentence
                         
-                        for item in complete_items:
-                            if item.strip():
-                                # Use cleaning method, but preserve DOI exactly
-                                formatted_item = self.clean_response_text(item)
-                                yield formatted_item
-                else:
-                    # Normal sentence processing
-                    while '.' in buffer:
-                        split_idx = buffer.find('.') + 1
-                        sentence = self.clean_response_text(buffer[:split_idx])
-                        buffer = buffer[split_idx:].lstrip()
-                        
-                        if sentence.strip():
-                            yield sentence
+                        # Keep the last sentence in the buffer
+                        buffer = sentences[-1]
             
-            # Handle remaining buffer
-            if buffer.strip():
+            # Handle any remaining text in buffers
+            if publication_buffer.strip():
+                yield self.clean_response_text(publication_buffer)
+            elif buffer.strip():
                 yield self.clean_response_text(buffer)
             
             # Yield metadata if exists
@@ -198,13 +257,14 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"Error processing stream response: {e}", exc_info=True)
             # Yield any remaining buffer to avoid losing content
-            if buffer.strip():
+            if publication_buffer.strip():
+                yield self.clean_response_text(publication_buffer)
+            elif buffer.strip():
                 yield self.clean_response_text(buffer)
             
             # If metadata was captured but not yet yielded, yield it now
             if metadata and not isinstance(metadata, dict):
                 yield {'is_metadata': True, 'metadata': metadata}
-
     async def _create_error_metadata(self, start_time: float, error_type: str) -> Dict:
         """Create standardized error metadata."""
         return {

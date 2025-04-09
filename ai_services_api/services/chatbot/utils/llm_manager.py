@@ -1708,13 +1708,18 @@ class GeminiLLMManager:
                 pub_parts.append(f"{prefix}Citation: {pub.get('citation')}")
                 
             # Add any EXPERT connections if applicable
-            # (This relies on expert lookup which we'll implement later)
             expert_id = pub.get('expert_id')
             if expert_id:
                 pub_parts.append(f"{prefix}Associated with APHRC Expert ID: {expert_id}")
             
-            # Join all publication parts with newlines
-            context_parts.append("\n".join(pub_parts))
+            # Join all publication parts with explicit newlines and add extra spacing between fields
+            formatted_pub = "\n".join(pub_parts) + "\n"  # Extra newline after each publication
+            
+            # Add a separator line between publications for clearer formatting
+            if is_list_format and idx < len(publications):
+                formatted_pub += "\n" + "-" * 40 + "\n"
+            
+            context_parts.append(formatted_pub)
         
         # Add instructions for the model about how to use this data
         usage_instructions = """
@@ -1723,6 +1728,7 @@ class GeminiLLMManager:
     - Use the exact titles, authors, and years provided
     - Include DOI links when relevant
     - Mention research domains to provide context
+    - IMPORTANT: Maintain line-by-line formatting for readability
     """
 
         # Join everything with double newlines for better separation
