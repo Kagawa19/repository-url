@@ -53,7 +53,7 @@ async def get_test_user_id(request: Request) -> str:
     return TEST_USER_ID
 
 # Only define each endpoint once
-@router.get("/advanced_search/{query}")
+@router.get("/advanced_searchh/{query}")
 async def search_experts(
     query: str,
     request: Request,
@@ -76,7 +76,7 @@ async def predict_query(
 
 # Add these to your router file (search.py)
 
-@router.get("/advanced_searchh")
+@router.get("/advanced_search")
 async def advanced_search(
     request: Request,
     user_id: str = Depends(get_user_id),
