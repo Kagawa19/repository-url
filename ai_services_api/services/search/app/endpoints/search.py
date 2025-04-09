@@ -72,7 +72,7 @@ async def predict_query(
 ):
     """Predict query completion based on partial input using Gemini API."""
     logger.info(f"Received query prediction request - Partial query: {partial_query}, User: {user_id}")
-    return await process_query_prediction(partial_query, user_id)
+    return await process_advanced_query_prediction(partial_query, user_id)
 
 # Add these to your router file (search.py)
 
