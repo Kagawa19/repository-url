@@ -158,8 +158,8 @@ class GoogleAutocompletePredictor:
             self.cache_maxsize = 1000  # Maximum cache entries
             self.suggestion_cache = TTLCache(maxsize=self.cache_maxsize, ttl=self.cache_ttl)
             if connection_params is None:
-            connection_params = get_connection_params()
-        
+                connection_params = get_connection_params()
+            
             # Initialize suggestion generator with connection params
             self.suggestion_generator = DatabaseSuggestionGenerator(connection_params)
             
