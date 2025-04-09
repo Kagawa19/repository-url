@@ -797,7 +797,7 @@ async def process_advanced_query_prediction(
                 # Sort by score and deduplicate
                 seen = set()
                 filtered_suggestions = []
-                for item in sorted(all_suggestions, key=lambda x: x.get("score", 0), reverse=True):
+                for item in sorted(all_suggestions, key=lambda x: -x.get("score", 0), reverse=True):
                     text = item.get("text", "").lower()
                     if text and text not in seen:
                         seen.add(text)
