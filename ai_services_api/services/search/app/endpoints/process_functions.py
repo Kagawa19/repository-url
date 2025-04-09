@@ -14,10 +14,9 @@ from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutoco
 from ai_services_api.services.message.core.database import get_db_connection
 from ai_services_api.services.search.core.models import PredictionResponse
 from ai_services_api.services.search.core.personalization import get_selected_suggestions, get_trending_suggestions, get_user_search_history, personalize_suggestions
-from ai_services_api.services.message.core.db_pool import get_pooled_connection, return_connection, DatabaseConnection
-from ai_services_api.services.message.core.db_pool import (
-    DatabaseConnection, get_pooled_connection, return_connection, log_pool_status, safe_background_task
-)
+
+# In your other Python script
+from ai_services_api.services.message.core.database import get_db_connection, close_connection_pool, DatabaseConnection
 
 # Configure logger
 logger = logging.getLogger(__name__)

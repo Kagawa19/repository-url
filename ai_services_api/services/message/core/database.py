@@ -27,16 +27,18 @@ def get_connection_params():
             'port': parsed_url.port,
             'dbname': parsed_url.path[1:],  # Remove leading '/'
             'user': parsed_url.username,
-            'password': parsed_url.password
+            'password': parsed_url.password,
+            'connect_timeout': 10  # Timeout for connection attempt
         }
     else:
         in_docker = os.getenv('DOCKER_ENV', 'false').lower() == 'true'
         return {
-            'host': os.getenv('POSTGRES_HOST', 'postgres'),  # Changed from 'localhost' to 'postgres'
+            'host': os.getenv('POSTGRES_HOST', 'postgres'),
             'port': os.getenv('POSTGRES_PORT', '5432'),
             'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
             'user': os.getenv('POSTGRES_USER', 'postgres'),
-            'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres')
+            'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres'),
+            'connect_timeout': 10  # Timeout for connection attempt
         }
 
 def get_db_pool(min_conn=10, max_conn=50, dbname=None):
@@ -66,7 +68,6 @@ def get_db_pool(min_conn=10, max_conn=50, dbname=None):
     
     return _DB_POOL
 
-# This class tracks if a connection comes from a pool
 class PooledConnection:
     """Wrapper for a database connection that returns it to the pool on close."""
     
@@ -80,17 +81,18 @@ class PooledConnection:
         """Return connection to the pool or close it directly."""
         if self.closed:
             return
-            
+        
         if self.from_pool and self.pool:
             try:
                 self.pool.putconn(self.connection)
                 logger.debug("Connection returned to pool")
             except Exception as e:
                 logger.error(f"Error returning connection to pool: {e}")
+                # Handle failure to return to pool by closing directly
                 self.connection.close()
         else:
             self.connection.close()
-            
+        
         self.closed = True
     
     def __getattr__(self, name):
