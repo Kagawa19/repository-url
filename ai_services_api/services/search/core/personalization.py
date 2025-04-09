@@ -303,6 +303,197 @@ async def get_selected_suggestions(user_id: str, limit: int = 10) -> List[str]:
     except Exception as e:
         logger.error(f"Error fetching selected suggestions: {e}")
         return []
+    
+async def personalize_suggestions(
+    suggestions: List[Dict[str, Any]], 
+    user_id: str, 
+    partial_query: str
+) -> List[Dict[str, Any]]:
+    """
+    Re-rank suggestions based on user's search history with temporal relevance
+    and collaborative filtering. Enhanced for dynamic filtering.
+    
+    Args:
+        suggestions: Original search suggestions from predictor
+        user_id: User identifier
+        partial_query: The partial query being typed
+        
+    Returns:
+        Personalized list of suggestions
+    """
+    logger.info(f"Personalizing suggestions for user {user_id}")
+    
+    # If partial_query is empty, just return suggestions as is
+    if not partial_query:
+        return suggestions
+    
+    conn = None
+    try:
+        # Get a direct database connection
+        conn = get_db_connection()
+        
+        # Get user history with timestamps
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT query, timestamp 
+            FROM search_analytics sa
+            JOIN search_sessions ss ON sa.search_id = ss.id
+            WHERE ss.user_id = %s
+            ORDER BY sa.timestamp DESC
+            LIMIT 10
+        """, (user_id,))
+        
+        history = []
+        for row in cur.fetchall():
+            history.append({
+                "query": row[0],
+                "timestamp": row[1].isoformat() if row[1] else None
+            })
+        
+        # Get previously selected suggestions
+        cur.execute("""
+            SELECT selected_suggestion, timestamp
+            FROM suggestion_selections
+            WHERE user_id = %s
+            ORDER BY timestamp DESC
+            LIMIT 10
+        """, (user_id,))
+        
+        selected_suggestions = [(row[0], row[1].isoformat() if row[1] else None) for row in cur.fetchall()]
+        
+        # Get user expertise areas
+        cur.execute("""
+            SELECT expertise_areas 
+            FROM user_profiles
+            WHERE user_id = %s
+        """, (user_id,))
+        
+        expertise_row = cur.fetchone()
+        user_expertise = json.loads(expertise_row[0]) if expertise_row and expertise_row[0] else []
+        
+        # Close cursor
+        cur.close()
+        
+        # Calculate term weights from history
+        term_weights = {}
+        current_time = datetime.now()
+        
+        # Process history items with temporal decay
+        for item in history:
+            query = item.get("query", "").lower()
+            timestamp_str = item.get("timestamp")
+            
+            # Calculate recency weight based on timestamp
+            recency_weight = 1.0  # Default weight
+            if timestamp_str:
+                try:
+                    timestamp = datetime.fromisoformat(timestamp_str)
+                    # Calculate days difference
+                    days_diff = (current_time - timestamp).days
+                    # Apply exponential decay: weight = exp(-days/30)
+                    recency_weight = math.exp(-days_diff/30)
+                except (ValueError, TypeError):
+                    pass
+            
+            # Split into words and apply weighted counting
+            words = query.split()
+            for word in words:
+                if len(word) >= 3:  # Only consider significant words
+                    current_weight = term_weights.get(word, 0)
+                    # Add recency-weighted value
+                    term_weights[word] = current_weight + recency_weight
+        
+        # Process selected suggestions with temporal weights
+        for suggestion, timestamp_str in selected_suggestions:
+            # Calculate recency weight for selections (with higher base)
+            recency_weight = 2.0  # Higher base weight for selections
+            if timestamp_str:
+                try:
+                    timestamp = datetime.fromisoformat(timestamp_str)
+                    days_diff = (current_time - timestamp).days
+                    # Selections decay slower than searches
+                    recency_weight = 2.0 * math.exp(-days_diff/45)
+                except (ValueError, TypeError):
+                    pass
+                    
+            suggestion_text = suggestion.lower()
+            words = suggestion_text.split()
+            for word in words:
+                if len(word) >= 3:
+                    term_weights[word] = term_weights.get(word, 0) + recency_weight
+        
+        # Personalize suggestions
+        personalized_suggestions = []
+        for suggestion in suggestions:
+            text = suggestion.get("text", "").lower()
+            
+            # Only include suggestions that start with our partial query
+            if not text.startswith(partial_query.lower()):
+                continue
+                
+            base_score = suggestion.get("score", 0.5)
+            source = suggestion.get("source", "")
+            
+            # Calculate boost based on term frequency in user history
+            history_boost = 0.0
+            expertise_boost = 0.0
+            exact_match_boost = 0.0
+            collaborative_boost = 0.0
+            
+            # Apply term frequency boosts with diminishing returns
+            for term, weight in term_weights.items():
+                if term in text:
+                    # Apply diminishing returns: sqrt(weight) * 0.05
+                    # This prevents over-boosting highly frequent terms
+                    history_boost += min(0.25, math.sqrt(weight) * 0.05)
+            
+            # Check for exact matches with previously selected suggestions
+            for suggestion_text, _ in selected_suggestions:
+                if suggestion_text.lower() == text:
+                    exact_match_boost = 0.3  # Higher boost for exact matches
+                    break
+                    
+            # Check expertise relevance
+            for expertise in user_expertise:
+                if expertise.lower() in text:
+                    expertise_boost = 0.15
+                    break
+                    
+            # Apply collaborative filtering boost
+            if source == "collaborative":
+                collaborative_boost = 0.2
+            
+            # Combine all factors for final personalized score
+            # History: 35%, Exact matches: 25%, Expertise: 15%, Collaborative: 10%, Base score: 15%
+            history_component = history_boost * 0.35
+            exact_match_component = exact_match_boost * 0.25
+            expertise_component = expertise_boost * 0.15
+            collaborative_component = collaborative_boost * 0.1
+            base_component = base_score * 0.15
+            
+            personalized_score = min(1.0, 
+                history_component + exact_match_component + expertise_component + 
+                collaborative_component + base_component)
+            
+            personalized_suggestions.append({
+                "text": suggestion.get("text", ""),
+                "source": source,
+                "score": personalized_score,
+                "original_score": base_score
+            })
+        
+        # Sort by personalized score
+        personalized_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+        
+        return personalized_suggestions
+        
+    except Exception as e:
+        logger.error(f"Error personalizing suggestions: {e}")
+        return suggestions
+    finally:
+        # Always close the connection
+        if conn:
+            conn.close()
 
 async def track_selected_suggestion(user_id: str, partial_query: str, selected_suggestion: str):
     """
