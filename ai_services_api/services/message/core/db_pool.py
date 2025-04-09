@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 connection_tracker = {}
 
 @lru_cache(maxsize=1)
-def get_connection_pool(min_conn=5, max_conn=500):
+def get_connection_pool(min_conn=200, max_conn=500):
     """Create or return a connection pool singleton with better connection management."""
     try:
         logger.info("Creating connection pool with min_conn=%d, max_conn=%d", min_conn, max_conn)
