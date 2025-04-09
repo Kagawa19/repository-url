@@ -16,9 +16,9 @@ import logging
 import uuid
 
 from ai_services_api.services.search.core.models import PredictionResponse, SearchResponse
-from ai_services_api.services.search.app.endpoints.process_functions import process_query_prediction, process_advanced_query_prediction
+from ai_services_api.services.search.app.endpoints.process_functions import process_query_prediction, process_query_prediction
 from ai_services_api.services.search.core.expert_search import (
-    process_expert_search,
+    process_advanced_expert_search,
     process_expert_name_search,
     process_expert_theme_search,
     process_expert_designation_search
@@ -53,7 +53,7 @@ async def get_test_user_id(request: Request) -> str:
     return TEST_USER_ID
 
 # Only define each endpoint once
-@router.get("/advanced_search/{query}")
+@router.get("/advanced_searchh/{query}")
 async def search_experts(
     query: str,
     request: Request,
@@ -72,11 +72,11 @@ async def predict_query(
 ):
     """Predict query completion based on partial input using Gemini API."""
     logger.info(f"Received query prediction request - Partial query: {partial_query}, User: {user_id}")
-    return await process_advanced_query_prediction(partial_query, user_id)
+    return await process_query_prediction(partial_query, user_id)
 
 # Add these to your router file (search.py)
 
-@router.get("/advanced_searchh")
+@router.get("/advanced_search")
 async def advanced_search(
     request: Request,
     user_id: str = Depends(get_user_id),
@@ -153,7 +153,7 @@ async def advanced_search(
             )
         
         # Fallback to a general search if no specific type is matched
-        return await process_advanced_search(
+        return await process_expert_search(
             query, 
             user_id, 
             active_only, 
@@ -180,7 +180,7 @@ async def test_search_experts(
 ):
     """Test endpoint for expert search."""
     logger.info(f"Received test expert search request - Query: {query}")
-    return await process_expert_search(query, user_id, active_only)
+    return await process_advanced_expert_search(query, user_id, active_only)
 
 @router.get("/test/experts/predict/{partial_query}")
 async def test_predict_query(
@@ -215,7 +215,7 @@ async def advanced_predict_query(
     
     try:
         # Process advanced query prediction
-        return await process_advanced_query_prediction(
+        return await process_query_prediction(
             partial_query, 
             user_id, 
             search_type, 
@@ -372,7 +372,7 @@ async def public_advanced_predict_query(
         public_user_id = "public_user"
         
         # Process advanced query prediction
-        return await process_advanced_query_prediction(
+        return await process_query_prediction(
             partial_query, 
             public_user_id, 
             search_type, 
