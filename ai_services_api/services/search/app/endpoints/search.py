@@ -53,7 +53,7 @@ async def get_test_user_id(request: Request) -> str:
     return TEST_USER_ID
 
 # Only define each endpoint once
-@router.get("/advanced_search/{query}")
+@router.get("/advanced_searchh/{query}")
 async def search_experts(
     query: str,
     request: Request,
@@ -76,7 +76,7 @@ async def predict_query(
 
 # Add these to your router file (search.py)
 
-@router.get("/advanced_searchh")
+@router.get("/advanced_search")
 async def advanced_search(
     request: Request,
     user_id: str = Depends(get_user_id),
@@ -89,8 +89,6 @@ async def advanced_search(
     designation: Optional[str] = None,
     publication: Optional[str] = None
 ):
-    # Function body
-
     """
     Advanced search endpoint to search experts and resources based on multiple criteria.
     
@@ -102,7 +100,7 @@ async def advanced_search(
     logger.info(f"Advanced search request - User: {user_id}")
     
     # Validate search parameters
-    search_params = [search_type, name, theme, designation, publication]
+    search_params = [query, name, theme, designation, publication]
     if all(param is None for param in search_params):
         raise HTTPException(
             status_code=400, 
@@ -111,7 +109,7 @@ async def advanced_search(
     
     # Determine search type priority
     if search_type:
-        valid_search_types = ["name", "theme", "designation", "publication"]
+        valid_search_types = ["name", "theme", "designation", "publication", "general"]
         if search_type not in valid_search_types:
             raise HTTPException(
                 status_code=400, 
@@ -119,50 +117,38 @@ async def advanced_search(
             )
     
     try:
-        # Flexible routing based on available parameters
-        if search_type == "name" or name:
-            return await process_expert_name_search(
-                query or name, 
-                user_id, 
-                active_only, 
-                k
-            )
+        # Construct effective query based on parameters
+        effective_query = query or ""
         
-        elif search_type == "theme" or theme:
-            return await process_expert_theme_search(
-                query or theme, 
-                user_id, 
-                active_only, 
-                k
-            )
+        # Add structured fields to the query if provided
+        if name and (not search_type or search_type == "name"):
+            effective_query = f"{effective_query} {name}".strip()
         
-        elif search_type == "designation" or designation:
-            return await process_expert_designation_search(
-                query or designation, 
-                user_id, 
-                active_only, 
-                k
-            )
+        if theme and (not search_type or search_type == "theme"):
+            effective_query = f"{effective_query} theme:{theme}".strip()
         
-        elif search_type == "publication" or publication:
-            # Assuming you have a similar function for publication search
-            return await process_publication_search(
-                query or publication, 
-                user_id, 
-                k
-            )
+        if designation and (not search_type or search_type == "designation"):
+            effective_query = f"{effective_query} designation:{designation}".strip()
         
-        # Fallback to a general search if no specific type is matched
-        return await process_advanced_search(
-            query, 
-            user_id, 
-            active_only, 
-            k,
-            name=name,
-            theme=theme,
-            designation=designation,
-            publication=publication
+        if publication and (not search_type or search_type == "publication"):
+            effective_query = f"{effective_query} publication:{publication}".strip()
+        
+        # If no effective query was constructed but we have a search type,
+        # use that search type as the query itself
+        if not effective_query and search_type and search_type != "general":
+            effective_query = search_type
+        
+        logger.info(f"Constructed effective query: '{effective_query}'")
+        
+        # Use the unified process_expert_search function for all search types
+        search_response = await process_expert_search(
+            query=effective_query,
+            user_id=user_id,
+            active_only=active_only,
+            k=k
         )
+        
+        return search_response
     
     except Exception as e:
         logger.error(f"Error in advanced search: {e}", exc_info=True)
