@@ -6,13 +6,12 @@ import json
 import uuid
 import asyncio
 from redis import asyncio as aioredis
-from ai_services_api.services.message.core.db_pool import get_pooled_connection, DatabaseConnection
 
 from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
 from ai_services_api.services.message.core.database import get_db_connection
 from ai_services_api.services.search.core.models import PredictionResponse
 from ai_services_api.services.search.core.personalization import personalize_suggestions
-
+from ai_services_api.services.message.core.db_pool import get_pooled_connection, return_connection, DatabaseConnection
 
 
 # Configure logger
