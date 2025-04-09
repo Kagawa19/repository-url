@@ -822,7 +822,7 @@ async def process_advanced_search(
             
             # Convert to list and sort by score
             final_results = list(unique_results.values())
-            final_results.sort(key=lambda x: x.get('score', 0))
+            final_results.sort(key=lambda x: x.get('score', 0), reverse=True)
             final_results = final_results[:k]  # Limit to requested k results
             
             # Format results
