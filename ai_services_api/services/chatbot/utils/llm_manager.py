@@ -24,8 +24,8 @@ class QueryIntent(Enum):
     """Enum for different types of query intents."""
     NAVIGATION = "navigation"
     PUBLICATION = "publication"
+    EXPERT = "expert"  # New intent type for expert queries
     GENERAL = "general"
-
 from langchain.callbacks.streaming_aiter import AsyncIteratorCallbackHandler
 
 class CustomAsyncCallbackHandler(AsyncIteratorCallbackHandler):
@@ -156,6 +156,7 @@ class GeminiLLMManager:
                     ],
                     'threshold': 0.6
                 },
+                
                 QueryIntent.PUBLICATION: {
                     'patterns': [
                         (r'research', 1.0),
@@ -170,13 +171,393 @@ class GeminiLLMManager:
                         (r'findings', 0.7)
                     ],
                     'threshold': 0.6
+                },
+                QueryIntent.EXPERT: {
+                    'patterns': [
+                        (r'expert', 1.0),
+                        (r'researcher', 1.0),
+                        (r'author', 0.9),
+                        (r'scientist', 0.9),
+                        (r'specialist', 0.8),
+                        (r'who studies', 0.9),
+                        (r'who researches', 0.9),
+                        (r'who works on', 0.8),
+                        (r'expertise in', 0.9),
+                        (r'find people', 0.8),
+                        (r'profile', 0.8)
+                    ],
+                    'threshold': 0.6
                 }
+
             }
             
             logger.info("GeminiLLMManager initialized successfully")
         except Exception as e:
             logger.error(f"Error initializing GeminiLLMManager: {e}", exc_info=True)
             raise
+
+    async def _get_expert_publications(self, expert_id: str, limit: int = 3) -> List[Dict[str, Any]]:
+        """Get publications associated with an expert."""
+        try:
+            # Create placeholders for SQL query
+            async with DatabaseConnector.get_connection() as conn:
+                query = f"""
+                    SELECT r.id, r.title, r.publication_year, r.doi, l.confidence_score
+                    FROM expert_resource_links l
+                    JOIN resources_resource r ON l.resource_id = r.id
+                    WHERE l.expert_id = $1
+                    AND l.confidence_score >= 0.7
+                    ORDER BY l.confidence_score DESC, r.publication_year DESC
+                    LIMIT $2
+                """
+                
+                rows = await conn.fetch(query, expert_id, limit)
+                
+                # Format results
+                publications = []
+                for row in rows:
+                    publications.append({
+                        'id': row['id'],
+                        'title': row['title'],
+                        'publication_year': row['publication_year'],
+                        'doi': row['doi'],
+                        'confidence': row['confidence_score']
+                    })
+                
+                return publications
+                
+        except Exception as e:
+            logger.error(f"Error fetching publications for expert {expert_id}: {e}")
+            return []
+
+    def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
+        """Format expert data into a structured context for LLM responses."""
+        if not experts:
+            return "No experts found matching the query."
+        
+        # Determine formatting based on number of experts
+        is_list_format = len(experts) > 1
+        
+        # Start with an appropriate header
+        if is_list_format:
+            context_parts = [f"Found {len(experts)} relevant experts:"]
+        else:
+            context_parts = ["Found the following relevant expert:"]
+        
+        # Process each expert
+        for idx, expert in enumerate(experts, 1):
+            # Create a formatted expert entry
+            expert_parts = []
+            
+            # Add index for list format
+            prefix = f"{idx}. " if is_list_format else ""
+            
+            # NAME - Always include as the main identifier
+            name = f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip()
+            if name:
+                expert_parts.append(f"{prefix}Name: {name}")
+                prefix = "" if not is_list_format else prefix
+            
+            # EXPERTISE - Format areas of expertise
+            expertise = expert.get('expertise', {})
+            if expertise:
+                expertise_sections = []
+                
+                if isinstance(expertise, dict):
+                    for area, details in expertise.items():
+                        if isinstance(details, list) and details:
+                            expertise_sections.append(f"{area.title()}: {', '.join(str(d) for d in details if d)}")
+                        elif isinstance(details, str) and details.strip():
+                            expertise_sections.append(f"{area.title()}: {details}")
+                
+                if expertise_sections:
+                    expert_parts.append(f"{prefix}Areas of Expertise:")
+                    for section in expertise_sections:
+                        expert_parts.append(f"{prefix}  • {section}")
+            
+            # Add any PUBLICATIONS linked to this expert
+            expert_id = expert.get('id')
+            if expert_id:
+                try:
+                    # Get linked publications (this would be implemented in a separate method)
+                    linked_pubs = await self._get_expert_publications(expert_id, limit=3)
+                    
+                    if linked_pubs:
+                        expert_parts.append(f"{prefix}Selected Publications:")
+                        for pub in linked_pubs:
+                            pub_title = pub.get('title', 'Untitled')
+                            pub_year = pub.get('publication_year', '')
+                            year_text = f" ({pub_year})" if pub_year else ""
+                            expert_parts.append(f"{prefix}  • {pub_title}{year_text}")
+                except Exception as e:
+                    logger.error(f"Error retrieving publications for expert {expert_id}: {e}")
+            
+            # Join all expert parts with explicit newlines
+            formatted_expert = "\n".join(expert_parts)
+            
+            # Add a separator line between experts for clearer formatting
+            if is_list_format and idx < len(experts):
+                formatted_expert += "\n" + "-" * 40
+            
+            context_parts.append(formatted_expert)
+        
+        # Add instructions for the model about how to use this data
+        usage_instructions = """
+    When discussing these experts in your response:
+    - Reference their full names and areas of expertise
+    - Mention their research focus areas when relevant
+    - If publications are listed, you can reference them as examples of their work
+    - IMPORTANT: Only discuss information explicitly provided in the expert profiles
+    """
+
+        # Join everything with double newlines for better separation
+        return "\n\n".join(context_parts) + "\n\n" + usage_instructions
+
+    def _extract_name_from_query(self, query: str) -> Optional[str]:
+        """Extract potential expert name from query."""
+        name_patterns = [
+            r'expert (?:named|called) ([A-Z][a-z]+ [A-Z][a-z]+)',
+            r'researcher (?:named|called) ([A-Z][a-z]+ [A-Z][a-z]+)',
+            r'find ([A-Z][a-z]+ [A-Z][a-z]+)',
+            r'profile of ([A-Z][a-z]+ [A-Z][a-z]+)',
+            r'about ([A-Z][a-z]+ [A-Z][a-z]+)'
+        ]
+        
+        for pattern in name_patterns:
+            match = re.search(pattern, query)
+            if match:
+                return match.group(1).strip().lower()
+        
+        # Try to find capitalized names that might be experts
+        words = query.split()
+        for i in range(len(words) - 1):
+            if (i+1 < len(words) and 
+                words[i][0].isupper() and words[i+1][0].isupper() and
+                len(words[i]) > 1 and len(words[i+1]) > 1):
+                return f"{words[i]} {words[i+1]}".lower()
+        
+        return None
+
+    def _extract_expertise_terms(self, query: str) -> List[str]:
+        """Extract expertise-related terms from query."""
+        expertise_patterns = [
+            r'expertise in (.+)',
+            r'specializing in (.+)',
+            r'who studies (.+)',
+            r'who researches (.+)',
+            r'expert in (.+)',
+            r'working on (.+)'
+        ]
+        
+        for pattern in expertise_patterns:
+            match = re.search(pattern, query, re.IGNORECASE)
+            if match:
+                expertise_text = match.group(1).strip().lower()
+                # Split into terms and remove common stopwords
+                terms = [term.strip() for term in re.split(r'[,;]|\band\b', expertise_text) if term.strip()]
+                return terms
+        
+        return []
+
+    def _calculate_expert_keyword_score(
+        self, 
+        metadata: Dict[str, Any], 
+        query_terms: Set[str],
+        name_match: Optional[str],
+        expertise_terms: List[str]
+    ) -> float:
+        """Calculate weighted keyword match score for an expert."""
+        score = 0.0
+        
+        # 1. NAME MATCH (high weight)
+        expert_name = f"{metadata.get('first_name', '')} {metadata.get('last_name', '')}".lower()
+        if name_match and name_match in expert_name:
+            score += 3.0  # Significant boost for name match
+        
+        # 2. EXPERTISE MATCH
+        expertise_data = metadata.get('expertise', {})
+        expertise_text = ""
+        
+        # Extract text from different expertise fields
+        if isinstance(expertise_data, dict):
+            for field, values in expertise_data.items():
+                if isinstance(values, list):
+                    expertise_text += " ".join([str(v).lower() for v in values if v])
+                elif isinstance(values, str):
+                    expertise_text += values.lower()
+        
+        # 3. Score expertise terms
+        for term in expertise_terms:
+            if term in expertise_text:
+                score += 2.5  # Strong boost for expertise match
+        
+        # 4. General query term matching
+        for term in query_terms:
+            if len(term) <= 2:  # Skip very short terms
+                continue
+                
+            # Check name
+            if term in expert_name:
+                score += 1.5
+                
+            # Check expertise
+            if term in expertise_text:
+                score += 2.0
+        
+        return score
+
+    async def _get_all_expert_keys(self):
+        """Helper method to get all expert keys from Redis."""
+        try:
+            patterns = [
+                'meta:expert:*'  # Pattern used for storing expert data
+            ]
+            
+            all_keys = []
+            
+            # For each pattern, scan Redis for matching keys
+            for pattern in patterns:
+                cursor = 0
+                pattern_keys = []
+                
+                while cursor != 0 or len(pattern_keys) == 0:
+                    try:
+                        cursor, batch = self.redis_manager.redis_text.scan(
+                            cursor=cursor, 
+                            match=pattern, 
+                            count=100
+                        )
+                        pattern_keys.extend(batch)
+                        
+                        if cursor == 0:
+                            break
+                    except Exception as scan_error:
+                        logger.warning(f"Error scanning with pattern '{pattern}': {scan_error}")
+                        break
+                
+                logger.info(f"Found {len(pattern_keys)} keys with pattern '{pattern}'")
+                all_keys.extend(pattern_keys)
+            
+            # Remove any duplicates
+            unique_keys = list(set(all_keys))
+            
+            logger.info(f"Found {len(unique_keys)} total unique expert keys in Redis")
+            return unique_keys
+            
+        except Exception as e:
+            logger.error(f"Error retrieving expert keys: {e}")
+            return []
+
+    async def get_relevant_experts(self, query: str, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Retrieve experts from Redis with hybrid search combining keyword and semantic matching."""
+        try:
+            if not self.redis_manager:
+                logger.warning("Redis manager not available, cannot retrieve experts")
+                return [], "Our expert database is currently unavailable. Please try again later."
+            
+            # Get all expert keys
+            expert_keys = await self._get_all_expert_keys()
+            
+            if not expert_keys:
+                return [], "No expert profiles found in the database."
+            
+            # Parse specific requests for expert counts
+            count_pattern = r'(\d+)\s+experts?'
+            count_match = re.search(count_pattern, query, re.IGNORECASE)
+            requested_count = int(count_match.group(1)) if count_match else limit
+            
+            # Extract potential name from query
+            name_match = self._extract_name_from_query(query)
+            expertise_terms = self._extract_expertise_terms(query)
+            
+            # Create query embedding for semantic search if model available
+            query_embedding = None
+            if self.redis_manager.embedding_model is not None:
+                try:
+                    query_embedding = self.redis_manager.embedding_model.encode(query)
+                except Exception as e:
+                    logger.error(f"Error creating query embedding: {e}")
+            
+            # Retrieve and score experts
+            matched_experts = []
+            
+            # Remove stopwords from query
+            stopwords = self._get_stopwords()
+            query_terms = {word.lower() for word in query.split() if word.lower() not in stopwords}
+            
+            for key in expert_keys:
+                try:
+                    # Retrieve expert metadata
+                    raw_metadata = self.redis_manager.redis_text.hgetall(key)
+                    
+                    # Skip entries without essential metadata
+                    if not raw_metadata or 'name' not in raw_metadata:
+                        continue
+                    
+                    # Extract expert ID
+                    expert_id = raw_metadata.get('id', '')
+                    
+                    # Reconstruct metadata
+                    metadata = {
+                        'id': expert_id,
+                        'name': raw_metadata.get('name', ''),
+                        'first_name': raw_metadata.get('first_name', ''),
+                        'last_name': raw_metadata.get('last_name', ''),
+                        'expertise': self._safe_json_load(raw_metadata.get('expertise', '{}')),
+                    }
+                    
+                    # Calculate match score
+                    keyword_score = self._calculate_expert_keyword_score(
+                        metadata, query_terms, name_match, expertise_terms
+                    )
+                    
+                    # Add semantic scoring if available
+                    semantic_score = 0.0
+                    if query_embedding is not None:
+                        expert_embedding_bytes = self.redis_manager.redis_binary.get(f"emb:expert:{expert_id}")
+                        if expert_embedding_bytes:
+                            expert_embedding = np.frombuffer(expert_embedding_bytes, dtype=np.float32)
+                            # Calculate cosine similarity
+                            semantic_score = np.dot(query_embedding, expert_embedding) / (
+                                np.linalg.norm(query_embedding) * np.linalg.norm(expert_embedding)
+                            )
+                    
+                    # Combine scores (70% keyword, 30% semantic when available)
+                    if semantic_score > 0:
+                        combined_score = 0.7 * keyword_score + 0.3 * semantic_score
+                    else:
+                        combined_score = keyword_score
+                    
+                    # Add to results if score is positive
+                    if combined_score > 0:
+                        # Attach match score for later sorting
+                        metadata['_match_score'] = combined_score
+                        matched_experts.append(metadata)
+                
+                except Exception as e:
+                    logger.error(f"Error processing expert {key}: {e}")
+            
+            # Sort experts by match score
+            sorted_experts = sorted(
+                matched_experts,
+                key=lambda x: x.get('_match_score', 0),
+                reverse=True
+            )
+            
+            # Limit to requested count
+            top_experts = sorted_experts[:requested_count]
+            
+            # Remove internal match score before returning
+            for expert in top_experts:
+                expert.pop('_match_score', None)
+            
+            logger.info(f"Found {len(top_experts)} experts matching query")
+            
+            return top_experts, None
+        
+        except Exception as e:
+            logger.error(f"Error retrieving experts: {e}")
+            return [], "We encountered an error searching for experts. Try simplifying your query."
 
     def get_gemini_model(self):
         """Initialize and return the Gemini model with built-in retry logic."""
@@ -1780,6 +2161,29 @@ class GeminiLLMManager:
                 "   - Place publications in their broader research context when possible\n"
                 "   - Mention research domains or fields to provide better understanding"
             ),
+            QueryIntent.EXPERT: (
+                "When discussing APHRC experts, follow these guidelines:\n\n"
+                "1. FORMAT RESPONSES PROPERLY:\n"
+                "   - For multiple experts: Use clear headings and maintain separate sections for each expert\n"
+                "   - For single experts: Provide a comprehensive overview of their expertise and work\n"
+                "   - Use markdown formatting for better readability\n\n"
+                "2. INCLUDE ESSENTIAL INFORMATION:\n"
+                "   - Full name of the expert\n"
+                "   - Areas of expertise and research focus\n"
+                "   - Key publications when available\n"
+                "   - Research domains they work in\n\n"
+                "3. CONTENT FIDELITY RULES:\n"
+                "   - ONLY reference experts explicitly provided in the context\n"
+                "   - NEVER create, invent, or embellish expert details\n"
+                "   - Present expert information exactly as provided\n"
+                "   - If specific information is not provided, do not make assumptions\n\n"
+                "4. EXPERT-PUBLICATION CONNECTIONS:\n"
+                "   - When publications are associated with experts, highlight this connection\n"
+                "   - Contextualize how their research relates to their expertise\n\n"
+                "5. CONTEXTUAL INFORMATION:\n"
+                "   - Place experts in their broader research context when possible\n"
+                "   - Mention research domains or fields to provide better understanding"
+            ),
             QueryIntent.GENERAL: (
                 "Provide a balanced overview of APHRC's work, combining navigation help with research insights. "
                 "Direct users to specific resources when applicable and offer clear paths to more information."
@@ -1796,14 +2200,13 @@ class GeminiLLMManager:
         )
         
         # Combined prompt based on intent
-        if intent == QueryIntent.PUBLICATION:
+        if intent == QueryIntent.PUBLICATION or intent == QueryIntent.EXPERT:
             return f"{base_prompts['common']}\n\n{base_prompts[intent]}\n\n{response_guidelines}"
         else:
             return f"{base_prompts['common']}\n\n{base_prompts[intent]}\n\n{response_guidelines}"
-
   
     async def generate_async_response(self, message: str, conversation_history: Optional[List[Dict]] = None) -> AsyncGenerator[Dict[str, Any], None]:
-        """Enhanced response generation with improved publication handling"""
+        """Enhanced response generation with improved publication and expert profile handling"""
         start_time = time.time()
         logger.info(f"Starting async response generation for message: {message}")
         
@@ -1863,6 +2266,30 @@ class GeminiLLMManager:
                 except Exception as pub_error:
                     logger.error(f"Error retrieving publications: {pub_error}")
                     context = "I can help you find information about APHRC's publications, though I'm having trouble accessing specific details right now."
+            
+            # If expert intent, retrieve expert profiles
+            elif intent == QueryIntent.EXPERT and self.redis_manager:
+                logger.info("Expert intent detected, retrieving expert profiles")
+                try:
+                    # Get relevant experts from Redis
+                    experts, suggestion = await self.get_relevant_experts(message)
+                    
+                    # Handle no experts found, but offer suggestion if available
+                    if not experts and suggestion:
+                        logger.info("No experts found, but suggestion available")
+                        yield {'chunk': suggestion, 'is_metadata': False}
+                        return
+                    
+                    if experts:
+                        # Format experts into readable context
+                        context = self.format_expert_context(experts)
+                        logger.info(f"Retrieved and formatted {len(experts)} expert profiles for context")
+                    else:
+                        context = "I don't have specific expert profiles on this topic. I can provide general information about APHRC's research areas instead."
+                        logger.info("No relevant expert profiles found in Redis")
+                except Exception as expert_error:
+                    logger.error(f"Error retrieving expert profiles: {expert_error}")
+                    context = "I can help you find information about APHRC's experts, though I'm having trouble accessing specific details right now."
             
             # Manage context window
             logger.debug("Managing context window")
