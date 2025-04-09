@@ -16,9 +16,8 @@ import logging
 import uuid
 
 from ai_services_api.services.search.core.models import PredictionResponse, SearchResponse
-from ai_services_api.services.search.app.endpoints.process_functions import process_query_prediction, process_query_prediction
+from ai_services_api.services.search.app.endpoints.process_functions import process_query_prediction, process_query_prediction,
 from ai_services_api.services.search.core.expert_search import (
-    process_advanced_expert_search,
     process_expert_name_search,
     process_expert_theme_search,
     process_expert_designation_search
@@ -180,7 +179,7 @@ async def test_search_experts(
 ):
     """Test endpoint for expert search."""
     logger.info(f"Received test expert search request - Query: {query}")
-    return await process_advanced_expert_search(query, user_id, active_only)
+    return await process_expert_search(query, user_id, active_only)
 
 @router.get("/test/experts/predict/{partial_query}")
 async def test_predict_query(
