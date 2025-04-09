@@ -11,7 +11,6 @@ from asyncio import to_thread
 from ai_services_api.services.search.utils.trie import PrefixTrie
 import math
 import asyncio
-from ai_services_api.services.message.core.database import get_connection_params, get_db_connection
 
 import json
 from ai_services_api.services.search.core.database_predictor import DatabaseSuggestionGenerator
@@ -157,13 +156,17 @@ class GoogleAutocompletePredictor:
             self.cache_ttl = 3600  # 1 hour cache lifetime
             self.cache_maxsize = 1000  # Maximum cache entries
             self.suggestion_cache = TTLCache(maxsize=self.cache_maxsize, ttl=self.cache_ttl)
-            if connection_params is None:
-                connection_params = get_connection_params()
+            
+   
+            from ai_services_api.services.message.core.database import get_connection_params
+            
+            # Get connection parameters
+            connection_params = get_connection_params()
             
             # Initialize suggestion generator with connection params
             self.suggestion_generator = DatabaseSuggestionGenerator(connection_params)
-            
-    
+                
+        
             # Create thread pool for CPU-bound tasks
             self.cpu_executor = ThreadPoolExecutor(max_workers=4)
             
