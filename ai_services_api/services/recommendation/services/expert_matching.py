@@ -72,14 +72,16 @@ class ExpertMatchingService:
     async def get_recommendations_for_user(
         self, 
         user_id: str, 
-        limit: int = 5
+        limit: int = 5,
+        min_score: float = 0.01  # Lower threshold to ensure recommendations
     ) -> List[Dict[str, Any]]:
         """
-        Find top similar experts using balanced multi-factor matching with adaptive patterns
-        based on search history and interactions
+        Find top similar experts using a more lenient matching approach to ensure 
+        results even with sparse data
         
         :param user_id: ID of the expert to find recommendations for
         :param limit: Maximum number of recommendations to return
+        :param min_score: Minimum similarity score (set very low to ensure matches)
         :return: List of recommended experts
         """
         start_time = datetime.utcnow()
@@ -113,7 +115,36 @@ class ExpertMatchingService:
                 
                 if not debug_record:
                     self.logger.warning(f"No expert found with ID: {user_id}")
-                    return []
+                    # Instead of returning empty, fall back to finding any experts
+                    fallback_query = """
+                    MATCH (e:Expert)
+                    WHERE e.id <> $expert_id AND e.is_active = true
+                    RETURN {
+                        id: e.id,
+                        name: e.name,
+                        designation: e.designation,
+                        theme: e.theme,
+                        unit: e.unit,
+                        match_details: {
+                            shared_concepts: [],
+                            shared_domains: [],
+                            shared_fields: [],
+                            shared_research_areas: [],
+                            shared_methods: [],
+                            search_strength: false,
+                            interaction_strength: false
+                        },
+                        match_reason: 'Random match - improve user profile for better matches',
+                        similarity_score: 0.01
+                    } as result
+                    LIMIT $limit
+                    """
+                    fallback_result = await session.run(fallback_query, {"expert_id": user_id, "limit": limit})
+                    fallback_records = await fallback_result.data()
+                    fallback_experts = [record["result"] for record in fallback_records]
+                    
+                    self.logger.info(f"Fallback recommendations used for user {user_id}. Found {len(fallback_experts)} random experts.")
+                    return fallback_experts
                 
                 # Log expert details for debugging
                 self.logger.info(f"Expert Debug Info: {dict(debug_record)}")
@@ -123,37 +154,22 @@ class ExpertMatchingService:
                 has_fields = debug_record.get("field_count", 0) > 0
                 has_domains = debug_record.get("domain_count", 0) > 0
                 
-                # Initialize weights with default values
-                concept_weight = 0.0
-                domain_weight = 0.0
-                field_weight = 0.0
-                org_weight = 0.3  # Reduced slightly to make room for search weight
-                search_weight = 0.2  # Add weight for search patterns
+                # More lenient weights - ensure all weights are always positive
+                # Even with no data, we'll still get theme/unit matching
+                concept_weight = 0.15 if has_concepts else 0.05
+                domain_weight = 0.15 if has_domains else 0.05
+                field_weight = 0.15 if has_fields else 0.05
+                org_weight = 0.2  # Always give decent weight to organizational factors
+                search_weight = 0.1  # Reduced slightly from original
                 
-                # Dynamic weights based on data availability
-                if has_concepts:
-                    concept_weight = 0.2
-                if has_domains:
-                    domain_weight = 0.2
-                if has_fields:
-                    field_weight = 0.2
-                
-                # Calculate adjustment to ensure weights sum to a reasonable value
-                available_features = sum([1 if x else 0 for x in [has_concepts, has_domains, has_fields]])
-                
-                # If few features available, increase weight of organizational and behavioral factors
-                if available_features <= 1:
-                    org_weight = 0.3
-                    search_weight = 0.3
-                else:
-                    org_weight = 0.1
-                    search_weight = 0.2
-                
-                # Complete matching with balanced weighting including search patterns
+                # Query is mostly the same, but now with more lenient weights
                 query = """
                 MATCH (e1:Expert {id: $expert_id})
                 MATCH (e2:Expert)
-                WHERE e1 <> e2
+                WHERE e1 <> e2 AND e2.is_active = true
+                
+                // Basic similarity - just being active is worth something
+                WITH e1, e2, 0.001 as base_similarity
                 
                 // Core similarity measures
                 OPTIONAL MATCH (e1)-[:HAS_CONCEPT]->(c:Concept)<-[:HAS_CONCEPT]-(e2)
@@ -164,7 +180,7 @@ class ExpertMatchingService:
                 OPTIONAL MATCH (e1)-[:RESEARCHES_IN]->(ra:ResearchArea)<-[:RESEARCHES_IN]-(e2)
                 OPTIONAL MATCH (e1)-[:USES_METHOD]->(m:Method)<-[:USES_METHOD]-(e2)
                 
-                // Organizational proximity
+                // Organizational proximity - crucial for sparse data
                 OPTIONAL MATCH (e1)-[:BELONGS_TO_THEME]->(t:Theme)<-[:BELONGS_TO_THEME]-(e2)
                 OPTIONAL MATCH (e1)-[:BELONGS_TO_UNIT]->(u:Unit)<-[:BELONGS_TO_UNIT]-(e2)
                 
@@ -174,12 +190,14 @@ class ExpertMatchingService:
                 // Direct interactions
                 OPTIONAL MATCH (e1)-[int:INTERACTS_WITH]->(e2)
                 
-                WITH e1, e2, c, d, f, ra, m, fsc, int,
+                WITH e1, e2, c, d, f, ra, m, fsc, int, base_similarity,
                     CASE WHEN e1.theme IS NOT NULL AND e1.theme = e2.theme THEN 1.0 ELSE 0.0 END as same_theme,
-                    CASE WHEN e1.unit IS NOT NULL AND e1.unit = e2.unit THEN 1.0 ELSE 0.0 END as same_unit
+                    CASE WHEN e1.unit IS NOT NULL AND e1.unit = e2.unit THEN 1.0 ELSE 0.0 END as same_unit,
+                    // Add designation similarity - people with same roles might collaborate
+                    CASE WHEN e1.designation IS NOT NULL AND e1.designation = e2.designation THEN 0.5 ELSE 0.0 END as same_designation
                 
                 // Collect all relevant data
-                WITH e1, e2, 
+                WITH e1, e2, base_similarity,
                     // Semantic overlap
                     COUNT(DISTINCT c) as concept_count,
                     COUNT(DISTINCT d) as domain_count,
@@ -188,9 +206,9 @@ class ExpertMatchingService:
                     COUNT(DISTINCT m) as method_count,
                     
                     // Organizational factors
-                    same_theme, same_unit,
+                    same_theme, same_unit, same_designation,
                     
-                    // Search patterns - weight adjusted based on frequency
+                    // Search patterns - weight adjusted
                     COALESCE(fsc.weight, 0.0) * $search_weight as search_similarity,
                     
                     // Interaction patterns
@@ -203,15 +221,17 @@ class ExpertMatchingService:
                     COLLECT(DISTINCT COALESCE(ra.name, '')) as shared_areas,
                     COLLECT(DISTINCT COALESCE(m.name, '')) as shared_methods
                 
-                // Calculate overall score with all factors
+                // Calculate overall score with all factors - ensure base similarity keeps score positive
                 WITH e2, 
-                    (concept_count * $concept_weight + 
+                    (base_similarity +
+                    concept_count * $concept_weight + 
                     domain_count * $domain_weight + 
                     field_count * $field_weight + 
-                    area_count * 0.1 +
-                    method_count * 0.1 +
+                    area_count * 0.05 +
+                    method_count * 0.05 +
                     same_theme * $org_weight + 
                     same_unit * $org_weight +
+                    same_designation * 0.1 +
                     search_similarity +
                     interaction_similarity) as similarity_score,
                     
@@ -228,7 +248,9 @@ class ExpertMatchingService:
                     same_theme,
                     same_unit
                 
-                // Always return top results regardless of score
+                // Return results that meet minimum threshold
+                WHERE similarity_score >= $min_score
+                
                 RETURN {
                     id: e2.id,
                     name: e2.name,
@@ -253,7 +275,7 @@ class ExpertMatchingService:
                         WHEN same_theme = 1.0 AND same_unit = 1.0 THEN 'Same theme and unit'
                         WHEN same_theme = 1.0 THEN 'Same theme'
                         WHEN same_unit = 1.0 THEN 'Same unit'
-                        ELSE 'Potential collaboration'
+                        ELSE 'Potential collaboration opportunity'
                     END,
                     similarity_score: similarity_score
                 } as result
@@ -269,15 +291,47 @@ class ExpertMatchingService:
                     "domain_weight": domain_weight,
                     "field_weight": field_weight,
                     "org_weight": org_weight,
-                    "search_weight": search_weight
+                    "search_weight": search_weight,
+                    "min_score": min_score
                 }
                 
                 # Run recommendations with the appropriate parameters
                 result = await session.run(query, params)
                 
-                # Need to change how we process results for async
+                # Process results for async
                 records = await result.data()
                 similar_experts = [record["result"] for record in records]
+                
+                # If we still got no results despite lenient matching, use fallback to random experts
+                if not similar_experts:
+                    self.logger.warning(f"No matches found even with lenient criteria for user {user_id}. Using fallback.")
+                    
+                    fallback_query = """
+                    MATCH (e:Expert)
+                    WHERE e.id <> $expert_id AND e.is_active = true
+                    RETURN {
+                        id: e.id,
+                        name: e.name,
+                        designation: e.designation,
+                        theme: e.theme,
+                        unit: e.unit,
+                        match_details: {
+                            shared_concepts: [],
+                            shared_domains: [],
+                            shared_fields: [],
+                            shared_research_areas: [],
+                            shared_methods: [],
+                            search_strength: false,
+                            interaction_strength: false
+                        },
+                        match_reason: 'Random match - improve user profile for better matches',
+                        similarity_score: 0.01
+                    } as result
+                    LIMIT $limit
+                    """
+                    fallback_result = await session.run(fallback_query, {"expert_id": user_id, "limit": limit})
+                    fallback_records = await fallback_result.data()
+                    similar_experts = [record["result"] for record in fallback_records]
                 
                 # Performance and result logging
                 end_time = datetime.utcnow()
@@ -292,8 +346,7 @@ class ExpertMatchingService:
                 # Log weights used for diagnosis
                 self.logger.debug(
                     f"Match weights: concepts={concept_weight}, domains={domain_weight}, "
-                    f"fields={field_weight}, org={org_weight}, search={search_weight}, "
-                    f"available_features={available_features}"
+                    f"fields={field_weight}, org={org_weight}, search={search_weight}"
                 )
                 
                 return similar_experts
@@ -303,8 +356,41 @@ class ExpertMatchingService:
                 f"Error finding similar experts for user {user_id}: {str(e)}", 
                 exc_info=True
             )
-            return []
-
+            # Even on error, try to return some results
+            try:
+                async with self._neo4j_driver.session() as session:
+                    fallback_query = """
+                    MATCH (e:Expert) 
+                    WHERE e.id <> $expert_id AND e.is_active = true
+                    RETURN {
+                        id: e.id,
+                        name: e.name,
+                        designation: e.designation,
+                        theme: e.theme,
+                        unit: e.unit,
+                        match_details: {
+                            shared_concepts: [],
+                            shared_domains: [],
+                            shared_fields: [],
+                            shared_research_areas: [],
+                            shared_methods: [],
+                            search_strength: false,
+                            interaction_strength: false
+                        },
+                        match_reason: 'Error occurred - showing random experts',
+                        similarity_score: 0.01
+                    } as result
+                    LIMIT $limit
+                    """
+                    fallback_result = await session.run(fallback_query, {"expert_id": user_id, "limit": limit})
+                    fallback_records = await fallback_result.data()
+                    error_fallback = [record["result"] for record in fallback_records]
+                    
+                    self.logger.info(f"Returned error fallback recommendations for user {user_id}")
+                    return error_fallback
+            except Exception:
+                self.logger.error("Critical error: Could not provide any recommendations", exc_info=True)
+                return []
     async def close(self):
         """Close database connections with logging (async version)"""
         try:
