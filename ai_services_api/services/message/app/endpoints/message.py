@@ -246,11 +246,11 @@ async def process_message_draft(
             
         # Fetch receiver details
         cur.execute("""
-            SELECT id, first_name, last_name, designation, theme, domains, fields 
-            FROM experts_expert 
+            SELECT id, first_name, last_name, designation as position, unit as department
+            FROM experts_expert
             WHERE id = %s AND is_active = true
-        """, (receiver_id,))
-        receiver = cur.fetchone()
+        """, (user_id,))
+        sender = cur.fetchone()
         
         if not receiver:
             logger.error(f"Receiver not found or inactive: {receiver_id}")
