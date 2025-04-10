@@ -351,7 +351,65 @@ class GeminiLLMManager:
         """Reset rate limited flag after specified seconds."""
         await asyncio.sleep(seconds)
         self._rate_limited = False
-        logger.info(f"Rate limit cooldown expired after {seconds} seconds")
+        logger.info(f"Rate limit cooldown expired after {seconds} seconds")\
+
+    async def generate_async_response(self, message: str) -> AsyncGenerator[str, None]:
+        """
+        Generate streaming response with metadata.
+        
+        Args:
+            message: User input message
+            
+        Yields:
+            Response chunks or metadata dictionaries
+        """
+        try:
+            # Detect intent
+            intent, confidence = self.detect_intent(message)
+            
+            # Get relevant content based on intent
+            context = ""
+            metadata = {
+                'intent': {'type': intent.value, 'confidence': confidence},
+                'content_matches': [],
+                'timestamp': datetime.now().isoformat()
+            }
+
+            if intent == QueryIntent.PUBLICATION:
+                publications, _ = await self.get_relevant_publications(message)
+                if publications:
+                    context = self.format_publication_context(publications)
+                    metadata['content_matches'] = [p['id'] for p in publications]
+                    metadata['content_types'] = {'publication': len(publications)}
+            
+            elif intent == QueryIntent.EXPERT:
+                experts, _ = await self.get_relevant_experts(message)
+                if experts:
+                    context = self.format_expert_context(experts)
+                    metadata['content_matches'] = [e['id'] for e in experts]
+                    metadata['content_types'] = {'expert': len(experts)}
+
+            # Prepare messages for LLM
+            messages = [
+                SystemMessage(content="You are a helpful research assistant."),
+                HumanMessage(content=f"Context:\n{context}\n\nQuestion: {message}")
+            ]
+
+            # Yield metadata first
+            yield {'is_metadata': True, 'metadata': metadata}
+
+            # Generate streaming response
+            model = self.get_gemini_model()
+            response = await model.agenerate([messages])
+            
+            # Stream tokens
+            async for token in self.callback.aiter():
+                if token is not None:
+                    yield token
+
+        except Exception as e:
+            logger.error(f"Error in generate_async_response: {e}")
+            yield f"Error: {str(e)}"
 
     async def analyze_quality(self, message: str, response: str = "") -> Dict:
         """
