@@ -301,9 +301,144 @@ def fetch_suggestions_from_db(conn, search_input: str) -> List[Dict]:
     
     return suggestions
 
+
+def get_expert_by_id_or_name(self, query: str) -> List[Dict[str, Any]]:
+    """
+    Try to find an expert by ID first, then fall back to name search.
+    
+    Args:
+        query: Expert ID or name
+        
+    Returns:
+        List of expert details matching the query
+    """
+    try:
+        # First, try to treat the query as an ID
+        if query.isdigit():
+            expert = self.get_expert_by_id(query)
+            if expert:
+                return [expert]
+        
+        # If that fails or query isn't numeric, extract name parts
+        name_parts = query.split()
+        
+        # Connect to database
+        conn = self.db.get_connection()
+        with conn.cursor() as cur:
+            # Search by full name
+            if len(name_parts) > 1:
+                first_name = name_parts[0]
+                last_name = ' '.join(name_parts[1:])
+                
+                cur.execute("""
+                    SELECT e.id, e.first_name, e.last_name, 
+                           COALESCE(e.designation, '') as designation,
+                           COALESCE(e.theme, '') as theme,
+                           COALESCE(e.unit, '') as unit,
+                           COALESCE(e.bio, '') as bio,
+                           e.knowledge_expertise,
+                           e.is_active
+                    FROM experts_expert e
+                    WHERE 
+                        LOWER(e.first_name) = LOWER(%s) AND
+                        LOWER(e.last_name) = LOWER(%s)
+                """, [first_name, last_name])
+            else:
+                # Search by single name part (first or last)
+                cur.execute("""
+                    SELECT e.id, e.first_name, e.last_name, 
+                           COALESCE(e.designation, '') as designation,
+                           COALESCE(e.theme, '') as theme,
+                           COALESCE(e.unit, '') as unit,
+                           COALESCE(e.bio, '') as bio,
+                           e.knowledge_expertise,
+                           e.is_active
+                    FROM experts_expert e
+                    WHERE 
+                        LOWER(e.first_name) = LOWER(%s) OR
+                        LOWER(e.last_name) = LOWER(%s)
+                """, [query, query])
+            
+            # Format results
+            results = []
+            for row in cur.fetchall():
+                results.append({
+                    "id": str(row[0]),
+                    "first_name": row[1] or "",
+                    "last_name": row[2] or "",
+                    "designation": row[3] or "",
+                    "theme": row[4] or "",
+                    "unit": row[5] or "",
+                    "contact": "",  # Default empty value
+                    "is_active": row[8] if row[8] is not None else True,
+                    "score": 1.0,  # Exact match
+                    "bio": row[6] or "",
+                    "knowledge_expertise": self._parse_jsonb(row[7]) if row[7] else []
+                })
+            
+            return results
+    except Exception as e:
+        logger.error(f"Error in expert lookup by ID or name: {e}")
+        return []
+    finally:
+        if 'conn' in locals():
+            conn.close()
+    
+def get_expert_by_id(self, expert_id: str) -> Dict[str, Any]:
+    """
+    Get an expert directly by ID.
+    
+    Args:
+        expert_id: Expert ID to fetch
+        
+    Returns:
+        Dict with expert details or None if not found
+    """
+    try:
+        conn = self.db.get_connection()
+        with conn.cursor() as cur:
+            # Query for the expert with this exact ID
+            cur.execute("""
+                SELECT e.id, e.first_name, e.last_name, 
+                       COALESCE(e.designation, '') as designation,
+                       COALESCE(e.theme, '') as theme,
+                       COALESCE(e.unit, '') as unit,
+                       COALESCE(e.bio, '') as bio,
+                       e.knowledge_expertise,
+                       e.is_active
+                FROM experts_expert e
+                WHERE e.id = %s
+            """, [expert_id])
+            
+            row = cur.fetchone()
+            if row:
+                # Format the result as a dictionary
+                return {
+                    "id": str(row[0]),
+                    "first_name": row[1] or "",
+                    "last_name": row[2] or "",
+                    "designation": row[3] or "",
+                    "theme": row[4] or "",
+                    "unit": row[5] or "",
+                    "contact": "",  # Default empty value
+                    "is_active": row[8] if row[8] is not None else True,
+                    "score": 1.0,  # Perfect match
+                    "bio": row[6] or "",
+                    "knowledge_expertise": self._parse_jsonb(row[7]) if row[7] else []
+                }
+            
+            return None
+    except Exception as e:
+        logger.error(f"Error fetching expert by ID: {e}")
+        return None
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
 async def process_expert_search(query: str, user_id: str, active_only: bool = True, k: int = 5) -> SearchResponse:
     """
     Process expert search, returning suggestions for user input and performing full search.
+    Enhanced to handle exact name matches through get_expert_by_id_or_name.
     
     Args:
         query (str): Search query
@@ -314,7 +449,7 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
     Returns:
         SearchResponse: Search results including suggested matches
     """
-    logger.info(f"Processing expert search - Query: {query}, User: {user_id}")
+    logger.info(f"Processing expert search - Query: '{query}', User: {user_id}")
     
     session_id = str(uuid.uuid4())[:8]  # Default session ID in case DB connection fails
     start_time = datetime.utcnow()
@@ -335,26 +470,41 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
             is_complex_query = len(query.split()) > 3 or any(c in query for c in [':', '&', '|', '"', "'"])
             
             try:
-                # Search execution (autocomplete vs full search)
-                if query:
-                    # If query is relatively short/simple, check for autocomplete suggestions first
-                    loop = asyncio.get_event_loop()
-                    suggestions = await loop.run_in_executor(
-                        None,  # Default executor
-                        lambda: fetch_suggestions_from_db(conn, query)
-                    )
+                # Check if we should try direct lookup for simple name queries
+                # This handles the suggestion click case
+                if not is_complex_query and ' ' in query and len(query.split()) <= 3:
+                    # This looks like a name query - try direct lookup first
+                    search_manager = ExpertSearchIndexManager()
+                    direct_results = search_manager.get_expert_by_id_or_name(query)
                     
-                    # Filter suggestions to only keep experts
-                    expert_suggestions = [s for s in suggestions if s.get("type") == "expert"]
-                    
-                    # If query is complex, perform full search for experts and resources
-                    if is_complex_query:
-                        search_manager = ExpertSearchIndexManager()
-                        search_results = search_manager.search_experts(query, k=k, active_only=active_only)
-                        results = search_results
+                    if direct_results:
+                        logger.info(f"Found direct name match for '{query}' - {len(direct_results)} results")
+                        results = direct_results
                     else:
-                        # For simple queries, use the suggestions
-                        results = expert_suggestions
+                        logger.info(f"No direct name match for '{query}', falling back to regular search")
+                
+                # If no direct results found, proceed with normal search
+                if not results:
+                    # Search execution (autocomplete vs full search)
+                    if query:
+                        # If query is relatively short/simple, check for autocomplete suggestions first
+                        loop = asyncio.get_event_loop()
+                        suggestions = await loop.run_in_executor(
+                            None,  # Default executor
+                            lambda: fetch_suggestions_from_db(conn, query)
+                        )
+                        
+                        # Filter suggestions to only keep experts
+                        expert_suggestions = [s for s in suggestions if s.get("type") == "expert"]
+                        
+                        # If query is complex, perform full search for experts and resources
+                        if is_complex_query:
+                            search_manager = ExpertSearchIndexManager()
+                            search_results = search_manager.search_experts(query, k=k, active_only=active_only)
+                            results = search_results
+                        else:
+                            # For simple queries, use the suggestions
+                            results = expert_suggestions
 
                 logger.info(f"Search found {len(results)} results")
                 
@@ -468,7 +618,6 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
             session_id=session_id,
             refinements={}
         )
-
 async def record_search(conn, session_id: str, user_id: str, query: str, results: list, response_time: float):
     """
     Record search analytics in the database.
