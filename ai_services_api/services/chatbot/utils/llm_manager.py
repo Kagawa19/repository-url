@@ -4,9 +4,6 @@ import json
 import logging
 import random
 import re
-from sentence_transformers import SentenceTransformer
-import numpy as np  # For the embedding verification
-import os  # For path operations
 import time
 import numpy as np
 from typing import Dict, Set, Tuple, Any, List, AsyncGenerator, Optional
@@ -14,6 +11,8 @@ from datetime import datetime
 from enum import Enum
 from ai_services_api.services.chatbot.utils.db_utils import DatabaseConnector
 from langchain.schema.messages import HumanMessage, SystemMessage
+from sentence_transformers import SentenceTransformer
+
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.callbacks import AsyncIteratorCallbackHandler
 from ai_services_api.services.search.indexing.redis_index_manager import ExpertRedisIndexManager
@@ -142,28 +141,22 @@ class GeminiLLMManager:
             self.max_context_items = 5
             self.context_expiry = 1800  # 30 minutes
             self.confidence_threshold = 0.6
-            # Set model cache paths (matches your Dockerfile)
-            model_cache_path = "/app/models"
-            os.environ['TRANSFORMERS_CACHE'] = model_cache_path
-            os.environ['HF_HOME'] = model_cache_path
+             # Explicitly set model path to pre-downloaded location
+            model_name = os.getenv('EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
+            model_cache_dir = '/app/models'  # Use the pre-downloaded model directory
             
-            # Configure offline mode (as set in Dockerfile)
-            os.environ['TRANSFORMERS_OFFLINE'] = '1'
-            os.environ['HF_DATASETS_OFFLINE'] = '1'
-
-            # Initialize embedding model with explicit cache and local_files_only
-            self.embedding_model = SentenceTransformer(
-                'all-MiniLM-L6-v2',
-                cache_folder=model_cache_path,
-                local_files_only=True  # Critical for offline use
-            )
+            try:
+                logger.info(f"Attempting to load model from {model_cache_dir}")
+                self.embedding_model = SentenceTransformer(
+                    model_name, 
+                    cache_folder=model_cache_dir,
+                    local_files_only=True  # Force local files
+                )
+            except Exception as e:
+                logger.error(f"Failed to load model: {e}")
+                logger.warning("Falling back to None and using manual embedding")
+                self.embedding_model = None
             
-            # Test the model
-            test_embedding = self.embedding_model.encode("test")
-            if not isinstance(test_embedding, np.ndarray):
-                raise RuntimeError("Model initialization failed - invalid embedding output")
-                
-            logger.info(f"SentenceTransformer model loaded successfully from {model_cache_path}")
             
             # Initialize intent patterns
             self.intent_patterns = {
