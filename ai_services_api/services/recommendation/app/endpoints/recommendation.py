@@ -128,3 +128,53 @@ async def test_get_expert_recommendations(
     """Test endpoint for getting user recommendations"""
     logger.info(f"Test recommendation request for user: {user_id}")
     return await process_recommendations(user_id, redis_client)
+
+# New cache clearing endpoints
+@router.delete("/cache/recommendations/{user_id}")
+async def clear_user_recommendations_cache(
+    user_id: str,
+    redis_client: Redis = Depends(get_redis)
+) -> Dict:
+    """Clear recommendations cache for a specific user"""
+    try:
+        cache_key = f"user_recommendations:{user_id}"
+        deleted = await redis_client.delete(cache_key)
+        
+        logger.info(f"Cache clearing request for user: {user_id}, result: {deleted > 0}")
+        
+        if deleted:
+            return {"status": "success", "message": f"Cache cleared for user {user_id}"}
+        else:
+            return {"status": "success", "message": f"No cache found for user {user_id}"}
+    
+    except Exception as e:
+        logger.error(f"Failed to clear cache for user {user_id}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Cache clearing error: {str(e)}")
+
+@router.delete("/cache/recommendations")
+async def clear_all_recommendations_cache(
+    request: Request,
+    redis_client: Redis = Depends(get_redis)
+) -> Dict:
+    """Clear recommendations cache for all users"""
+    try:
+        # Find all keys matching the pattern
+        pattern = "user_recommendations:*"
+        total_deleted = 0
+        
+        # Use scan_iter to get all matching keys and delete them
+        async for key in redis_client.scan_iter(match=pattern):
+            await redis_client.delete(key)
+            total_deleted += 1
+        
+        logger.info(f"All recommendation caches cleared. Total deleted: {total_deleted}")
+        
+        return {
+            "status": "success", 
+            "message": f"Cleared all recommendation caches", 
+            "total_deleted": total_deleted
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to clear all recommendation caches: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Cache clearing error: {str(e)}")

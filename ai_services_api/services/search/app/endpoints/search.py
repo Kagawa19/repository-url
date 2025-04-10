@@ -14,6 +14,7 @@ from typing import Any, List, Dict, Optional
 from pydantic import BaseModel
 import logging
 import uuid
+from redis.asyncio import Redis
 
 from ai_services_api.services.search.core.models import PredictionResponse, SearchResponse
 from ai_services_api.services.search.app.endpoints.process_functions import process_advanced_query_prediction, process_advanced_query_prediction
@@ -52,7 +53,16 @@ async def get_test_user_id(request: Request) -> str:
     logger.debug("Using test user ID")
     return TEST_USER_ID
 
-
+# Add Redis connection similar to recommendation service
+async def get_redis():
+    """Establish Redis connection with detailed logging"""
+    try:
+        redis_client = Redis(host='redis', port=6379, db=2, decode_responses=True)
+        logger.info(f"Redis connection established successfully to host: redis, port: 6379, db: 2")
+        return redis_client
+    except Exception as e:
+        logger.error(f"Failed to establish Redis connection: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Redis connection failed")
 
 
 @router.get("/advanced_search")
@@ -253,3 +263,125 @@ async def health_check():
             "error": str(e),
             "timestamp": datetime.now().isoformat()
         }
+
+# New cache clearing endpoints
+@router.delete("/cache/search/{user_id}")
+async def clear_user_search_cache(
+    user_id: str,
+    redis_client: Redis = Depends(get_redis)
+) -> Dict:
+    """Clear search cache for a specific user"""
+    try:
+        # Common patterns for search-related caches
+        patterns = [
+            f"user_search:{user_id}:*",        # Search results
+            f"query_prediction:{user_id}:*",    # Query predictions
+            f"expert_search:{user_id}:*",       # Expert search results
+            f"personalization:{user_id}:*"      # User personalization data
+        ]
+        
+        total_deleted = 0
+        for pattern in patterns:
+            # Use scan_iter to get all matching keys for this pattern
+            async for key in redis_client.scan_iter(match=pattern):
+                await redis_client.delete(key)
+                total_deleted += 1
+        
+        logger.info(f"Search cache cleared for user {user_id}. Total keys deleted: {total_deleted}")
+        
+        return {
+            "status": "success", 
+            "message": f"Search cache cleared for user {user_id}", 
+            "total_deleted": total_deleted
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to clear search cache for user {user_id}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Cache clearing error: {str(e)}")
+
+@router.delete("/cache/search")
+async def clear_all_search_cache(
+    request: Request,
+    redis_client: Redis = Depends(get_redis)
+) -> Dict:
+    """Clear search cache for all users"""
+    try:
+        # Common patterns for all search-related caches
+        patterns = [
+            "user_search:*",        # All search results
+            "query_prediction:*",    # All query predictions
+            "expert_search:*",       # All expert search results
+            "personalization:*"      # All personalization data
+        ]
+        
+        total_deleted = 0
+        for pattern in patterns:
+            # Use scan_iter to get all matching keys for this pattern
+            async for key in redis_client.scan_iter(match=pattern):
+                await redis_client.delete(key)
+                total_deleted += 1
+        
+        logger.info(f"All search caches cleared. Total keys deleted: {total_deleted}")
+        
+        return {
+            "status": "success", 
+            "message": "Cleared all search caches", 
+            "total_deleted": total_deleted
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to clear all search caches: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Cache clearing error: {str(e)}")
+
+# Specific endpoint to clear prediction caches
+@router.delete("/cache/predictions/{user_id}")
+async def clear_user_prediction_cache(
+    user_id: str,
+    redis_client: Redis = Depends(get_redis)
+) -> Dict:
+    """Clear query prediction cache for a specific user"""
+    try:
+        pattern = f"query_prediction:{user_id}:*"
+        
+        total_deleted = 0
+        async for key in redis_client.scan_iter(match=pattern):
+            await redis_client.delete(key)
+            total_deleted += 1
+        
+        logger.info(f"Prediction cache cleared for user {user_id}. Total keys deleted: {total_deleted}")
+        
+        return {
+            "status": "success", 
+            "message": f"Prediction cache cleared for user {user_id}", 
+            "total_deleted": total_deleted
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to clear prediction cache for user {user_id}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Cache clearing error: {str(e)}")
+
+@router.delete("/cache/predictions")
+async def clear_all_prediction_cache(
+    request: Request,
+    redis_client: Redis = Depends(get_redis)
+) -> Dict:
+    """Clear query prediction cache for all users"""
+    try:
+        pattern = "query_prediction:*"
+        
+        total_deleted = 0
+        async for key in redis_client.scan_iter(match=pattern):
+            await redis_client.delete(key)
+            total_deleted += 1
+        
+        logger.info(f"All prediction caches cleared. Total keys deleted: {total_deleted}")
+        
+        return {
+            "status": "success", 
+            "message": "Cleared all prediction caches", 
+            "total_deleted": total_deleted
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to clear all prediction caches: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Cache clearing error: {str(e)}")
