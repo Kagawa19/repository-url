@@ -5,6 +5,7 @@ import logging
 import random
 import re
 import time
+import google.generativeai as genai
 import numpy as np
 from typing import Dict, Set, Tuple, Any, List, AsyncGenerator, Optional
 from datetime import datetime
@@ -300,20 +301,23 @@ class GeminiLLMManager:
 
 
    
-    def get_gemini_model(self):
-        """Initialize and return the Gemini model with built-in retry logic."""
-        return ChatGoogleGenerativeAI(
-            google_api_key=self.api_key,
-            stream=True,
-            model="gemini-2.0-flash-thinking-exp-01-21",
-            convert_system_message_to_human=True,
-            callbacks=[self.callback],
-            temperature=0.7,
-            top_p=0.9,
-            top_k=40,
-            max_retries=5,  # Use built-in retry mechanism
-            timeout=30  # Set a reasonable timeout
-        )
+    
+    def _setup_gemini(self):
+        """Set up and configure the Gemini model."""
+        try:
+            api_key = os.getenv('GEMINI_API_KEY')
+            if not api_key:
+                raise ValueError("GEMINI_API_KEY environment variable is not set")
+            
+            # Simple configuration without specifying API version
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-1.5-pro-latest')
+            logger.info("Gemini model setup completed")
+            return model
+            
+        except Exception as e:
+            logger.error(f"Error setting up Gemini model: {e}")
+            raise
 
     
     
@@ -539,67 +543,7 @@ class GeminiLLMManager:
         
         return "\n\n".join(context_parts)
 
-    def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
-        """
-        Format publication information into a readable context for the LLM.
-        
-        Args:
-            publications: List of publication dictionaries
-            
-        Returns:
-            Formatted context string
-        """
-        if not publications:
-            return "No publication information available."
-        
-        context_parts = ["Here is information about relevant APHRC publications:"]
-        
-        for idx, pub in enumerate(publications):
-            pub_info = [f"Publication {idx+1}: {pub.get('title', 'Untitled')}"]
-            
-            # Add year
-            pub_year = pub.get('publication_year', '')
-            if pub_year:
-                pub_info.append(f"Published: {pub_year}")
-            
-            # Add authors
-            authors = pub.get('authors', [])
-            if authors:
-                if isinstance(authors, list):
-                    # Format author list, limit to first 3 with "et al." if more
-                    if len(authors) > 3:
-                        author_text = f"{', '.join(authors[:3])} et al."
-                    else:
-                        author_text = f"{', '.join(authors)}"
-                    pub_info.append(f"Authors: {author_text}")
-                else:
-                    pub_info.append(f"Authors: {authors}")
-            
-            # Add APHRC experts if available
-            aphrc_experts = pub.get('aphrc_experts', [])
-            if aphrc_experts:
-                if isinstance(aphrc_experts, list):
-                    pub_info.append(f"APHRC Experts: {', '.join(aphrc_experts[:3])}")
-                else:
-                    pub_info.append(f"APHRC Experts: {aphrc_experts}")
-            
-            # Add abstract snippet
-            abstract = pub.get('abstract', '')
-            if abstract:
-                # Truncate long abstracts
-                if len(abstract) > 300:
-                    abstract = abstract[:297] + "..."
-                pub_info.append(f"Abstract: {abstract}")
-            
-            # Add DOI if available
-            doi = pub.get('doi', '')
-            if doi:
-                pub_info.append(f"DOI: {doi}")
-            
-            # Combine all information about this publication
-            context_parts.append("\n".join(pub_info))
-        
-        return "\n\n".join(context_parts)
+    
 
     async def _get_expert_for_publications(self, publication_ids: List[str]) -> Dict[str, List[Dict]]:
         """
@@ -647,12 +591,90 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error fetching experts for publications: {e}")
             return result
+    async def generate_async_response(self, message: str) -> AsyncGenerator[str, None]:
+        """
+        Generate streaming response with metadata.
+        
+        Args:
+            message: User input message
+                
+        Yields:
+            Response chunks or metadata dictionaries
+        """
+        try:
+            # Detect intent
+            intent_result = await self.detect_intent(message)
+            intent = intent_result['intent']
+            confidence = intent_result['confidence']
+                    
+            # Get relevant content based on intent
+            context = ""
+            metadata = {
+                'intent': {'type': intent.value, 'confidence': confidence},
+                'content_matches': [],
+                'timestamp': datetime.now().isoformat()
+            }
 
+            if intent == QueryIntent.PUBLICATION:
+                publications, _ = await self.get_relevant_publications(message)
+                if publications:
+                    context = self.format_publication_context(publications)
+                    metadata['content_matches'] = [p['id'] for p in publications]
+                    metadata['content_types'] = {'publication': len(publications)}
+            
+            elif intent == QueryIntent.EXPERT:
+                experts, _ = await self.get_relevant_experts(message)
+                if experts:
+                    context = self.format_expert_context(experts)
+                    metadata['content_matches'] = [e['id'] for e in experts]
+                    metadata['content_types'] = {'expert': len(experts)}
+
+            # Yield metadata first
+            yield {'is_metadata': True, 'metadata': metadata}
+
+            # Prepare system prompt and content prompt
+            system_prompt = "You are a helpful research assistant."
+            content_prompt = f"Context:\n{context}\n\nQuestion: {message}"
+            
+            # Set up model
+            model = self._setup_gemini()
+            
+            # Create content parts
+            content = [
+                {"role": "user", "parts": [{"text": system_prompt}]},
+                {"role": "user", "parts": [{"text": content_prompt}]}
+            ]
+            
+            # Generate response with streaming
+            response = model.generate_content(
+                content,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.7,
+                    top_p=0.9,
+                    top_k=40,
+                ),
+                stream=True
+            )
+            
+            # Stream the response chunks
+            for chunk in response:
+                if hasattr(chunk, 'text') and chunk.text:
+                    yield chunk.text
+                elif hasattr(chunk, 'parts') and chunk.parts:
+                    for part in chunk.parts:
+                        if hasattr(part, 'text') and part.text:
+                            yield part.text
+
+        except Exception as e:
+            logger.error(f"Error in generate_async_response: {e}")
+            yield f"Error: {str(e)}"
 
 
     async def detect_intent(self, message: str) -> Dict[str, Any]:
         """Advanced intent detection using Gemini"""
         try:
+            model = self._setup_gemini()
+            
             prompt = f"""
             Analyze this query and classify its intent:
             Query: "{message}"
@@ -671,12 +693,10 @@ class GeminiLLMManager:
             }}
             """
 
-            model = self.get_gemini_model()
-            response = await model.ainvoke(prompt)
-            content = response.content
-
+            response = model.generate_content(prompt)
+            content = response.text
+            
             # Clean up the response to extract just the JSON part
-            # Remove markdown code blocks if present
             content = content.replace("```json", "").replace("```", "").strip()
             
             # Find JSON content - look for opening and closing braces
@@ -720,66 +740,117 @@ class GeminiLLMManager:
                 'confidence': 0.0,
                 'clarification': None
             }
-
-    async def generate_async_response(self, message: str) -> AsyncGenerator[str, None]:
+    def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
-        Generate streaming response with metadata.
+        Format publication information into a readable context for the LLM with detailed logging.
         
         Args:
-            message: User input message
+            publications: List of publication dictionaries
             
-        Yields:
-            Response chunks or metadata dictionaries
+        Returns:
+            Formatted context string
         """
+        logger.info(f"Starting format_publication_context with {len(publications)} publications")
+        
+        if not publications:
+            logger.info("No publications provided, returning default message")
+            return "No publication information available."
+        
         try:
-            # Detect intent
-            intent_result = await self.detect_intent(message)
-            intent = intent_result['intent']
-            confidence = intent_result['confidence']
+            context_parts = ["Here is information about relevant APHRC publications:"]
+            
+            for idx, pub in enumerate(publications):
+                logger.debug(f"Processing publication {idx+1}")
                 
-            # Get relevant content based on intent
-            context = ""
-            metadata = {
-                'intent': {'type': intent.value, 'confidence': confidence},
-                'content_matches': [],
-                'timestamp': datetime.now().isoformat()
-            }
-
-            if intent == QueryIntent.PUBLICATION:
-                publications, _ = await self.get_relevant_publications(message)
-                if publications:
-                    context = self.format_publication_context(publications)
-                    metadata['content_matches'] = [p['id'] for p in publications]
-                    metadata['content_types'] = {'publication': len(publications)}
+                # Check publication data
+                if not isinstance(pub, dict):
+                    logger.warning(f"Publication {idx+1} is not a dictionary but a {type(pub).__name__}")
+                    continue
+                    
+                # Extract title
+                title = pub.get('title', 'Untitled')
+                logger.debug(f"Publication {idx+1} title: {title[:50]}...")
+                
+                pub_info = [f"Publication {idx+1}: {title}"]
+                
+                # Add year
+                pub_year = pub.get('publication_year', '')
+                if pub_year:
+                    logger.debug(f"Adding year: {pub_year}")
+                    pub_info.append(f"Published: {pub_year}")
+                
+                # Add authors with careful handling
+                try:
+                    authors = pub.get('authors', [])
+                    logger.debug(f"Authors type: {type(authors).__name__}")
+                    
+                    if authors:
+                        if isinstance(authors, list):
+                            # Format author list with error handling
+                            try:
+                                # Format author list, limit to first 3 with "et al." if more
+                                if len(authors) > 3:
+                                    author_text = f"{', '.join(str(a) for a in authors[:3])} et al."
+                                else:
+                                    author_text = f"{', '.join(str(a) for a in authors)}"
+                                pub_info.append(f"Authors: {author_text}")
+                            except Exception as author_error:
+                                logger.warning(f"Error formatting authors: {author_error}")
+                                pub_info.append(f"Authors: {len(authors)} contributors")
+                        else:
+                            logger.debug(f"Authors not a list: {authors}")
+                            pub_info.append(f"Authors: {authors}")
+                except Exception as authors_error:
+                    logger.error(f"Error processing authors: {authors_error}", exc_info=True)
+                
+                # Add APHRC experts if available
+                try:
+                    aphrc_experts = pub.get('aphrc_experts', [])
+                    if aphrc_experts:
+                        if isinstance(aphrc_experts, list):
+                            pub_info.append(f"APHRC Experts: {', '.join(str(e) for e in aphrc_experts[:3])}")
+                        else:
+                            pub_info.append(f"APHRC Experts: {aphrc_experts}")
+                except Exception as experts_error:
+                    logger.error(f"Error processing APHRC experts: {experts_error}", exc_info=True)
+                
+                # Add abstract snippet
+                try:
+                    abstract = pub.get('abstract', '')
+                    if abstract:
+                        # Truncate long abstracts
+                        if len(abstract) > 300:
+                            abstract = abstract[:297] + "..."
+                        pub_info.append(f"Abstract: {abstract}")
+                except Exception as abstract_error:
+                    logger.error(f"Error processing abstract: {abstract_error}", exc_info=True)
+                
+                # Add DOI if available
+                doi = pub.get('doi', '')
+                if doi:
+                    pub_info.append(f"DOI: {doi}")
+                
+                # Combine all information about this publication
+                logger.debug(f"Completed processing publication {idx+1}, {len(pub_info)} info parts")
+                try:
+                    context_parts.append("\n".join(pub_info))
+                except Exception as join_error:
+                    logger.error(f"Error joining pub_info: {join_error}", exc_info=True)
+                    context_parts.append(f"Publication {idx+1}: {title}")
             
-            elif intent == QueryIntent.EXPERT:
-                experts, _ = await self.get_relevant_experts(message)
-                if experts:
-                    context = self.format_expert_context(experts)
-                    metadata['content_matches'] = [e['id'] for e in experts]
-                    metadata['content_types'] = {'expert': len(experts)}
-
-            # Prepare messages for LLM
-            messages = [
-                SystemMessage(content="You are a helpful research assistant."),
-                HumanMessage(content=f"Context:\n{context}\n\nQuestion: {message}")
-            ]
-
-            # Yield metadata first
-            yield {'is_metadata': True, 'metadata': metadata}
-
-            # Generate streaming response
-            model = self.get_gemini_model()
-            response = await model.agenerate([messages])
-            
-            # Stream tokens
-            async for token in self.callback.aiter():
-                if token is not None:
-                    yield token
-
+            # Join all context parts
+            logger.info(f"Joining {len(context_parts)} context parts")
+            try:
+                result = "\n\n".join(context_parts)
+                logger.info(f"Successfully created context, length: {len(result)}")
+                return result
+            except Exception as final_join_error:
+                logger.error(f"Error in final context join: {final_join_error}", exc_info=True)
+                return "Error formatting publications."
+                
         except Exception as e:
-            logger.error(f"Error in generate_async_response: {e}")
-            yield f"Error: {str(e)}"
+            logger.error(f"Unhandled error in format_publication_context: {e}", exc_info=True)
+            return f"Error formatting publications: {str(e)}"
 
     def _extract_title_from_query(self, query: str) -> Optional[str]:
         """Extract potential publication title from query."""

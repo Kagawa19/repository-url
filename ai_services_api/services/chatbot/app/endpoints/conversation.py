@@ -42,6 +42,7 @@ class ChatResponse(BaseModel):
     timestamp: datetime
     user_id: str
     response_time: Optional[float] = None
+    metadata: Optional[dict] = None  # Added metadata field to model
 
 async def get_user_id(request: Request) -> str:
     """Fetch user ID from request headers."""
@@ -51,28 +52,18 @@ async def get_user_id(request: Request) -> str:
     return user_id
 
 @DatabaseConnector.retry_on_failure(max_retries=3)
+# Enhanced logging for process_chat_request function
 async def process_chat_request(query: str, user_id: str, redis_client) -> ChatResponse:
-    """
-    Handle chat request with optimized processing and enhanced logging.
-    
-    Args:
-        query (str): The user's chat query
-        user_id (str): Unique identifier for the user
-        redis_client: Redis client for caching
-    
-    Returns:
-        ChatResponse: Processed chat response
-    """
+    """Handle chat request with enhanced logging for debugging."""
     # Capture overall start time
     overall_start_time = datetime.utcnow()
-    logger.info(f"Starting chat request processing")
-    logger.debug(f"Request details - User ID: {user_id}, Query length: {len(query)}")
+    logger.info(f"Starting process_chat_request")
+    logger.info(f"Request details - User ID: {user_id}, Query: {query}")
 
     try:
         # Generate unique redis key for caching
         redis_key = f"chat:{user_id}:{query}"
-        logger.debug(f"Generated Redis key: {redis_key}")
-
+        
         # Concurrent cache check and session creation
         logger.info("Performing concurrent cache check and session initialization")
         try:
@@ -80,6 +71,7 @@ async def process_chat_request(query: str, user_id: str, redis_client) -> ChatRe
                 redis_client.get(redis_key),
                 message_handler.start_chat_session(user_id)
             )
+            logger.info(f"Created chat session: {session_id}")
         except Exception as concurrent_error:
             logger.error(f"Error in concurrent operations: {concurrent_error}", exc_info=True)
             raise
@@ -87,7 +79,6 @@ async def process_chat_request(query: str, user_id: str, redis_client) -> ChatRe
         # Check cache hit
         if cache_check:
             logger.info(f"Cache hit detected for query")
-            logger.debug(f"Cached response size: {len(cache_check)} bytes")
             return ChatResponse(**json.loads(cache_check))
 
         # Initialize response collection
@@ -96,35 +87,55 @@ async def process_chat_request(query: str, user_id: str, redis_client) -> ChatRe
 
         # Process message stream with timeout
         try:
-            logger.info("Initiating message stream processing with 30-second timeout")
+            logger.info("Initiating message stream processing with timeout")
             async with asyncio.timeout(200):
+                part_counter = 0
                 async for part in message_handler.send_message_async(
                     message=query,
                     user_id=user_id,
                     session_id=session_id
                 ):
-                    # Decode bytes if necessary
-                    if isinstance(part, bytes):
-                        part = part.decode('utf-8')
+                    part_counter += 1
+                    logger.info(f"Processing stream part #{part_counter}")
                     
-                    # Log each response part
-                    logger.debug(f"Received response part (length: {len(part)})")
-                    response_parts.append(part)
+                    # Log exact content type of this part
+                    logger.info(f"Part type: {type(part).__name__}")
+                    
+                    # Handle different part types
+                    if isinstance(part, dict):
+                        logger.info(f"Received dictionary part: {str(part)[:100]}...")
+                        # Skip metadata dictionaries in the response parts
+                        if part.get('is_metadata'):
+                            logger.info("Skipping metadata dictionary in response parts")
+                            continue
+                        # Convert other dictionaries to strings (this should rarely happen)
+                        logger.info("Converting dictionary to string for response")
+                        response_parts.append(json.dumps(part))
+                    elif isinstance(part, bytes):
+                        logger.info(f"Received bytes part, length: {len(part)}")
+                        # Decode bytes to string
+                        decoded = part.decode('utf-8')
+                        logger.debug(f"Decoded bytes: {decoded[:50]}...")
+                        response_parts.append(decoded)
+                    elif isinstance(part, str):
+                        logger.info(f"Received string part, length: {len(part)}")
+                        logger.debug(f"String content: {part[:50]}...")
+                        response_parts.append(part)
+                    else:
+                        # Handle unexpected types
+                        logger.warning(f"Unexpected part type: {type(part).__name__}")
+                        logger.debug(f"Converting to string: {str(part)[:100]}...")
+                        response_parts.append(str(part))
+
+                logger.info(f"Completed processing {part_counter} stream parts")
 
         except asyncio.TimeoutError:
-            logger.warning("Request processing timed out after 30 seconds")
+            logger.warning("Request processing timed out")
             error_response = "The request took too long to process. Please try again."
         
         except Exception as processing_error:
             logger.error(f"Error in chat processing: {processing_error}", exc_info=True)
-            
-            # Specific error handling
-            if "503" in str(processing_error) or "overloaded" in str(processing_error):
-                logger.warning("Service overload detected")
-                error_response = "I apologize, but the service is currently experiencing high load. Please try again in a few moments."
-            else:
-                logger.error("Unexpected error during chat processing")
-                error_response = "An unexpected error occurred. Please try again."
+            error_response = "An unexpected error occurred. Please try again."
 
         # Handle error scenario
         if error_response:
@@ -138,12 +149,23 @@ async def process_chat_request(query: str, user_id: str, redis_client) -> ChatRe
 
         # Process successful response
         response_time = (datetime.utcnow() - overall_start_time).total_seconds()
-        complete_response = ''.join(response_parts)
+        
+        logger.info(f"Joining {len(response_parts)} response parts")
+        try:
+            complete_response = ''.join(response_parts)
+            logger.info(f"Successfully joined all response parts, total length: {len(complete_response)}")
+        except Exception as join_error:
+            logger.error(f"Error joining response parts: {join_error}", exc_info=True)
+            logger.error(f"Response parts types: {[type(p).__name__ for p in response_parts]}")
+            return ChatResponse(
+                response="Error processing response. Please try again.",
+                timestamp=datetime.utcnow().isoformat(),
+                user_id=user_id,
+                response_time=response_time
+            )
         
         logger.info(f"Successfully processed chat request")
-        logger.debug(f"Response details - Total length: {len(complete_response)}, "
-                     f"Response time: {response_time:.2f} seconds")
-
+        
         # Prepare chat data
         chat_data = {
             "response": complete_response,
@@ -152,8 +174,8 @@ async def process_chat_request(query: str, user_id: str, redis_client) -> ChatRe
             "response_time": response_time
         }
 
-        # Concurrent cache update and DB save
-        logger.info("Performing concurrent cache update and database save")
+        # Save to cache and database
+        logger.info("Saving response to cache and database")
         try:
             await asyncio.gather(
                 redis_client.setex(redis_key, 3600, json.dumps(chat_data)),
@@ -164,11 +186,11 @@ async def process_chat_request(query: str, user_id: str, redis_client) -> ChatRe
                     response_time
                 )
             )
+            logger.info("Successfully saved to cache and database")
         except Exception as save_error:
             logger.error(f"Error in cache/DB save: {save_error}", exc_info=True)
-            # Note: We don't raise here to ensure the response is still returned
 
-        # Final logging of total processing time
+        # Final logging
         total_processing_time = (datetime.utcnow() - overall_start_time).total_seconds()
         logger.info(f"Chat request processing completed. Total time: {total_processing_time:.2f} seconds")
 
@@ -177,11 +199,7 @@ async def process_chat_request(query: str, user_id: str, redis_client) -> ChatRe
     except Exception as critical_error:
         # Critical error handling
         logger.critical(f"Unhandled error in chat endpoint: {critical_error}", exc_info=True)
-        
-        # Log additional context
         logger.error(f"Error details - User ID: {user_id}, Query: {query}")
-        
-        # Raise HTTP exception for proper error handling
         raise HTTPException(
             status_code=500, 
             detail=f"Internal server error: {str(critical_error)}"
