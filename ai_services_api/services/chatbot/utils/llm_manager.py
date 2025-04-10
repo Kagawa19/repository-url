@@ -353,19 +353,21 @@ class GeminiLLMManager:
         self._rate_limited = False
         logger.info(f"Rate limit cooldown expired after {seconds} seconds")
 
+
+
     async def detect_intent(self, message: str) -> Dict[str, Any]:
         """Advanced intent detection using Gemini"""
         try:
             prompt = f"""
             Analyze this query and classify its intent:
             Query: "{message}"
-            
+
             Options:
             - PUBLICATION (research papers, studies)
             - EXPERT (researchers, specialists)
             - NAVIGATION (website sections, resources)
             - GENERAL (other queries)
-            
+
             Return JSON format:
             {{
                 "intent": "PUBLICATION|EXPERT|NAVIGATION|GENERAL",
@@ -373,11 +375,11 @@ class GeminiLLMManager:
                 "clarification": "optional clarification question"
             }}
             """
-            
+
             model = self.get_gemini_model()
             response = await model.ainvoke(prompt)
             content = response.content
-            
+
             try:
                 result = json.loads(content)
                 intent_mapping = {
@@ -386,13 +388,13 @@ class GeminiLLMManager:
                     'NAVIGATION': QueryIntent.NAVIGATION,
                     'GENERAL': QueryIntent.GENERAL
                 }
-                
+
                 return {
-                    'intent': intent_mapping.get(result.get('intent', 'GENERAL'), 
-                    'confidence': min(1.0, max(0.0, float(result.get('confidence', 0.0))),
+                    'intent': intent_mapping.get(result.get('intent', 'GENERAL'), QueryIntent.GENERAL),
+                    'confidence': min(1.0, max(0.0, float(result.get('confidence', 0.0)))),
                     'clarification': result.get('clarification')
                 }
-                
+
             except json.JSONDecodeError:
                 logger.warning("Failed to parse intent detection response")
                 return {
@@ -400,7 +402,7 @@ class GeminiLLMManager:
                     'confidence': 0.0,
                     'clarification': None
                 }
-                
+
         except Exception as e:
             logger.error(f"Intent detection error: {e}")
             return {
@@ -421,8 +423,10 @@ class GeminiLLMManager:
         """
         try:
             # Detect intent
-            intent, confidence = self.detect_intent(message)
-            
+            intent_result = await self.detect_intent(message)
+            intent = intent_result['intent']
+            confidence = intent_result['confidence']
+                
             # Get relevant content based on intent
             context = ""
             metadata = {
@@ -466,6 +470,42 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error in generate_async_response: {e}")
             yield f"Error: {str(e)}"
+
+    def _extract_title_from_query(self, query: str) -> Optional[str]:
+    """Extract potential publication title from query."""
+    title_patterns = [
+        r'title[:\s]*["\'](.+?)["\']',
+        r'called ["\'](.+?)["\']',
+        r'named ["\'](.+?)["\']',
+        r'about ["\'](.+?)["\']'
+    ]
+    for pattern in title_patterns:
+        match = re.search(pattern, query, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+    def _calculate_publication_match_score(self, metadata: Dict, query_terms: Set[str], title_match: Optional[str]) -> float:
+        """Calculate match score between publication and query."""
+        score = 0.0
+        
+        # Title match boost
+        if title_match and title_match.lower() in metadata.get('title', '').lower():
+            score += 1.0
+        
+        # Term frequency in text fields
+        text_fields = [
+            metadata.get('title', ''),
+            metadata.get('abstract', ''),
+            metadata.get('description', '')
+        ]
+        text = ' '.join(text_fields).lower()
+        
+        for term in query_terms:
+            if term in text:
+                score += 0.2  # Small boost for each term match
+        
+        return min(score, 1.0)  # Cap at 1.0
 
     async def analyze_quality(self, message: str, response: str = "") -> Dict:
         """
