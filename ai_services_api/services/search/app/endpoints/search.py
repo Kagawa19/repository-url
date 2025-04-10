@@ -60,6 +60,8 @@ async def advanced_search(
     request: Request,
     user_id: str = Depends(get_test_user_id),
     query: Optional[str] = None,
+    id: Optional[str] = None,  # Add this parameter
+    type: Optional[str] = None,  # Add this parameter
     search_type: Optional[str] = None,
     active_only: bool = True,
     k: int = 5,
@@ -75,8 +77,44 @@ async def advanced_search(
     - Experts (name, theme, designation)
     - Publications
     - Flexible combination of search parameters
+    - Direct lookup by ID (for suggestion clicks)
     """
     logger.info(f"Advanced search request - User: {user_id}")
+    
+    # If ID parameter is provided, prioritize direct lookup
+    if id is not None:
+        logger.info(f"Direct lookup by ID: {id}")
+        # Handle the suggestion click case by doing direct lookup
+        try:
+            if type == 'expert':
+                # Use the ID for an exact expert lookup
+                search_manager = ExpertSearchIndexManager()
+                results = search_manager.get_expert_by_id(id)
+                if results:
+                    # Return just this expert
+                    logger.info(f"Found expert by direct ID lookup: {results['id']}")
+                    return SearchResponse(
+                        total_results=1,
+                        experts=[ExpertSearchResult(
+                            id=results["id"],
+                            first_name=results["first_name"],
+                            last_name=results["last_name"],
+                            designation=results["designation"],
+                            theme=results["theme"],
+                            unit=results["unit"],
+                            contact=results["contact"],
+                            is_active=results["is_active"],
+                            score=results["score"],
+                            bio=results["bio"],
+                            knowledge_expertise=results["knowledge_expertise"]
+                        )],
+                        user_id=user_id,
+                        session_id=str(uuid.uuid4())[:8],
+                        refinements={}
+                    )
+        except Exception as e:
+            logger.error(f"Error in direct expert lookup: {e}", exc_info=True)
+            # Fall through to regular search if direct lookup fails
     
     # Validate search parameters
     search_params = [query, name, theme, designation, publication]
@@ -119,13 +157,45 @@ async def advanced_search(
         
         logger.info(f"Constructed effective query: '{effective_query}'")
         
-        # Use the unified process_expert_search function for all search types
-        search_response = await process_expert_search(
-            query=effective_query,
-            user_id=user_id,
-            active_only=active_only,
-            k=k
-        )
+        # Select the appropriate search method based on search type
+        if search_type == "name" and name:
+            search_response = await process_expert_name_search(
+                name=name,
+                user_id=user_id,
+                active_only=active_only,
+                k=k
+            )
+        elif search_type == "theme" and theme:
+            search_response = await process_expert_theme_search(
+                theme=theme,
+                user_id=user_id,
+                active_only=active_only,
+                k=k
+            )
+        elif search_type == "designation" and designation:
+            search_response = await process_expert_designation_search(
+                designation=designation,
+                user_id=user_id,
+                active_only=active_only,
+                k=k
+            )
+        elif search_type == "publication" and publication:
+            search_response = await process_publication_search(
+                publication=publication,
+                user_id=user_id,
+                k=k
+            )
+        else:
+            # Use the unified process_expert_search function for all other search types
+            search_response = await process_expert_search(
+                query=effective_query,
+                user_id=user_id,
+                active_only=active_only,
+                k=k
+            )
+        
+        # Log search results
+        logger.info(f"Search completed with {search_response.total_results} results")
         
         return search_response
     
@@ -135,6 +205,56 @@ async def advanced_search(
             status_code=500, 
             detail="An error occurred while processing the advanced search"
         )
+    
+def get_expert_by_id(self, expert_id: str) -> Dict[str, Any]:
+    """
+    Get an expert directly by ID.
+    
+    Args:
+        expert_id: Expert ID to fetch
+        
+    Returns:
+        Dict with expert details or None if not found
+    """
+    try:
+        conn = self.db.get_connection()
+        with conn.cursor() as cur:
+            # Query for the expert with this exact ID
+            cur.execute("""
+                SELECT e.id, e.first_name, e.last_name, 
+                       COALESCE(e.designation, '') as designation,
+                       COALESCE(e.theme, '') as theme,
+                       COALESCE(e.unit, '') as unit,
+                       COALESCE(e.bio, '') as bio,
+                       e.knowledge_expertise
+                FROM experts_expert e
+                WHERE e.id = %s
+            """, [expert_id])
+            
+            row = cur.fetchone()
+            if row:
+                # Format the result as a dictionary
+                return {
+                    "id": str(row[0]),
+                    "first_name": row[1] or "",
+                    "last_name": row[2] or "",
+                    "designation": row[3] or "",
+                    "theme": row[4] or "",
+                    "unit": row[5] or "",
+                    "contact": "",  # Default empty value
+                    "is_active": True,  # Default value
+                    "score": 1.0,  # Perfect match
+                    "bio": row[6] or "",
+                    "knowledge_expertise": self._parse_jsonb(row[7]) if row[7] else []
+                }
+            
+            return None
+    except Exception as e:
+        logger.error(f"Error fetching expert by ID: {e}")
+        return None
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 # Replace the advanced_predict endpoint with the simpler 'predict' path
 @router.get("/experts/predict/{partial_query}")
