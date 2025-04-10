@@ -167,6 +167,151 @@ class ExpertSearchIndexManager:
             logger.error(f"Error setting up Redis: {e}")
             raise
 
+        
+    def get_expert_by_id_or_name(self, query: str) -> List[Dict[str, Any]]:
+        """
+        Try to find an expert by ID first, then fall back to name search.
+        """
+        logger.info(f"Attempting to find expert by ID or name: '{query}'")
+        try:
+            # First, try to treat the query as an ID
+            if query.isdigit():
+                logger.info(f"Query '{query}' appears to be a numeric ID, trying exact ID lookup")
+                expert = self.get_expert_by_id(query)
+                if expert:
+                    logger.info(f"Found expert with ID {query}")
+                    return [expert]
+                else:
+                    logger.info(f"No expert found with ID {query}")
+            
+            # Extract name parts
+            name_parts = query.split()
+            logger.info(f"Extracted name parts from '{query}': {name_parts}")
+            
+            # Connect to database
+            conn = self.db.get_connection()
+            with conn.cursor() as cur:
+                # Search by full name
+                if len(name_parts) > 1:
+                    first_name = name_parts[0]
+                    last_name = ' '.join(name_parts[1:])
+                    logger.info(f"Searching for expert with first_name='{first_name}', last_name='{last_name}'")
+                    
+                    cur.execute("""
+                        SELECT e.id, e.first_name, e.last_name, 
+                            COALESCE(e.designation, '') as designation,
+                            COALESCE(e.theme, '') as theme,
+                            COALESCE(e.unit, '') as unit,
+                            COALESCE(e.bio, '') as bio,
+                            e.knowledge_expertise,
+                            e.is_active
+                        FROM experts_expert e
+                        WHERE 
+                            (LOWER(e.first_name) = LOWER(%s) AND LOWER(e.last_name) = LOWER(%s))
+                            OR
+                            (LOWER(CONCAT(e.first_name, ' ', e.last_name)) = LOWER(%s))
+                    """, [first_name, last_name, query])
+                else:
+                    # Search by single name part (first or last)
+                    logger.info(f"Searching for expert with single name part: '{query}'")
+                    cur.execute("""
+                        SELECT e.id, e.first_name, e.last_name, 
+                            COALESCE(e.designation, '') as designation,
+                            COALESCE(e.theme, '') as theme,
+                            COALESCE(e.unit, '') as unit,
+                            COALESCE(e.bio, '') as bio,
+                            e.knowledge_expertise,
+                            e.is_active
+                        FROM experts_expert e
+                        WHERE 
+                            LOWER(e.first_name) = LOWER(%s) OR
+                            LOWER(e.last_name) = LOWER(%s)
+                    """, [query, query])
+                
+                # Format results
+                rows = cur.fetchall()
+                logger.info(f"Database search returned {len(rows)} results")
+                
+                results = []
+                for row in rows:
+                    expert_id = str(row[0])
+                    first_name = row[1] or ""
+                    last_name = row[2] or ""
+                    logger.info(f"Found expert: {first_name} {last_name} (ID: {expert_id})")
+                    
+                    results.append({
+                        "id": expert_id,
+                        "first_name": first_name,
+                        "last_name": last_name,
+                        "designation": row[3] or "",
+                        "theme": row[4] or "",
+                        "unit": row[5] or "",
+                        "contact": "",  # Default empty value
+                        "is_active": row[8] if row[8] is not None else True,
+                        "score": 1.0,  # Exact match
+                        "bio": row[6] or "",
+                        "knowledge_expertise": self._parse_jsonb(row[7]) if row[7] else []
+                    })
+                
+                return results
+        except Exception as e:
+            logger.error(f"Error in expert lookup by ID or name: {e}")
+            return []
+        finally:
+            if 'conn' in locals():
+                conn.close()
+        
+    def get_expert_by_id(self, expert_id: str) -> Dict[str, Any]:
+        """
+        Get an expert directly by ID.
+        
+        Args:
+            expert_id: Expert ID to fetch
+            
+        Returns:
+            Dict with expert details or None if not found
+        """
+        try:
+            conn = self.db.get_connection()
+            with conn.cursor() as cur:
+                # Query for the expert with this exact ID
+                cur.execute("""
+                    SELECT e.id, e.first_name, e.last_name, 
+                        COALESCE(e.designation, '') as designation,
+                        COALESCE(e.theme, '') as theme,
+                        COALESCE(e.unit, '') as unit,
+                        COALESCE(e.bio, '') as bio,
+                        e.knowledge_expertise,
+                        e.is_active
+                    FROM experts_expert e
+                    WHERE e.id = %s
+                """, [expert_id])
+                
+                row = cur.fetchone()
+                if row:
+                    # Format the result as a dictionary
+                    return {
+                        "id": str(row[0]),
+                        "first_name": row[1] or "",
+                        "last_name": row[2] or "",
+                        "designation": row[3] or "",
+                        "theme": row[4] or "",
+                        "unit": row[5] or "",
+                        "contact": "",  # Default empty value
+                        "is_active": row[8] if row[8] is not None else True,
+                        "score": 1.0,  # Perfect match
+                        "bio": row[6] or "",
+                        "knowledge_expertise": self._parse_jsonb(row[7]) if row[7] else []
+                    }
+                
+                return None
+        except Exception as e:
+            logger.error(f"Error fetching expert by ID: {e}")
+            return None
+        finally:
+            if 'conn' in locals():
+                conn.close()
+
     def create_expert_text(self, expert: Dict[str, Any]) -> str:
         """
         Create searchable text from expert data, focusing only on knowledge expertise.
