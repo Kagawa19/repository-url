@@ -344,3 +344,91 @@ async def clear_all_search_cache(
     except Exception as e:
         logging.error(f"Failed to clear all search caches: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Cache clearing error: {str(e)}")
+
+# New flexible_user_id dependency that checks request state first before falling back to header
+async def flexible_get_user_id(request: Request) -> str:
+    """
+    Get user ID with flexibility:
+    1. First check if a user ID is set in request state (from /set-user-id endpoint)
+    2. Fall back to X-User-ID header if not in request state
+    3. Raise exception if neither is available
+    
+    This preserves the original get_user_id behavior for existing endpoints.
+    """
+    logger.debug("Flexible user ID extraction")
+    
+    # First check if we have a user ID in the request state (set via the /set-user-id endpoint)
+    if hasattr(request.state, "user_id"):
+        user_id = request.state.user_id
+        logger.info(f"Using user ID from request state: {user_id}")
+        return user_id
+    
+    # Otherwise fall back to the header
+    user_id = request.headers.get("X-User-ID")
+    if not user_id:
+        logger.error("Missing required X-User-ID header in request")
+        raise HTTPException(status_code=400, detail="X-User-ID header is required")
+    
+    logger.info(f"User ID extracted from header: {user_id}")
+    return user_id
+
+# Your /set-user-id endpoint remains the same
+@router.post("/set-user-id")
+async def set_user_id(
+    request: Request,
+    user_id: str = Body(...),
+) -> Dict:
+    """
+    Set the user ID for the current session.
+    This allows testing with different user IDs without changing headers.
+    """
+    logger.info(f"Setting user ID to: {user_id}")
+    
+    # Store the user ID in the request state for this session
+    request.state.user_id = user_id
+    
+    return {
+        "status": "success",
+        "message": f"User ID set to: {user_id}",
+        "user_id": user_id
+    }
+
+# Example of updating an endpoint to use the flexible dependency
+# (you can choose which endpoints to update)
+@router.get("/experts/predict/{partial_query}/flexible")
+async def predict_query_flexible(
+    partial_query: str,
+    request: Request,
+    user_id: str = Depends(flexible_get_user_id),  # Use the flexible dependency here
+    search_type: Optional[str] = None,
+    limit: int = 10
+):
+    """
+    Generate query predictions based on partial input.
+    Uses the flexible user ID resolution.
+    """
+    logger.info(f"Received flexible query prediction request - Partial query: {partial_query}, User ID: {user_id}")
+    
+    # Same implementation as your original predict_query
+    valid_search_types = ["name", "theme", "designation", "publication", None]
+    if search_type and search_type not in valid_search_types[:-1]:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid search type. Must be one of: {', '.join(valid_search_types[:-1])}"
+        )
+    
+    try:
+        # Process advanced query prediction
+        return await process_advanced_query_prediction(
+            partial_query, 
+            user_id, 
+            search_type, 
+            limit
+        )
+    
+    except Exception as e:
+        logger.error(f"Error in query prediction: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"An error occurred while generating predictions: {str(e)}"
+        )
