@@ -244,13 +244,13 @@ async def process_message_draft(
         cur = conn.cursor(cursor_factory=RealDictCursor)
         logger.debug("Database connection established successfully")
             
-        # Fetch receiver details
+        # Fetch receiver details - MOVED THIS CODE UP 
         cur.execute("""
-            SELECT id, first_name, last_name, designation as position, unit as department
-            FROM experts_expert
+            SELECT id, first_name, last_name, designation, theme, domains, fields 
+            FROM experts_expert 
             WHERE id = %s AND is_active = true
-        """, (user_id,))
-        sender = cur.fetchone()
+        """, (receiver_id,))
+        receiver = cur.fetchone()
         
         if not receiver:
             logger.error(f"Receiver not found or inactive: {receiver_id}")
@@ -261,10 +261,10 @@ async def process_message_draft(
 
         logger.info(f"Receiver found: {receiver['first_name']} {receiver['last_name']}")
 
-        # NEW CODE: Fetch sender details based on user_id
+        # Get sender details from experts_expert table instead of users
         cur.execute("""
-            SELECT id, first_name, last_name, position, department 
-            FROM users
+            SELECT id, first_name, last_name, designation as position, unit as department 
+            FROM experts_expert
             WHERE id = %s AND is_active = true
         """, (user_id,))
         sender = cur.fetchone()
@@ -415,7 +415,6 @@ African Population and Health Research Center (APHRC)"""
         if conn:
             conn.close()
         logger.debug("Database connections closed")
-
 @router.get("/test/draft/{receiver_id}/{content}")
 async def test_create_message_draft(
     receiver_id: str,
