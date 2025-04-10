@@ -353,6 +353,301 @@ class GeminiLLMManager:
         self._rate_limited = False
         logger.info(f"Rate limit cooldown expired after {seconds} seconds")
 
+    async def get_relevant_experts(self, query: str, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """
+        Retrieve experts from Redis based on the query using embedding similarity.
+        
+        Args:
+            query: The search query
+            limit: Maximum number of experts to return
+            
+        Returns:
+            Tuple containing list of expert dictionaries and optional error message
+        """
+        try:
+            if not self.redis_manager:
+                logger.warning("Redis manager not available, cannot retrieve experts")
+                return [], "Our expert database is currently unavailable. Please try again later."
+            
+            # Get all expert keys
+            expert_keys = await self._get_all_expert_keys()
+            
+            if not expert_keys:
+                logger.warning("No expert keys found in Redis")
+                return [], "No experts found in the database."
+            
+            # Get query embedding if model is available
+            query_embedding = None
+            if self.embedding_model:
+                try:
+                    query_embedding = self.embedding_model.encode(query)
+                except Exception as e:
+                    logger.error(f"Error creating query embedding: {e}")
+            
+            # Collect expert data
+            experts = []
+            for key in expert_keys:
+                try:
+                    # Get raw data from Redis
+                    raw_data = self.redis_manager.redis_text.hgetall(key)
+                    if not raw_data:
+                        continue
+                    
+                    # Extract expert ID from key
+                    expert_id = key.split(':')[-1]
+                    
+                    # Parse expert data
+                    expert = {
+                        'id': expert_id,
+                        'first_name': raw_data.get('first_name', ''),
+                        'last_name': raw_data.get('last_name', ''),
+                        'position': raw_data.get('position', ''),
+                        'department': raw_data.get('department', ''),
+                        'bio': raw_data.get('bio', ''),
+                        'email': raw_data.get('email', '')
+                    }
+                    
+                    # Parse JSON fields
+                    for field in ['expertise', 'research_interests', 'publications']:
+                        try:
+                            if raw_data.get(field):
+                                expert[field] = json.loads(raw_data.get(field, '[]'))
+                            else:
+                                expert[field] = []
+                        except json.JSONDecodeError:
+                            expert[field] = []
+                    
+                    # Calculate a match score
+                    if query_embedding is not None and 'embedding' in raw_data:
+                        try:
+                            # Use embedding similarity if available
+                            expert_embedding = json.loads(raw_data.get('embedding'))
+                            similarity = np.dot(query_embedding, expert_embedding) / (
+                                np.linalg.norm(query_embedding) * np.linalg.norm(expert_embedding)
+                            )
+                            expert['similarity'] = float(similarity)
+                        except (json.JSONDecodeError, TypeError):
+                            # Fallback to text matching if embedding is invalid
+                            expert['similarity'] = self._calculate_text_similarity(query, expert)
+                    else:
+                        # Fallback to text matching
+                        expert['similarity'] = self._calculate_text_similarity(query, expert)
+                    
+                    experts.append(expert)
+                except Exception as e:
+                    logger.error(f"Error processing expert {key}: {e}")
+            
+            # Sort by similarity score and limit results
+            experts.sort(key=lambda x: x.get('similarity', 0), reverse=True)
+            top_experts = experts[:limit]
+            
+            # Remove similarity score from response
+            for expert in top_experts:
+                expert.pop('similarity', None)
+                
+            # Get publications for each expert
+            for expert in top_experts:
+                publications = await self._get_expert_publications(expert['id'])
+                expert['publications'] = publications
+            
+            logger.info(f"Found {len(top_experts)} relevant experts")
+            return top_experts, None
+            
+        except Exception as e:
+            logger.error(f"Error in get_relevant_experts: {e}")
+            return [], "We encountered an error finding experts. Please try again with a simpler query."
+
+    def _calculate_text_similarity(self, query: str, expert: Dict) -> float:
+        """
+        Calculate text-based similarity between query and expert.
+        Used as a fallback when embeddings are not available.
+        """
+        query_terms = set(query.lower().split())
+        expert_text = ' '.join([
+            expert.get('first_name', ''),
+            expert.get('last_name', ''),
+            expert.get('position', ''),
+            expert.get('department', ''),
+            expert.get('bio', ''),
+            ' '.join(str(item) for item in expert.get('expertise', [])),
+            ' '.join(str(item) for item in expert.get('research_interests', []))
+        ]).lower()
+        
+        # Count matching terms
+        matches = sum(1 for term in query_terms if term in expert_text)
+        
+        # Simple score based on percentage of query terms matched
+        return matches / max(1, len(query_terms))
+
+    def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
+        """
+        Format expert information into a readable context for the LLM.
+        
+        Args:
+            experts: List of expert dictionaries
+            
+        Returns:
+            Formatted context string
+        """
+        if not experts:
+            return "No expert information available."
+        
+        context_parts = ["Here is information about relevant APHRC experts:"]
+        
+        for idx, expert in enumerate(experts):
+            full_name = f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip()
+            position = expert.get('position', 'Researcher')
+            department = expert.get('department', '')
+            
+            expert_info = [f"Expert {idx+1}: {full_name}"]
+            
+            if position:
+                expert_info.append(f"Position: {position}")
+            
+            if department:
+                expert_info.append(f"Department: {department}")
+            
+            # Add expertise
+            expertise = expert.get('expertise', [])
+            if expertise:
+                if isinstance(expertise, list):
+                    expert_info.append(f"Areas of expertise: {', '.join(expertise[:5])}")
+                else:
+                    expert_info.append(f"Areas of expertise: {expertise}")
+            
+            # Add bio snippet
+            bio = expert.get('bio', '')
+            if bio:
+                # Truncate long bios
+                if len(bio) > 300:
+                    bio = bio[:297] + "..."
+                expert_info.append(f"Bio: {bio}")
+            
+            # Add publications if available
+            publications = expert.get('publications', [])
+            if publications:
+                pub_titles = [p.get('title', 'Untitled') for p in publications[:2]]
+                expert_info.append(f"Notable publications: {'; '.join(pub_titles)}")
+                
+            # Add contact if available
+            email = expert.get('email', '')
+            if email:
+                expert_info.append(f"Contact: {email}")
+                
+            # Combine all information about this expert
+            context_parts.append("\n".join(expert_info))
+        
+        return "\n\n".join(context_parts)
+
+    def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
+        """
+        Format publication information into a readable context for the LLM.
+        
+        Args:
+            publications: List of publication dictionaries
+            
+        Returns:
+            Formatted context string
+        """
+        if not publications:
+            return "No publication information available."
+        
+        context_parts = ["Here is information about relevant APHRC publications:"]
+        
+        for idx, pub in enumerate(publications):
+            pub_info = [f"Publication {idx+1}: {pub.get('title', 'Untitled')}"]
+            
+            # Add year
+            pub_year = pub.get('publication_year', '')
+            if pub_year:
+                pub_info.append(f"Published: {pub_year}")
+            
+            # Add authors
+            authors = pub.get('authors', [])
+            if authors:
+                if isinstance(authors, list):
+                    # Format author list, limit to first 3 with "et al." if more
+                    if len(authors) > 3:
+                        author_text = f"{', '.join(authors[:3])} et al."
+                    else:
+                        author_text = f"{', '.join(authors)}"
+                    pub_info.append(f"Authors: {author_text}")
+                else:
+                    pub_info.append(f"Authors: {authors}")
+            
+            # Add APHRC experts if available
+            aphrc_experts = pub.get('aphrc_experts', [])
+            if aphrc_experts:
+                if isinstance(aphrc_experts, list):
+                    pub_info.append(f"APHRC Experts: {', '.join(aphrc_experts[:3])}")
+                else:
+                    pub_info.append(f"APHRC Experts: {aphrc_experts}")
+            
+            # Add abstract snippet
+            abstract = pub.get('abstract', '')
+            if abstract:
+                # Truncate long abstracts
+                if len(abstract) > 300:
+                    abstract = abstract[:297] + "..."
+                pub_info.append(f"Abstract: {abstract}")
+            
+            # Add DOI if available
+            doi = pub.get('doi', '')
+            if doi:
+                pub_info.append(f"DOI: {doi}")
+            
+            # Combine all information about this publication
+            context_parts.append("\n".join(pub_info))
+        
+        return "\n\n".join(context_parts)
+
+    async def _get_expert_for_publications(self, publication_ids: List[str]) -> Dict[str, List[Dict]]:
+        """
+        Get experts associated with a list of publications.
+        
+        Args:
+            publication_ids: List of publication IDs
+            
+        Returns:
+            Dictionary mapping publication IDs to lists of expert dictionaries
+        """
+        result = {}
+        for pub_id in publication_ids:
+            result[pub_id] = []
+        
+        try:
+            # Create batched SQL query placeholders
+            placeholders = ', '.join(f"${i+1}" for i in range(len(publication_ids)))
+            
+            async with DatabaseConnector.get_connection() as conn:
+                query = f"""
+                    SELECT e.id, e.first_name, e.last_name, l.resource_id, l.confidence_score
+                    FROM expert_resource_links l
+                    JOIN experts_expert e ON l.expert_id = e.id
+                    WHERE l.resource_id IN ({placeholders})
+                    AND l.confidence_score >= 0.7
+                    ORDER BY l.confidence_score DESC
+                """
+                
+                rows = await conn.fetch(query, *publication_ids)
+                
+                # Group by publication ID
+                for row in rows:
+                    pub_id = str(row['resource_id'])
+                    if pub_id in result:
+                        result[pub_id].append({
+                            'id': row['id'],
+                            'first_name': row['first_name'],
+                            'last_name': row['last_name'],
+                            'confidence': row['confidence_score']
+                        })
+            
+            return result
+                
+        except Exception as e:
+            logger.error(f"Error fetching experts for publications: {e}")
+            return result
+
 
 
     async def detect_intent(self, message: str) -> Dict[str, Any]:
