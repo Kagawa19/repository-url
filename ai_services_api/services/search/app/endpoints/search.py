@@ -53,7 +53,7 @@ async def get_test_user_id(request: Request) -> str:
     logger.debug("Using test user ID")
     return TEST_USER_ID
 
-# Add Redis connection similar to recommendation service
+# Redis connection helper
 async def get_redis():
     """Establish Redis connection with detailed logging"""
     try:
@@ -331,57 +331,4 @@ async def clear_all_search_cache(
     
     except Exception as e:
         logger.error(f"Failed to clear all search caches: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Cache clearing error: {str(e)}")
-
-# Specific endpoint to clear prediction caches
-@router.delete("/cache/predictions/{user_id}")
-async def clear_user_prediction_cache(
-    user_id: str,
-    redis_client: Redis = Depends(get_redis)
-) -> Dict:
-    """Clear query prediction cache for a specific user"""
-    try:
-        pattern = f"query_prediction:{user_id}:*"
-        
-        total_deleted = 0
-        async for key in redis_client.scan_iter(match=pattern):
-            await redis_client.delete(key)
-            total_deleted += 1
-        
-        logger.info(f"Prediction cache cleared for user {user_id}. Total keys deleted: {total_deleted}")
-        
-        return {
-            "status": "success", 
-            "message": f"Prediction cache cleared for user {user_id}", 
-            "total_deleted": total_deleted
-        }
-    
-    except Exception as e:
-        logger.error(f"Failed to clear prediction cache for user {user_id}: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Cache clearing error: {str(e)}")
-
-@router.delete("/cache/predictions")
-async def clear_all_prediction_cache(
-    request: Request,
-    redis_client: Redis = Depends(get_redis)
-) -> Dict:
-    """Clear query prediction cache for all users"""
-    try:
-        pattern = "query_prediction:*"
-        
-        total_deleted = 0
-        async for key in redis_client.scan_iter(match=pattern):
-            await redis_client.delete(key)
-            total_deleted += 1
-        
-        logger.info(f"All prediction caches cleared. Total keys deleted: {total_deleted}")
-        
-        return {
-            "status": "success", 
-            "message": "Cleared all prediction caches", 
-            "total_deleted": total_deleted
-        }
-    
-    except Exception as e:
-        logger.error(f"Failed to clear all prediction caches: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Cache clearing error: {str(e)}")
