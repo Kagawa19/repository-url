@@ -143,7 +143,7 @@ class ExpertMatchingService:
                     org_weight = 0.1
                     search_weight = 0.2
                 
-                # Modified query to ensure uniqueness of recommendations
+                # Fixed query that properly handles DISTINCT while still allowing ORDER BY
                 query = """
                 MATCH (e1:Expert {id: $expert_id})
                 MATCH (e2:Expert)
@@ -223,13 +223,29 @@ class ExpertMatchingService:
                     same_theme,
                     same_unit
                 
-                // Always return top results regardless of score, ensuring unique experts by ID
-                RETURN DISTINCT {
-                    id: e2.id,
-                    name: e2.name,
-                    designation: e2.designation,
-                    theme: e2.theme,
-                    unit: e2.unit,
+                // Calculate result data for each expert
+                WITH e2, similarity_score, search_similarity, interaction_similarity,
+                     shared_concepts, shared_domains, shared_fields, shared_areas, shared_methods, 
+                     same_theme, same_unit
+                
+                // Fix to ensure uniqueness by ID
+                WITH DISTINCT e2.id as expert_id, 
+                     e2.name as expert_name,
+                     e2.designation as expert_designation,
+                     e2.theme as expert_theme,
+                     e2.unit as expert_unit,
+                     similarity_score,
+                     search_similarity, interaction_similarity,
+                     shared_concepts, shared_domains, shared_fields, shared_areas, shared_methods,
+                     same_theme, same_unit
+                
+                // Put the results in the expected format with ordering
+                RETURN {
+                    id: expert_id,
+                    name: expert_name,
+                    designation: expert_designation,
+                    theme: expert_theme,
+                    unit: expert_unit,
                     match_details: {
                         shared_concepts: [c IN shared_concepts WHERE c <> ''],
                         shared_domains: [d IN shared_domains WHERE d <> ''],
@@ -270,6 +286,7 @@ class ExpertMatchingService:
                 similar_experts = [record["result"] for record in result]
                 
                 # Additional deduplication step - ensure unique expert IDs in the result
+                # This should be unnecessary with the fixed query, but included as a safeguard
                 unique_experts = []
                 seen_ids = set()
                 
@@ -277,6 +294,13 @@ class ExpertMatchingService:
                     if expert['id'] not in seen_ids:
                         seen_ids.add(expert['id'])
                         unique_experts.append(expert)
+                
+                # Log if we had to remove any duplicates
+                if len(similar_experts) != len(unique_experts):
+                    self.logger.warning(
+                        f"Removed {len(similar_experts) - len(unique_experts)} duplicate experts "
+                        f"that weren't caught by the DISTINCT clause"
+                    )
                 
                 # Limit to the requested number if we have more after deduplication
                 unique_experts = unique_experts[:limit]
@@ -287,7 +311,7 @@ class ExpertMatchingService:
                 
                 self.logger.info(
                     f"Recommendation generation for user {user_id}: "
-                    f"Found {len(unique_experts)} unique experts from {len(similar_experts)} initial matches, "
+                    f"Found {len(unique_experts)} unique experts, "
                     f"Process time: {process_time:.2f} seconds"
                 )
                 
