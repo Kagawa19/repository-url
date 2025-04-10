@@ -1381,627 +1381,15 @@ class GeminiLLMManager:
             }
         }
     
-    async def detect_intent(self, message: str, is_followup: bool = False) -> Dict[str, Any]:
-        """Enhanced intent detection with semantic similarity and improved pattern recognition."""
-        try:
-            original_message = message
-            message = message.lower()
-            
-            # Initialize default results
-            result = {
-                'intent': QueryIntent.GENERAL,
-                'confidence': 0.0,
-                'clarification': None
-            }
-            
-            # Check for expert names in the query (high priority)
-            name_pattern = r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b'
-            name_matches = re.findall(name_pattern, original_message)
-            
-            # If we have a name match and the query contains expert-related terms
-            if name_matches and any(term in message for term in ["expert", "researcher", "profile", "about", "who is", "looking for"]):
-                logger.info(f"Detected expert name request: {name_matches[0]}")
-                result['intent'] = QueryIntent.EXPERT
-                result['confidence'] = 0.95  # High confidence for expert name requests
-                return result
-            
-            # First check for specific publication title requests - these should be highest priority
-            specific_pub_patterns = [
-                r'summarize (?:the publication|the paper|the article|paper titled|publication titled|article about|research on|study about) (.+)',
-                r'(?:publication|paper|article) (?:titled|called|named|about) (.+)',
-                r'tell me about (?:the publication|the paper|the article) (.+)',
-                r'information (?:on|about) (?:the publication|the paper|the article) (.+)'
-            ]
-            
-            # Check if the query contains a specific publication title
-            for pattern in specific_pub_patterns:
-                match = re.search(pattern, message, re.IGNORECASE)
-                if match:
-                    # If we find a specific publication title, this is a high-confidence publication intent
-                    logger.info(f"Detected specific publication title request: {match.group(1)}")
-                    result['intent'] = QueryIntent.PUBLICATION
-                    result['confidence'] = 0.95  # High confidence for specific publication requests
-                    return result
-            
-            # Try vector-based semantic matching if Redis is available
-            semantic_intent = await self._semantic_intent_detection(message)
-            if semantic_intent and semantic_intent.get('confidence', 0) > 0.7:
-                logger.info(f"Using vector-based semantic intent detection: {semantic_intent['intent'].value}")
-                return semantic_intent
-                
-            # Check for expert-specific requests with semantic matching
-            expert_indicators = self._get_intent_indicators(QueryIntent.EXPERT)
-            
-            # Look for semantic matches to expert indicators
-            expert_match_score = self._semantic_match_score(message, expert_indicators)
-            if expert_match_score > 0.65:  # Threshold for expert intent
-                logger.info(f"Detected expert request with semantic matching (score: {expert_match_score})")
-                result['intent'] = QueryIntent.EXPERT
-                result['confidence'] = expert_match_score
-                return result
-            
-            # Check for publication list requests as a high-priority pattern
-            list_patterns = [
-                r'(\d+)\s+publications',
-                r'list\s+(\d+)',
-                r'top\s+(\d+)\s+papers',
-                r'show\s+(\d+)\s+research',
-                r'find\s+(\d+)\s+studies',
-                r'(\d+)\s+(?:papers|articles|works|documents|reports)',
-                r'(?:show|display|give|list)\s+(?:me)?\s+(\d+)\s+(?:publications|papers|articles|studies|reports)',
-            ]
-            
-            for pattern in list_patterns:
-                if re.search(pattern, message):
-                    logger.info(f"Detected publication list request: {message}")
-                    result['intent'] = QueryIntent.PUBLICATION
-                    result['confidence'] = 0.95
-                    return result
-            
-            # Check for publications with enhanced semantic matching
-            publication_indicators = self._get_intent_indicators(QueryIntent.PUBLICATION)
-            
-            pub_match_score = self._semantic_match_score(message, publication_indicators)
-            if pub_match_score > 0.65:  # Threshold for publication intent
-                logger.info(f"Detected publication request with semantic matching (score: {pub_match_score})")
-                result['intent'] = QueryIntent.PUBLICATION
-                result['confidence'] = pub_match_score
-                return result
-            
-            # Check for navigation intent with semantic matching
-            navigation_indicators = self._get_intent_indicators(QueryIntent.NAVIGATION)
-            
-            nav_match_score = self._semantic_match_score(message, navigation_indicators)
-            if nav_match_score > 0.65:  # Threshold for navigation intent
-                logger.info(f"Detected navigation request with semantic matching (score: {nav_match_score})")
-                result['intent'] = QueryIntent.NAVIGATION
-                result['confidence'] = nav_match_score
-                return result
-            
-            # Fallback to traditional intent detection if semantic matching didn't yield high confidence
-            # Initialize scores for traditional intent detection
-            intent_scores = {intent: 0.0 for intent in QueryIntent}
-            
-            # Enhanced pattern matching with more comprehensive patterns
-            intent_patterns = self._get_enhanced_intent_patterns()
-            
-            # Score patterns using both exact and fuzzy matching
-            for intent, patterns in intent_patterns.items():
-                score = 0.0
-                matches = 0
-                
-                for pattern, weight in patterns:
-                    # Check for exact matches
-                    exact_matches = re.findall(pattern, message)
-                    if exact_matches:
-                        score += weight
-                        matches += 1
-                    else:
-                        # Check for fuzzy matches if no exact match
-                        fuzzy_match_found = self._fuzzy_pattern_match(pattern, message)
-                        if fuzzy_match_found:
-                            score += weight * 0.8  # Slightly lower weight for fuzzy matches
-                            matches += 1
-                
-                if matches > 0:
-                    intent_scores[intent] = score / matches
-            
-            # Determine top intent from traditional matching
-            max_intent = max(intent_scores, key=intent_scores.get)
-            max_score = intent_scores[max_intent]
-            
-            # For follow-up questions, be more lenient with confidence requirements
-            threshold = 0.3 if is_followup else 0.4
-            
-            # If confidence is too low and not a follow-up, consider clarification
-            if max_score < threshold and not is_followup:
-                # Try to detect partial matches for any intent type
-                for intent_type in [QueryIntent.PUBLICATION, QueryIntent.EXPERT, QueryIntent.NAVIGATION]:
-                    partial_match = self._check_partial_intent_match(message, intent_type)
-                    if partial_match:
-                        logger.info(f"Low confidence but found partial match for {intent_type}, using this intent")
-                        result['intent'] = intent_type
-                        result['confidence'] = 0.7  # Reasonable confidence for partial matches
-                        return result
-                
-                # Try extracting a topic to determine intent
-                topic_intent = self._extract_topic_intent(message)
-                if topic_intent:
-                    logger.info(f"Detected intent from topic analysis: {topic_intent}")
-                    result['intent'] = topic_intent
-                    result['confidence'] = 0.75
-                    return result
-                
-                # If still no good match, ask for clarification
-                logger.info(f"Low confidence ({max_score}) for intent detection, requesting clarification")
-                result['clarification'] = (
-                    "Could you clarify what you're looking for? For example:\n"
-                    "- For publications: 'Find papers about maternal health' or 'List 5 publications from 2020'\n"
-                    "- For website navigation: 'Where can I find research datasets?' or 'How do I access reports?'\n"
-                    "- For expert profiles: 'Tell me about Dr. John Smith' or 'Find experts in maternal health'"
-                )
-            else:
-                # Set final result from traditional matching
-                result['intent'] = max_intent
-                result['confidence'] = max_score
-            
-            return result
-        
-        except Exception as e:
-            logger.error(f"Intent detection failed: {e}", exc_info=True)
-            return {
-                'intent': QueryIntent.GENERAL,
-                'confidence': 0.0,
-                'clarification': "I'm sorry, I couldn't understand your request. Could you rephrase it?"
-            }
-            
+    
 
-    async def _semantic_intent_detection(self, query: str) -> Optional[Dict[str, Any]]:
-        """
-        Detect intent using vector-based semantic comparison with predefined intent exemplars.
-        Leverages Redis and embedding model if available.
-        """
-        try:
-            # Only use this method if Redis manager is available
-            if not self.redis_manager or not self.redis_manager.embedding_model:
-                return None
-            
-            # Create query embedding
-            query_embedding = None
-            try:
-                query_embedding = self.redis_manager.embedding_model.encode(query)
-            except Exception as e:
-                logger.error(f"Error creating query embedding: {e}")
-                return None
-                
-            if query_embedding is None:
-                return None
-            
-            # Define exemplar queries for each intent type
-            intent_exemplars = {
-                QueryIntent.PUBLICATION: [
-                    "Find publications about maternal health",
-                    "Show me research papers on nutrition",
-                    "What studies have been published on malaria?",
-                    "I need articles about education in Africa",
-                    "List publications from 2020",
-                    "Who wrote papers on child health?",
-                    "Show me the latest research on HIV prevention",
-                    "Which papers cite the maternal health survey?",
-                    "Can I get studies on sanitation in urban areas?",
-                    "Are there publications about vaccine distribution?",
-                ],
-                QueryIntent.EXPERT: [
-                    "Who are the experts in maternal health?",
-                    "Find researchers specializing in nutrition",
-                    "Tell me about Dr. Smith",
-                    "Which scientists work on malaria research?",
-                    "Who is the lead researcher for the HIV project?",
-                    "Are there specialists in healthcare policy?",
-                    "Find team members who work in education research",
-                    "Tell me about the data science experts",
-                    "Who knows about maternal mortality research?",
-                    "Show me profiles of researchers in immunization",
-                ],
-                QueryIntent.NAVIGATION: [
-                    "How do I find the publications page?",
-                    "Where is the about us section?",
-                    "Take me to the contact page",
-                    "I need to find the research datasets",
-                    "Where can I see the staff directory?",
-                    "How do I access the careers section?",
-                    "Show me how to get to the programs list",
-                    "Where do I find information about events?",
-                    "Take me to the donate page",
-                    "How do I navigate to project descriptions?",
-                ]
-            }
-            
-            # Generate embeddings for all exemplars
-            intent_embeddings = {}
-            for intent, exemplars in intent_exemplars.items():
-                try:
-                    embeddings = []
-                    for exemplar in exemplars:
-                        embedding = self.redis_manager.embedding_model.encode(exemplar)
-                        embeddings.append(embedding)
-                    intent_embeddings[intent] = embeddings
-                except Exception as e:
-                    logger.error(f"Error generating embeddings for {intent}: {e}")
-            
-            if not intent_embeddings:
-                return None
-                
-            # Calculate similarity scores for each intent
-            intent_scores = {}
-            for intent, embeddings in intent_embeddings.items():
-                similarities = []
-                for embedding in embeddings:
-                    similarity = np.dot(query_embedding, embedding) / (
-                        np.linalg.norm(query_embedding) * np.linalg.norm(embedding)
-                    )
-                    similarities.append(similarity)
-                
-                # Use max similarity as the score for this intent
-                if similarities:
-                    intent_scores[intent] = max(similarities)
-            
-            if not intent_scores:
-                return None
-                
-            # Get the intent with highest similarity
-            max_intent = max(intent_scores, key=intent_scores.get)
-            max_score = intent_scores[max_intent]
-            
-            # Only return if the score is above threshold
-            if max_score > 0.7:
-                return {
-                    'intent': max_intent,
-                    'confidence': max_score,
-                    'clarification': None
-                }
-                
-            return None
-                
-        except Exception as e:
-            logger.error(f"Error in semantic intent detection: {e}")
-            return None
+    
 
-    def _get_intent_indicators(self, intent_type: QueryIntent) -> List[str]:
-        """Get expanded list of indicator terms for a specific intent type."""
-        indicators = {
-            QueryIntent.PUBLICATION: [
-                "research", "paper", "article", "publication", "study", "journal", 
-                "document", "report", "manuscript", "preprint", "review", "findings",
-                "investigation", "analysis", "proceedings", "thesis", "dissertation",
-                "literature", "reference", "citation", "bibliography", "doi", "arxiv",
-                "published", "authored", "written", "work", "research paper", "academic"
-            ],
-            QueryIntent.EXPERT: [
-                "expert", "researcher", "scientist", "professor", "doctor", "phd", 
-                "specialist", "authority", "professional", "scholar", "academic", 
-                "faculty", "investigator", "analyst", "consultant", "advisor", 
-                "thought leader", "principal investigator", "staff", "team member",
-                "author", "contributor", "practitioner", "professional", "fellow"
-            ],
-            QueryIntent.NAVIGATION: [
-                "website", "page", "link", "url", "navigate", "find", "where", 
-                "how to", "access", "section", "portal", "site", "webpage", "menu",
-                "location", "directory", "path", "browse", "visit", "open", "go to",
-                "redirect", "search", "locate", "address", "route", "navigation"
-            ],
-            QueryIntent.GENERAL: [
-                "information", "help", "tell", "explain", "what", "how", "why",
-                "question", "answer", "know", "understand", "detail", "overview",
-                "summary", "brief", "general", "basic", "info", "guidance"
-            ]
-        }
-        
-        return indicators.get(intent_type, [])
+   
 
-    def _extract_topic_intent(self, query: str) -> Optional[QueryIntent]:
-        """
-        Extract likely intent based on topic analysis.
-        For ambiguous queries, try to determine if the topic is more likely 
-        about publications, experts, or website navigation.
-        """
-        # Topic indicators that strongly suggest a specific intent
-        publication_topics = [
-            "health", "research", "study", "survey", "data", "findings", "results",
-            "methodology", "analysis", "evidence", "intervention", "assessment",
-            "outcome", "impact", "evaluation", "implementation", "mortality", "disease"
-        ]
-        
-        expert_topics = [
-            "specialist", "expertise", "qualification", "skill", "experience",
-            "background", "knowledge", "credentials", "education", "training",
-            "certification", "specialization", "capability", "team", "staff"
-        ]
-        
-        navigation_topics = [
-            "menu", "site", "webpage", "section", "contact", "about", "home",
-            "program", "initiative", "project", "service", "resources", "tools",
-            "downloads", "forms", "application", "report", "gallery", "media"
-        ]
-        
-        # Count matches for each topic category
-        query_words = query.lower().split()
-        
-        pub_matches = sum(1 for topic in publication_topics if topic in query_words)
-        expert_matches = sum(1 for topic in expert_topics if topic in query_words)
-        nav_matches = sum(1 for topic in navigation_topics if topic in query_words)
-        
-        # Determine most likely intent based on topic matches
-        if pub_matches > expert_matches and pub_matches > nav_matches:
-            return QueryIntent.PUBLICATION
-        elif expert_matches > pub_matches and expert_matches > nav_matches:
-            return QueryIntent.EXPERT
-        elif nav_matches > pub_matches and nav_matches > expert_matches:
-            return QueryIntent.NAVIGATION
-        
-        # If no clear winner or all are equal, check for action verbs
-        action_verbs = {
-            QueryIntent.PUBLICATION: ["read", "cite", "download", "search"],
-            QueryIntent.EXPERT: ["contact", "email", "talk", "meet", "consult"],
-            QueryIntent.NAVIGATION: ["go", "visit", "navigate", "browse", "open", "view"]
-        }
-        
-        for intent, verbs in action_verbs.items():
-            if any(verb in query_words for verb in verbs):
-                return intent
-        
-        # Default to general if no clear indication
-        return None
+  
 
-    def _check_partial_intent_match(self, query: str, intent_type: QueryIntent) -> bool:
-        """Check for partial matches to intent keywords to catch intents with different wordings."""
-        # Map of intents to their characteristic keywords (single words that strongly indicate an intent)
-        intent_keywords = {
-            QueryIntent.PUBLICATION: [
-                "paper", "research", "article", "publication", "study", "journal", 
-                "doi", "published", "author", "cite", "cited", "reference"
-            ],
-            QueryIntent.EXPERT: [
-                "expert", "researcher", "scientist", "professor", "phd", "staff", 
-                "faculty", "specialist", "authority", "academic", "scholar"
-            ],
-            QueryIntent.NAVIGATION: [
-                "website", "page", "link", "url", "site", "find", "locate", "navigate", 
-                "section", "menu", "portal", "homepage", "access"
-            ]
-        }
-        
-        # If intent_type isn't in our map, return False
-        if intent_type not in intent_keywords:
-            return False
-        
-        # Check if any keywords for this intent are in the query
-        keywords = intent_keywords[intent_type]
-        words = query.lower().split()
-        
-        # Check for exact word matches
-        for keyword in keywords:
-            if keyword in words:
-                return True
-        
-        # Check for partial/substring matches
-        for word in words:
-            for keyword in keywords:
-                # Check if the word contains the keyword as a substring or vice versa
-                if (len(word) >= 4 and word in keyword) or (len(keyword) >= 4 and keyword in word):
-                    return True
-        
-        # Check for word similarity using character overlap (simple fuzzy matching)
-        for word in words:
-            if len(word) < 4:  # Skip very short words
-                continue
-            for keyword in keywords:
-                if len(keyword) < 4:
-                    continue
-                # Calculate character overlap as a simple similarity measure
-                common_chars = sum(1 for c in word if c in keyword)
-                similarity = common_chars / max(len(word), len(keyword))
-                if similarity > 0.7:  # 70% character overlap threshold
-                    return True
-        
-        return False
-
-    def _semantic_match_score(self, query: str, keywords: List[str]) -> float:
-        """
-        Calculate semantic match score between query and keywords.
-        This uses a combination of exact matching, partial matching, and word similarity.
-        """
-        words = query.lower().split()
-        score = 0.0
-        
-        # Track which words have been matched already to avoid double-counting
-        matched_words = set()
-        
-        # First pass: check for exact matches
-        for keyword in keywords:
-            for word in words:
-                if word == keyword and word not in matched_words:
-                    score += 2.0  # Full points for exact match
-                    matched_words.add(word)
-                    break
-        
-        # Second pass: check for partial matches
-        for keyword in keywords:
-            for word in words:
-                if word not in matched_words:
-                    # Check if word contains keyword or keyword contains word
-                    if (len(word) >= 4 and keyword in word) or (len(keyword) >= 4 and word in keyword):
-                        score += 1.0  # Half points for partial match
-                        matched_words.add(word)
-                        break
-        
-        # Third pass: check for fuzzy matches using character overlap
-        for keyword in keywords:
-            for word in words:
-                if word not in matched_words and len(word) >= 4 and len(keyword) >= 4:
-                    # Calculate character overlap
-                    common_chars = sum(1 for c in word if c in keyword)
-                    similarity = common_chars / max(len(word), len(keyword))
-                    if similarity > 0.7:  # 70% character overlap threshold
-                        score += 0.5  # Quarter points for fuzzy match
-                        matched_words.add(word)
-                        break
-        
-        # Normalize score to 0.0-1.0 range
-        # Use the number of matched words to calculate final score to avoid dilution
-        if len(matched_words) > 0:
-            # We aim for quality over quantity, so use the average match quality
-            normalized_score = score / (len(matched_words) * 2)
-            # Boost score based on match coverage (percentage of query words matched)
-            coverage_boost = min(len(matched_words) / len(words), 1.0) * 0.3
-            final_score = normalized_score * 0.7 + coverage_boost
-        else:
-            final_score = 0.0
-        
-        return min(final_score, 1.0)  # Cap at 1.0
-
-    def _fuzzy_pattern_match(self, pattern: str, text: str) -> bool:
-        """
-        Perform fuzzy pattern matching to allow for minor variations.
-        This handles cases where the exact regex pattern doesn't match but similar words exist.
-        """
-        # Convert regex pattern to plain text for fuzzy matching
-        # Remove regex special characters and capture groups
-        plain_pattern = re.sub(r'[\\()[\]{}?+*^$|]', ' ', pattern).strip()
-        plain_pattern = re.sub(r'\s+', ' ', plain_pattern)  # Normalize whitespace
-        
-        # If pattern is too short or empty after cleaning, return False
-        if len(plain_pattern) < 3:
-            return False
-        
-        # Split into words for individual matching
-        pattern_words = plain_pattern.lower().split()
-        text_words = text.lower().split()
-        
-        # Track matched words
-        matched_pattern_words = 0
-        
-        # Check each pattern word against all text words
-        for pattern_word in pattern_words:
-            if len(pattern_word) < 3:  # Skip very short words
-                continue
-                
-            # Check for exact word match
-            if pattern_word in text_words:
-                matched_pattern_words += 1
-                continue
-            
-            # Check for partial/substring match
-            matched = False
-            for text_word in text_words:
-                if len(text_word) < 3:
-                    continue
-                    
-                # Check substring match
-                if pattern_word in text_word or text_word in pattern_word:
-                    matched_pattern_words += 1
-                    matched = True
-                    break
-                    
-                # Check for character similarity
-                if len(pattern_word) >= 4 and len(text_word) >= 4:
-                    common_chars = sum(1 for c in pattern_word if c in text_word)
-                    similarity = common_chars / max(len(pattern_word), len(text_word))
-                    if similarity > 0.7:  # 70% character similarity threshold
-                        matched_pattern_words += 1
-                        matched = True
-                        break
-            
-            if matched:
-                continue
-        
-        # Calculate match percentage - require at least 70% of pattern words to match
-        match_percentage = matched_pattern_words / len(pattern_words) if pattern_words else 0
-        return match_percentage >= 0.7
-
-    def _get_enhanced_intent_patterns(self):
-        """Return enhanced patterns for intent detection with extended vocabulary."""
-        return {
-            QueryIntent.PUBLICATION: [
-                (r'research paper', 1.0),
-                (r'papers from', 0.9),
-                (r'articles', 0.9),
-                (r'publications from (\d{4})', 1.0),
-                (r'published in (\d{4})', 1.0),
-                (r'recent studies', 0.9),
-                (r'bibliography', 0.8),
-                (r'works cited', 0.8),
-                (r'references', 0.7),
-                (r'latest research', 0.9),
-                (r'summary of', 0.9),
-                (r'summarize', 0.9),
-                (r'dissertation', 0.9),
-                (r'thesis', 0.9),
-                (r'journal', 0.9),
-                (r'manuscript', 0.9),
-                (r'authored by', 0.9),
-                (r'written by', 0.9),
-                (r'findings', 0.8),
-                (r'analysis', 0.8),
-                (r'preprint', 0.8),
-                (r'cited', 0.8),
-                (r'citation', 0.8),
-                (r'literature', 0.7),
-                (r'proceedings', 0.7),
-                (r'arxiv', 1.0),
-                (r'doi', 1.0),
-            ],
-            QueryIntent.NAVIGATION: [
-                (r'how do i get to', 1.0),
-                (r'link to', 0.9),
-                (r'url for', 1.0),
-                (r'go to', 0.8),
-                (r'access the', 0.7),
-                (r'browse', 0.7),
-                (r'site map', 0.9),
-                (r'homepage', 0.9),
-                (r'menu', 0.8),
-                (r'navigate to', 0.9),
-                (r'find the page', 0.9),
-                (r'website section', 0.9),
-                (r'web address', 0.9),
-                (r'portal', 0.8),
-                (r'directory', 0.8),
-                (r'web page', 0.8),
-                (r'locate the', 0.8),
-                (r'where can i find', 0.9),
-                (r'how to reach', 0.8),
-                (r'visit the', 0.7),
-                (r'open the', 0.7),
-            ],
-            QueryIntent.EXPERT: [
-                (r'expert', 1.0),
-                (r'researcher', 1.0),
-                (r'scientist', 0.9),
-                (r'staff member', 0.9),
-                (r'team member', 0.9),
-                (r'faculty', 0.8),
-                (r'who works on', 0.8),
-                (r'who studies', 0.8),
-                (r'who researches', 0.8),
-                (r'specialist in', 0.8),
-                (r'expertise in', 0.8),
-                (r'person who', 0.7),
-                (r'professor', 0.9),
-                (r'doctor', 0.8),
-                (r'phd', 0.8),
-                (r'scholar', 0.8),
-                (r'academic', 0.8),
-                (r'authority on', 0.8),
-                (r'thought leader', 0.8),
-                (r'lead researcher', 0.9),
-                (r'principal investigator', 0.9),
-                (r'author of', 0.8),
-                (r'professional', 0.7),
-                (r'experienced in', 0.7),
-                (r'knowledgeable about', 0.7),
-            ]
-        }
+    
     async def get_relevant_publications(self, query: str, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """
         Retrieve publications from Redis with advanced matching capabilities
@@ -2130,6 +1518,122 @@ class GeminiLLMManager:
                 return match.group(1).strip().lower()
         
         return None
+
+    async def detect_intent(self, message: str, is_followup: bool = False) -> Dict[str, Any]:
+        """
+        Enhanced intent detection using LLM-based semantic analysis.
+        
+        Args:
+            message (str): The user's query
+            is_followup (bool): Whether this is a follow-up query
+        
+        Returns:
+            Dict containing intent, confidence, and optional clarification
+        """
+        try:
+            # Default result structure
+            result = {
+                'intent': QueryIntent.GENERAL,
+                'confidence': 0.0,
+                'clarification': None
+            }
+            
+            # Prepare a prompt for intent detection
+            intent_detection_prompt = f"""
+            You are an expert at determining the intent of a user query. 
+            Classify the intent of the following query into one of these categories:
+            - PUBLICATION: Queries about research papers, studies, articles, publications
+            - EXPERT: Queries about researchers, experts, or professional profiles
+            - NAVIGATION: Queries about finding website sections, pages, or resources
+            - GENERAL: Queries that don't fit into the above categories
+
+            Query: "{message}"
+
+            Please respond in the following JSON format:
+            {{
+                "intent": "PUBLICATION|EXPERT|NAVIGATION|GENERAL",
+                "confidence": <float between 0 and 1>,
+                "reasoning": "<brief explanation of intent classification>",
+                "clarification": "<optional suggestion if intent is unclear>"
+            }}
+
+            Important guidelines:
+            - Be precise in intent classification
+            - Use context and semantic understanding
+            - Provide a confidence score that reflects your certainty
+            - If the intent is unclear, provide a clarification suggestion
+            """
+            
+            # Use Gemini model for intent detection
+            model = self.get_gemini_model()
+            
+            try:
+                # Invoke the model with the intent detection prompt
+                response = await model.ainvoke(intent_detection_prompt)
+                
+                # Extract content safely
+                content = self._extract_content_safely(response)
+                
+                # Try to parse the JSON response
+                try:
+                    intent_data = json.loads(content)
+                    
+                    # Map string intent to QueryIntent enum
+                    intent_mapping = {
+                        'PUBLICATION': QueryIntent.PUBLICATION,
+                        'EXPERT': QueryIntent.EXPERT,
+                        'NAVIGATION': QueryIntent.NAVIGATION,
+                        'GENERAL': QueryIntent.GENERAL
+                    }
+                    
+                    # Set the result
+                    result['intent'] = intent_mapping.get(
+                        intent_data.get('intent', 'GENERAL'), 
+                        QueryIntent.GENERAL
+                    )
+                    result['confidence'] = float(intent_data.get('confidence', 0.0))
+                    
+                    # Handle clarification
+                    if intent_data.get('clarification'):
+                        result['clarification'] = intent_data['clarification']
+                    
+                    # Log the reasoning
+                    logger.info(f"Intent Detection Reasoning: {intent_data.get('reasoning', 'No reasoning provided')}")
+                    
+                except (json.JSONDecodeError, ValueError) as parse_error:
+                    logger.warning(f"Failed to parse intent detection response: {parse_error}")
+                    # Fallback to default
+                    result['intent'] = QueryIntent.GENERAL
+                    result['confidence'] = 0.5
+            
+            except Exception as model_error:
+                logger.error(f"Error in intent detection model: {model_error}")
+                # Fallback to default
+                result['intent'] = QueryIntent.GENERAL
+                result['confidence'] = 0.0
+            
+            # For follow-up queries, be more lenient with confidence
+            if is_followup and result['confidence'] < 0.3:
+                result['confidence'] = 0.5
+            
+            # If confidence is very low, request clarification
+            if result['confidence'] < 0.4 and not is_followup:
+                result['clarification'] = (
+                    "Could you clarify what you're looking for? For example:\n"
+                    "- For publications: 'Find papers about maternal health' or 'List 5 publications from 2020'\n"
+                    "- For website navigation: 'Where can I find research datasets?' or 'How do I access reports?'\n"
+                    "- For expert profiles: 'Tell me about Dr. John Smith' or 'Find experts in maternal health'"
+                )
+            
+            return result
+        
+        except Exception as e:
+            logger.error(f"Unexpected error in intent detection: {e}")
+            return {
+                'intent': QueryIntent.GENERAL,
+                'confidence': 0.0,
+                'clarification': "I'm sorry, I couldn't understand your request. Could you rephrase it?"
+            }
 
     def _calculate_publication_match_score(
         self, 
@@ -2411,240 +1915,11 @@ class GeminiLLMManager:
         except Exception:
             return {} if json_str.startswith('{') else []
 
-    def _calculate_publication_keyword_score(
-        self, 
-        metadata: Dict[str, Any], 
-        query_terms: Set[str], 
-        title_match: Optional[str],
-        author_match: Optional[str],
-        year_match: Optional[str]
-    ) -> float:
-        """
-        Calculate weighted keyword match score for a publication based on multiple parameters.
-        """
-        score = 0.0
-        
-        # 1. EXACT TITLE MATCH (highest weight)
-        pub_title = str(metadata.get('title', '')).lower()
-        if title_match and (title_match in pub_title or self._fuzzy_title_match(title_match, pub_title)):
-            score += 3.0  # Significant boost for exact or fuzzy title match
-        
-        # 2. AUTHOR MATCH
-        pub_authors = metadata.get('authors', [])
-        author_text = ""
-        
-        if isinstance(pub_authors, list):
-            author_text = " ".join([str(a).lower() for a in pub_authors if a])
-        elif isinstance(pub_authors, dict):
-            author_text = " ".join([str(v).lower() for v in pub_authors.values() if v])
-        elif isinstance(pub_authors, str):
-            author_text = pub_authors.lower()
-        
-        if author_match and author_match in author_text:
-            score += 2.5  # Strong boost for author match
-        
-        # 3. YEAR MATCH
-        pub_year = str(metadata.get('publication_year', '')).strip()
-        if year_match and year_match == pub_year:
-            score += 2.0  # Good boost for year match
-        
-        # 4. PREPARE SEARCH TEXT FOR TERM MATCHING
-        search_text = ' '.join([
-            pub_title,
-            str(metadata.get('abstract', '')).lower(),
-            str(metadata.get('summary', '')).lower(),
-            str(metadata.get('description', '')).lower(),
-            author_text,
-            # Add domains and topics for better matching
-            " ".join([str(d).lower() for d in metadata.get('domains', []) if d]),
-            " ".join([f"{k} {v}".lower() for k, v in metadata.get('topics', {}).items() if v])
-        ])
-        
-        # 5. WEIGHTED TERM MATCHING
-        # Count term occurrences for higher relevance
-        term_counts = {}
-        for term in query_terms:
-            if len(term) <= 2:  # Skip very short terms
-                continue
-                
-            # Count occurrences with word boundaries for better precision
-            pattern = r'\b' + re.escape(term) + r'\b'
-            occurrences = len(re.findall(pattern, search_text))
-            
-            if occurrences > 0:
-                term_counts[term] = occurrences
-                # Base score per occurrence with diminishing returns
-                term_score = min(occurrences, 3) * 0.5
-                score += term_score
-        
-        # 6. FIELD-SPECIFIC BONUSES
-        # Boost if the publication has a DOI (more likely to be significant)
-        if metadata.get('doi') and metadata.get('doi').strip() and metadata.get('doi') != 'None':
-            score *= 1.2
-        
-        # Boost if it has an abstract/summary (more complete information)
-        if metadata.get('abstract') or metadata.get('summary'):
-            score *= 1.1
-        
-        # Apply a small recency bias for recent publications
-        if pub_year and pub_year.isdigit():
-            current_year = datetime.now().year
-            years_old = current_year - int(pub_year)
-            if years_old <= 3:  # Published in last 3 years
-                score *= 1.15
-        
-        return score
-
-    def _fuzzy_title_match(self, search_title: str, actual_title: str) -> bool:
-        """Implement fuzzy matching for publication titles."""
-        # 1. Direct substring match
-        if search_title in actual_title:
-            return True
-            
-        # 2. Word-by-word matching (80% of words must match)
-        search_words = set(search_title.lower().split())
-        title_words = set(actual_title.lower().split())
-        
-        if len(search_words) == 0:
-            return False
-            
-        matching_words = search_words.intersection(title_words)
-        if len(matching_words) / len(search_words) >= 0.8:
-            return True
-        
-        # 3. Character-level Levenshtein similarity for short titles
-        if len(search_title) < 30 and len(actual_title) < 100:
-            try:
-                from Levenshtein import ratio
-                similarity = ratio(search_title, actual_title)
-                if similarity > 0.7:  # 70% similarity threshold
-                    return True
-            except ImportError:
-                # Fallback if Levenshtein library not available
-                common_chars = sum(1 for c in search_title if c in actual_title)
-                similarity = common_chars / len(search_title)
-                if similarity > 0.8:  # 80% character overlap threshold
-                    return True
-        
-        return False
+    
 
     
 
-    def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
-        """
-        Format publication data into a comprehensive, structured context for better LLM responses.
-        
-        Args:
-            publications (List[Dict[str, Any]]): List of publication dictionaries to format
-        
-        Returns:
-            str: Formatted publication context optimized for LLM consumption
-        """
-        if not publications:
-            return "No publications found matching the query."
-        
-        # Determine formatting based on number of publications
-        is_list_format = len(publications) > 1
-        
-        # Start with an appropriate header
-        if is_list_format:
-            context_parts = [f"Found {len(publications)} relevant publications:"]
-        else:
-            context_parts = ["Found the following relevant publication:"]
-        
-        # Process each publication with comprehensive formatting
-        for idx, pub in enumerate(publications, 1):
-            # Create a formatted publication entry
-            pub_parts = []
-            
-            # Add index for list format
-            prefix = f"{idx}. " if is_list_format else ""
-            
-            # TITLE - Always include as the main identifier
-            if pub.get('title'):
-                pub_parts.append(f"{prefix}Title: {pub.get('title')}")
-                prefix = "" if not is_list_format else prefix  # Reset prefix after first use in non-list format
-            
-            # AUTHORS - Format consistently regardless of data structure
-            authors = pub.get('authors', [])
-            if authors:
-                author_text = ""
-                if isinstance(authors, list):
-                    author_text = ", ".join(str(author) for author in authors if author)
-                elif isinstance(authors, dict):
-                    author_text = ", ".join(str(v) for k, v in authors.items() if v)
-                elif isinstance(authors, str):
-                    author_text = authors
-                    
-                if author_text:
-                    pub_parts.append(f"{prefix}Authors: {author_text}")
-            
-            # PUBLICATION YEAR - Important for contextualizing the research
-            if pub.get('publication_year'):
-                pub_parts.append(f"{prefix}Publication Year: {pub.get('publication_year')}")
-            
-            # DOI - Critical for findability and citation
-            doi = pub.get('doi', '').strip()
-            if doi and doi.lower() != 'none':
-                # Format DOI consistently as a URL if possible
-                if not doi.startswith('https://doi.org/') and doi.startswith('10.'):
-                    doi = f"https://doi.org/{doi}"
-                pub_parts.append(f"{prefix}DOI: {doi}")
-            
-            # SOURCE/JOURNAL - Adds credibility information
-            if pub.get('source') and pub.get('source') != 'unknown':
-                pub_parts.append(f"{prefix}Source: {pub.get('source')}")
-            
-            # ABSTRACT/SUMMARY - Include for content understanding
-            if pub.get('abstract'):
-                # Truncate very long abstracts to keep context manageable
-                abstract = pub.get('abstract')
-                if len(abstract) > 800:
-                    abstract = abstract[:800] + "..."
-                pub_parts.append(f"{prefix}Abstract: {abstract}")
-            elif pub.get('summary'):
-                summary = pub.get('summary')
-                if len(summary) > 800:
-                    summary = summary[:800] + "..."
-                pub_parts.append(f"{prefix}Summary: {summary}")
-            
-            # DOMAINS/TOPICS - Include for better topical understanding
-            domains = pub.get('domains', [])
-            if domains and isinstance(domains, list) and len(domains) > 0:
-                domains_text = ", ".join(str(d) for d in domains if d)
-                if domains_text:
-                    pub_parts.append(f"{prefix}Research Domains: {domains_text}")
-            
-            # Add CITATION if available for scholarly context
-            if pub.get('citation') and str(pub.get('citation')).strip():
-                pub_parts.append(f"{prefix}Citation: {pub.get('citation')}")
-                
-            # Add any EXPERT connections if applicable
-            expert_id = pub.get('expert_id')
-            if expert_id:
-                pub_parts.append(f"{prefix}Associated with APHRC Expert ID: {expert_id}")
-            
-            # Join all publication parts with explicit newlines and add extra spacing between fields
-            formatted_pub = "\n".join(pub_parts) + "\n"  # Extra newline after each publication
-            
-            # Add a separator line between publications for clearer formatting
-            if is_list_format and idx < len(publications):
-                formatted_pub += "\n" + "-" * 40 + "\n"
-            
-            context_parts.append(formatted_pub)
-        
-        # Add instructions for the model about how to use this data
-        usage_instructions = """
-    When discussing these publications in your response:
-    - Reference specific details from the publications
-    - Use the exact titles, authors, and years provided
-    - Include DOI links when relevant
-    - Mention research domains to provide context
-    - IMPORTANT: Maintain line-by-line formatting for readability
-    """
-
-        # Join everything with double newlines for better separation
-        return "\n\n".join(context_parts) + "\n\n" + usage_instructions
+   
 
     def _create_system_message(self, intent: QueryIntent) -> str:
         """
@@ -3071,23 +2346,4 @@ class ConversationHelper:
         self.summary_cache[conversation_id] = summary
         return summary
         
-    def get_suggested_questions(self, last_intent: QueryIntent) -> List[str]:
-        """Get context-aware follow-up questions"""
-        suggestions = {
-            QueryIntent.PUBLICATION: [
-                "Find more publications by the same authors",
-                "See related publications from recent years",
-                "Get citation formats for these papers"
-            ],
-            QueryIntent.NAVIGATION: [
-                "Show more sections in this category",
-                "Find contact information for this department",
-                "Open this page in my browser"
-            ],
-            QueryIntent.GENERAL: [
-                "What other programs does APHRC offer?",
-                "Tell me about upcoming events",
-                "Who are the key researchers in this field?"
-            ]
-        }
-        return suggestions.get(last_intent, [])
+  
