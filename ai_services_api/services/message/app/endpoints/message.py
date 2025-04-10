@@ -53,62 +53,72 @@ def generate_with_retry(model, prompt):
         logger.warning(f"API error in generate_content, retrying: {e}")
         raise
 
-def clean_message_content(text: str, receiver: dict, context: str) -> str:
+def clean_message_content(text: str, receiver: dict, sender: dict, context: str) -> str:
     """
-    Enhanced cleaning of message content with more context preservation.
+    Enhanced cleaning of message content with real sender information.
     
     Args:
         text: The raw message text from the AI
         receiver: Dictionary containing receiver details
+        sender: Dictionary containing sender details
         context: The original context provided by the user
         
     Returns:
         str: The cleaned and enhanced message text
     """
-    logger.debug("Cleaning message content with enhanced preservation")
+    logger.debug("Cleaning message content with sender information")
     
-    # Remove Subject line if present
-    text = re.sub(r'Subject:.*?\n', '', text)
+    # Get name information
+    receiver_name = f"{receiver.get('first_name', '')} {receiver.get('last_name', '').strip()}".strip()
+    sender_name = f"{sender.get('first_name', '')} {sender.get('last_name', '').strip()}".strip()
+    sender_position = sender.get('position', 'Researcher')
+    sender_department = sender.get('department', 'APHRC')
     
-    # Preserve professional salutation if possible
-    receiver_name = f"{receiver.get('first_name', '')} {receiver.get('last_name', '').strip()}"
-    receiver_name = receiver_name.strip()
+    # Fix repetitive salutations
+    text = re.sub(rf'Dear {receiver_name},\s*Dear {receiver_name},', f'Dear {receiver_name},', text)
     
-    # Check if receiver name is missing from the text, if so, add a professional greeting
-    if not re.search(receiver_name, text, re.IGNORECASE):
-        text = f"Dear {receiver_name},\n\n{text}"
+    # Ensure introduction includes sender details
+    intro_pattern = r'My name is.*?and I am a.*?at the African Population and Health Research Center \(APHRC\)'
+    proper_intro = f"My name is {sender_name}, and I am a {sender_position} at the African Population and Health Research Center (APHRC)"
     
-    # Remove generic or repetitive salutations
-    text = re.sub(r'^Dear [^,\n]*,?\s*', f'Dear {receiver_name},\n\n', text, flags=re.MULTILINE)
+    if re.search(intro_pattern, text):
+        text = re.sub(intro_pattern, proper_intro, text)
+    else:
+        # If no introduction found, add it after the salutation
+        salutation_pattern = rf'Dear {receiver_name},'
+        if re.search(salutation_pattern, text):
+            text = re.sub(
+                rf'(Dear {receiver_name},\s*)', 
+                f'\\1\n\n{proper_intro}. ', 
+                text
+            )
     
-    # Remove signature block, but keep professional closing
-    text = re.sub(r'\s*Sincerely,\s*(\n.*)*$', '\n\nBest regards,\nResearch Team', text, flags=re.DOTALL)
+    # Ensure proper signature
+    signature_pattern = r'Best regards,\s*.*?\s*.*?African Population and Health Research Center \(APHRC\)'
+    proper_signature = f"Best regards,\n{sender_name}\n{sender_department}\nAfrican Population and Health Research Center (APHRC)"
     
-    # Enhance context-specific placeholders
-    text = re.sub(r'I am a\s+(?:at\s+)?\.', f'I am reaching out from the African Population and Health Research Center (APHRC)', text)
-    text = re.sub(r'I am\s+at\s+\.', f'I am a researcher at APHRC', text)
+    if re.search(signature_pattern, text, re.DOTALL):
+        text = re.sub(signature_pattern, proper_signature, text, flags=re.DOTALL)
+    else:
+        # If no signature found, add it at the end
+        text = text.rstrip() + f"\n\n{proper_signature}"
     
-    # Replace all remaining empty placeholders and brackets
-    text = re.sub(r'\[\s*\]', '', text)
-    text = re.sub(r'\[[^\]]*\]', '', text)
+    # Remove any remaining placeholders
+    text = re.sub(r'\[.*?\]', '', text)
     
     # Normalize whitespace
-    text = re.sub(r'\n{3,}', '\n\n', text)  # Reduce multiple newlines
-    text = re.sub(r'\s+', ' ', text)  # Remove excessive spaces
+    text = re.sub(r'\n{3,}', '\n\n', text)
     
-    # Trim and ensure professional formatting
-    text = text.strip()
-    
-    logger.debug(f"Message after cleaning: {text[:200]}...")
-    return text
+    return text.strip()
 
-def generate_expert_draft_prompt(receiver: dict, content: str) -> str:
+def generate_expert_draft_prompt(receiver: dict, content: str, sender: dict) -> str:
     """
-    Generate a sophisticated prompt for drafting an expert-level message.
+    Generate a sophisticated prompt with real sender information.
     
     Args:
         receiver: Dictionary containing receiver details
         content: The original message context
+        sender: Dictionary containing sender details
         
     Returns:
         str: Comprehensive prompt for message generation
@@ -121,6 +131,12 @@ def generate_expert_draft_prompt(receiver: dict, content: str) -> str:
     domains = ', '.join(receiver.get('domains', ['Interdisciplinary Research']))
     fields = ', '.join(receiver.get('fields', ['Health Systems']))
     
+    # Prepare sender details
+    sender_first_name = sender.get('first_name', 'Research')
+    sender_last_name = sender.get('last_name', 'Team')
+    sender_position = sender.get('position', 'Researcher')
+    sender_department = sender.get('department', 'APHRC')
+    
     # Construct a nuanced, context-rich prompt
     prompt = f"""
     You are an AI assistant helping a researcher from the African Population and Health Research Center (APHRC) draft a professional communication.
@@ -131,8 +147,19 @@ def generate_expert_draft_prompt(receiver: dict, content: str) -> str:
     - Research Focus: {theme}
     - Primary Domains: {domains}
     - Specialized Fields: {fields}
+    
+    Sender Details:
+    - Name: {sender_first_name} {sender_last_name}
+    - Position: {sender_position}
+    - Department: {sender_department}
 
     Communication Context: {content}
+
+    IMPORTANT FORMATTING REQUIREMENTS:
+    1. Begin with "Dear {first_name} {last_name},"
+    2. Introduce the sender using their real name: "My name is {sender_first_name} {sender_last_name}, and I am a {sender_position} at the African Population and Health Research Center (APHRC)."
+    3. End with "Best regards,\\n{sender_first_name} {sender_last_name}\\n{sender_department}\\nAfrican Population and Health Research Center (APHRC)"
+    4. DO NOT use placeholder text anywhere in the message
 
     Drafting Guidelines:
     1. Craft a concise, professional message that reflects APHRC's research excellence
@@ -140,24 +167,6 @@ def generate_expert_draft_prompt(receiver: dict, content: str) -> str:
     3. Highlight the relevance of the proposed communication to the recipient's expertise
     4. Maintain a tone of academic respect and professional curiosity
     5. Ensure the message is culturally sensitive and aligned with APHRC's mission
-
-    Additional Considerations:
-    - Be specific about the purpose of reaching out
-    - Show preliminary knowledge of the recipient's work
-    - Propose a clear next step or desired outcome
-    - Avoid generic language; make the message feel personalized
-
-    Prohibited Elements:
-    - Do not use placeholder brackets
-    - Avoid overly formal or stiff academic language
-    - Do not make unsupported claims
-    - Refrain from using boilerplate text
-
-    Preferred Communication Style:
-    - Clear and direct
-    - Intellectually engaging
-    - Respectful of the recipient's time and expertise
-    - Demonstrating APHRC's commitment to impactful research
 
     Draft the message accordingly, focusing on creating a meaningful professional connection.
     """
@@ -252,14 +261,35 @@ async def process_message_draft(
 
         logger.info(f"Receiver found: {receiver['first_name']} {receiver['last_name']}")
 
+        # NEW CODE: Fetch sender details based on user_id
+        cur.execute("""
+            SELECT id, first_name, last_name, position, department 
+            FROM users
+            WHERE id = %s AND is_active = true
+        """, (user_id,))
+        sender = cur.fetchone()
+        
+        if not sender:
+            logger.warning(f"Sender with ID {user_id} not found, using default sender info")
+            # Create a default sender object if the user is not found
+            sender = {
+                "id": user_id,
+                "first_name": "Research",
+                "last_name": "Team",
+                "position": "Researcher",
+                "department": "APHRC"
+            }
+
+        logger.info(f"Using sender: {sender['first_name']} {sender['last_name']}")
+
         # Configure Gemini
         settings = get_settings()
         genai.configure(api_key=settings.GEMINI_API_KEY)
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
         logger.debug("Gemini model configured successfully")
         
-        # Use the new prompt generation function
-        prompt = generate_expert_draft_prompt(receiver, content)
+        # Use the new prompt generation function with sender information
+        prompt = generate_expert_draft_prompt(receiver, content, sender)
         
         logger.debug(f"Generated sophisticated prompt for Gemini: {prompt[:500]}...")
         
@@ -269,25 +299,33 @@ async def process_message_draft(
             draft_content = response.text
             logger.info(f"Generated draft content of length: {len(draft_content)}")
             
-            # Apply enhanced cleaning function to the response
+            # Apply enhanced cleaning function to the response with sender info
             cleaned_content = clean_message_content(
                 text=draft_content,
                 receiver=receiver,
+                sender=sender,
                 context=content
             )
             logger.info(f"Cleaned content of length: {len(cleaned_content)}")
             
         except Exception as api_error:
             logger.error(f"Error generating content after retries: {str(api_error)}")
-            # More descriptive APHRC-specific fallback message
+            
+            # More descriptive APHRC-specific fallback message with sender details
             receiver_name = f"{receiver.get('first_name', '')} {receiver.get('last_name', '')}".strip()
+            sender_name = f"{sender.get('first_name', '')} {sender.get('last_name', '')}".strip()
+            sender_position = sender.get('position', 'Researcher')
+            sender_department = sender.get('department', 'APHRC')
+            
             cleaned_content = f"""Dear {receiver_name},
 
-I am reaching out from the African Population and Health Research Center (APHRC) regarding {content}. 
+My name is {sender_name}, and I am a {sender_position} at the African Population and Health Research Center (APHRC). I am reaching out regarding {content}. 
 Despite current service constraints, I would appreciate the opportunity to discuss this matter further.
 
 Best regards,
-Research Team at APHRC"""
+{sender_name}
+{sender_department}
+African Population and Health Research Center (APHRC)"""
             logger.info("Using APHRC-specific fallback content due to API error")
 
         # Insert the draft message with cleaned content
@@ -297,7 +335,7 @@ Research Team at APHRC"""
             VALUES 
                 (%s, %s, %s, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             RETURNING id, created_at
-        """, (1, receiver_id, cleaned_content))
+        """, (user_id, receiver_id, cleaned_content))
         
         new_message = cur.fetchone()
         logger.info(f"Created new draft message with ID: {new_message['id']}")
@@ -314,9 +352,9 @@ Research Team at APHRC"""
             "sender_id": user_id,
             "receiver_id": str(receiver_id),
             "created_at": created_at,
-            "draft": False,
+            "draft": True,
             "receiver_name": f"{receiver['first_name']} {receiver['last_name']}",
-            "sender_name": "APHRC Research Team"
+            "sender_name": f"{sender['first_name']} {sender['last_name']}"
         }
         
         # Cache the response if Redis client is provided
