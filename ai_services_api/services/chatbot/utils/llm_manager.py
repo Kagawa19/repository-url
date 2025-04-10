@@ -280,12 +280,135 @@ class GeminiLLMManager:
 
     # 3. Update get_relevant_experts method to better handle empty results
 
+    async def _get_expertise_summary(self, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """
+        Get a summary of the most common expertise areas across all experts.
+        Used for general queries like "what expertise are most experts in".
+        
+        Returns representative experts from the most common expertise areas.
+        """
+        try:
+            # Get all expert keys
+            expert_keys = await self._get_all_expert_keys()
+            
+            if not expert_keys:
+                return [], "No expert profiles found in the database."
+            
+            # Track expertise frequency across all experts
+            expertise_counts = {}
+            expertise_experts = {}  # Map expertise areas to experts
+            
+            # Process all experts
+            for key in expert_keys:
+                try:
+                    # Retrieve expert metadata
+                    raw_metadata = self.redis_manager.redis_text.hgetall(key)
+                    
+                    # Skip entries without essential metadata
+                    if not raw_metadata or 'name' not in raw_metadata:
+                        continue
+                    
+                    # Extract expert ID
+                    expert_id = raw_metadata.get('id', '')
+                    
+                    # Parse expertise data
+                    expertise_data = {}
+                    if 'expertise' in raw_metadata:
+                        try:
+                            expertise_data = json.loads(raw_metadata['expertise'])
+                        except json.JSONDecodeError:
+                            expertise_data = raw_metadata.get('expertise', {})
+                    
+                    # Reconstruct metadata
+                    metadata = {
+                        'id': expert_id,
+                        'name': raw_metadata.get('name', ''),
+                        'first_name': raw_metadata.get('first_name', ''),
+                        'last_name': raw_metadata.get('last_name', ''),
+                        'expertise': expertise_data,
+                    }
+                    
+                    # Extract all expertise areas
+                    if isinstance(expertise_data, dict):
+                        for area, details in expertise_data.items():
+                            area_key = area.lower().strip()
+                            # Count this expertise area
+                            expertise_counts[area_key] = expertise_counts.get(area_key, 0) + 1
+                            
+                            # Add expert to this expertise area
+                            if area_key not in expertise_experts:
+                                expertise_experts[area_key] = []
+                            expertise_experts[area_key].append(metadata)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing expert {key} for expertise summary: {e}")
+            
+            # If no expertise data found
+            if not expertise_counts:
+                return [], "I couldn't find expertise information for our experts. Try searching for specific experts instead."
+            
+            # Get the most common expertise areas
+            top_expertise = sorted(
+                expertise_counts.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:limit]
+            
+            logger.info(f"Top expertise areas: {top_expertise}")
+            
+            # Select representative experts from top expertise areas
+            representative_experts = []
+            seen_expert_ids = set()
+            
+            for area, _ in top_expertise:
+                if area in expertise_experts:
+                    # Sort experts in this area by number of expertise fields (more fields = more senior/comprehensive)
+                    area_experts = sorted(
+                        expertise_experts[area],
+                        key=lambda x: len(x.get('expertise', {})) if isinstance(x.get('expertise', {}), dict) else 0,
+                        reverse=True
+                    )
+                    
+                    # Add top expert from this area if not already included
+                    for expert in area_experts:
+                        expert_id = expert.get('id')
+                        if expert_id and expert_id not in seen_expert_ids:
+                            representative_experts.append(expert)
+                            seen_expert_ids.add(expert_id)
+                            break
+            
+            # If we couldn't find representative experts (shouldn't happen, but just in case)
+            if not representative_experts:
+                return [], "I couldn't identify representative experts for the most common expertise areas."
+            
+            logger.info(f"Found {len(representative_experts)} representative experts for top expertise areas")
+            return representative_experts, None
+            
+        except Exception as e:
+            logger.error(f"Error generating expertise summary: {e}")
+            return [], "I encountered an error analyzing expertise distribution among our experts."
+
     async def get_relevant_experts(self, query: str, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """Retrieve experts from Redis with advanced matching and better error handling."""
         try:
             if not self.redis_manager:
                 logger.warning("Redis manager not available, cannot retrieve experts")
                 return [], "Our expert database is currently unavailable. Please try again later."
+            
+            # Special handling for general expertise queries
+            general_expertise_patterns = [
+                r'what expertise', r'which expertise', r'what field', r'which field',
+                r'what area', r'which area', r'what domain', r'which domain',
+                r'most experts', r'common expertise', r'popular field', r'main area',
+                r'expertise are', r'fields are', r'areas are', r'domains are'
+            ]
+            
+            is_general_query = any(re.search(pattern, query.lower()) for pattern in general_expertise_patterns)
+            
+            if is_general_query:
+                # For general expertise queries, find all experts and analyze expertise distribution
+                logger.info("Detected general expertise query, retrieving all experts")
+                return await self._get_expertise_summary(limit)
             
             # Get all expert keys
             expert_keys = await self._get_all_expert_keys()
@@ -440,8 +563,6 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error retrieving experts: {e}")
             return [], "We encountered an error searching for experts. Please try again with a simpler query."
-
-    # 4. Update the format_expert_context method to better handle empty expertise data
 
     async def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
         """Format expert data into a structured context for LLM responses with better error handling."""
@@ -2407,133 +2528,7 @@ class GeminiLLMManager:
         
         return False
 
-    async def get_relevant_publications(self, query: str, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        """
-        Retrieve publications from Redis with hybrid search combining keyword and semantic matching.
-        """
-        try:
-            if not self.redis_manager:
-                logger.warning("Redis manager not available, cannot retrieve publications")
-                return [], "Our publication database is currently unavailable. Please try again later."
-            
-            # Get all publication keys
-            publication_keys = await self._get_all_publication_keys()
-            
-            if not publication_keys:
-                return [], "No publications found in the database."
-            
-            # Parse specific requests for publication counts
-            count_pattern = r'(\d+)\s+publications?'
-            count_match = re.search(count_pattern, query, re.IGNORECASE)
-            requested_count = int(count_match.group(1)) if count_match else limit
-            
-            # Extract potential title, author, and year parameters from query
-            title_match = self._extract_title_from_query(query)
-            author_match = self._extract_author_from_query(query)
-            year_match = self._extract_year_from_query(query)
-            
-            # Create query embedding for semantic search if model available
-            query_embedding = None
-            if self.redis_manager.embedding_model is not None:
-                try:
-                    query_embedding = self.redis_manager.embedding_model.encode(query)
-                except Exception as e:
-                    logger.error(f"Error creating query embedding: {e}")
-            
-            # Comprehensive publication retrieval with hybrid approach
-            matched_publications = []
-            keyword_scores = {}
-            semantic_scores = {}
-            
-            # Clean query terms (remove stopwords)
-            stopwords = self._get_stopwords()
-            query_terms = {word.lower() for word in query.split() if word.lower() not in stopwords}
-            
-            for key in publication_keys:
-                try:
-                    # Retrieve full publication metadata
-                    raw_metadata = self.redis_manager.redis_text.hgetall(key)
-                    
-                    # Skip entries without essential metadata
-                    if not raw_metadata or 'title' not in raw_metadata:
-                        continue
-                    
-                    # Extract publication ID for tracking
-                    pub_id = raw_metadata.get('id', '')
-                    
-                    # Reconstruct metadata exactly as it was stored
-                    metadata = self._reconstruct_publication_metadata(raw_metadata)
-                    
-                    # 1. KEYWORD MATCHING SCORE
-                    keyword_score = self._calculate_publication_keyword_score(
-                        metadata, query_terms, title_match, author_match, year_match
-                    )
-                    
-                    # 2. SEMANTIC SIMILARITY SCORE (if embedding available)
-                    semantic_score = 0.0
-                    if query_embedding is not None:
-                        pub_embedding_bytes = self.redis_manager.redis_binary.get(f"emb:resource:{pub_id}")
-                        if pub_embedding_bytes:
-                            pub_embedding = np.frombuffer(pub_embedding_bytes, dtype=np.float32)
-                            # Calculate cosine similarity
-                            semantic_score = np.dot(query_embedding, pub_embedding) / (
-                                np.linalg.norm(query_embedding) * np.linalg.norm(pub_embedding)
-                            )
-                    
-                    # 3. COMBINE SCORES (70% keyword, 30% semantic when available)
-                    if semantic_score > 0:
-                        combined_score = 0.7 * keyword_score + 0.3 * semantic_score
-                    else:
-                        combined_score = keyword_score
-                    
-                    # Save scores for logging/debugging
-                    keyword_scores[pub_id] = keyword_score
-                    semantic_scores[pub_id] = semantic_score
-                    
-                    # Add to results if score is positive
-                    if combined_score > 0:
-                        # Attach match score for later sorting
-                        metadata['_match_score'] = combined_score
-                        matched_publications.append(metadata)
-                
-                except Exception as e:
-                    logger.error(f"Error processing publication {key}: {e}")
-            
-            # Sort publications by match score and year
-            sorted_publications = sorted(
-                matched_publications,
-                key=lambda x: (x.get('_match_score', 0), x.get('publication_year', '0000')),
-                reverse=True
-            )
-            
-            # Limit to requested count
-            top_publications = sorted_publications[:requested_count]
-            
-            # Remove internal match score before returning
-            for pub in top_publications:
-                pub.pop('_match_score', None)
-            
-            logger.info(f"Found {len(top_publications)} publications matching query")
-            
-            # Log the search results with scores for debugging
-            if len(matched_publications) > 0:
-                top_scores = sorted(
-                    [(pub_id, keyword_scores.get(pub_id, 0), semantic_scores.get(pub_id, 0)) 
-                    for pub_id in keyword_scores.keys()],
-                    key=lambda x: x[1] + x[2],
-                    reverse=True
-                )[:5]
-                logger.debug(f"Top publication scores: {top_scores}")
-            
-            # If we're returning zero publications but found some potential matches, suggest query refinement
-            if not top_publications and matched_publications:
-                return [], "No strong matches found. Try refining your query with more specific terms like author names, publication year, or keywords from the title."
-            
-            return top_publications, None
-        
-        except Exception as e:
-            logger.error(f"Error retrieving publications: {e}")
-            return [], "We encountered an error searching publications. Try simplifying your query."
+    
 
     def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
@@ -2740,7 +2735,9 @@ class GeminiLLMManager:
             return f"{base_prompts['common']}\n\n{base_prompts[intent]}\n\n{response_guidelines}"
         else:
             return f"{base_prompts['common']}\n\n{base_prompts[intent]}\n\n{response_guidelines}"
-  
+
+    
+
     async def generate_async_response(self, message: str, conversation_history: Optional[List[Dict]] = None) -> AsyncGenerator[Dict[str, Any], None]:
         """Enhanced response generation with improved publication and expert profile handling"""
         start_time = time.time()
@@ -2817,8 +2814,8 @@ class GeminiLLMManager:
                         return
                     
                     if experts:
-                        # Format experts into readable context
-                        context = self.format_expert_context(experts)
+                        # Format experts into readable context - now with await
+                        context = await self.format_expert_context(experts)
                         logger.info(f"Retrieved and formatted {len(experts)} expert profiles for context")
                     else:
                         context = "I don't have specific expert profiles on this topic. I can provide general information about APHRC's research areas instead."
@@ -3003,6 +3000,8 @@ class GeminiLLMManager:
         
         finally:
             logger.info(f"Async response generation completed. Total time: {time.time() - start_time:.2f} seconds")
+  
+    
     async def _throttle_request(self):
         """Apply throttling to incoming requests to help prevent rate limits."""
         await self.new_method()

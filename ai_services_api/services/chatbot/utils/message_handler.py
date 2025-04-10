@@ -798,74 +798,104 @@ class MessageHandler:
             logger.debug(f"Full response_data received in record_interaction: {json.dumps(response_data, default=str)}")
             
             async with DatabaseConnector.get_connection() as conn:
-                # Start a transaction
-                async with conn.transaction():
-                    metrics = response_data.get('metrics', {})
+                try:
+                    # First, check if the table exists before attempting to insert
+                    table_check_result = await conn.fetchrow("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_name = 'response_quality_metrics'
+                        );
+                    """)
                     
-                    # Log the entire metrics dictionary
-                    logger.debug(f"Full metrics dictionary: {json.dumps(metrics, default=str)}")
-                    
-                    # Get the chat log id from the chatbot_logs table
-                    chat_log_result = await conn.fetchrow("""
-                        SELECT id FROM chatbot_logs 
-                        WHERE user_id = $1 AND query = $2 
-                        ORDER BY timestamp DESC
-                        LIMIT 1
-                    """, user_id, query)
-                    
-                    if not chat_log_result:
-                        logger.warning("Corresponding chat log not found for response quality metrics")
-                        logger.debug(f"Query parameters - user_id: {user_id}, query: {query}")
+                    if not table_check_result or not table_check_result[0]:
+                        logger.warning("Table 'response_quality_metrics' does not exist, skipping quality metrics recording")
                         return
                     
-                    log_id = chat_log_result['id']
-                    
-                    # Get response quality data from metrics
-                    quality_data = metrics.get('quality', {})
-                    
-                    # Log the extracted quality_data
-                    logger.debug(f"Extracted quality_data: {json.dumps(quality_data, default=str)}")
-                    
-                    # Check if quality data is in a different location as fallback
-                    if not quality_data and 'sentiment' in metrics:
-                        logger.warning("No quality data found, checking sentiment data as fallback")
-                        quality_data = metrics.get('sentiment', {})
-                        logger.debug(f"Using sentiment data instead: {json.dumps(quality_data, default=str)}")
-                    
-                    # Extract values with explicit logging of each
-                    helpfulness_score = quality_data.get('helpfulness_score', 0.0)
-                    logger.debug(f"Extracted helpfulness_score: {helpfulness_score}")
-                    
-                    hallucination_risk = quality_data.get('hallucination_risk', 0.0)
-                    logger.debug(f"Extracted hallucination_risk: {hallucination_risk}")
-                    
-                    factual_grounding_score = quality_data.get('factual_grounding_score', 0.0)
-                    logger.debug(f"Extracted factual_grounding_score: {factual_grounding_score}")
-                    
-                    # REMOVED: unclear_elements and potentially_fabricated_elements
-                    
-                    # Modified SQL - removed columns that don't exist in the database
-                    await conn.execute("""
-                        INSERT INTO response_quality_metrics
-                            (interaction_id, helpfulness_score, hallucination_risk, 
-                            factual_grounding_score)
-                        VALUES ($1, $2, $3, $4)
-                    """,
-                        log_id,  # Using chatbot_logs.id instead of interaction_id
-                        helpfulness_score,
-                        hallucination_risk,
-                        factual_grounding_score
-                    )
-                    
-                    logger.info(f"Recorded response quality metrics for chat log ID: {log_id}")
-                    logger.info(f"Inserted values - helpfulness: {helpfulness_score}, hallucination: {hallucination_risk}, factual: {factual_grounding_score}")
+                    # Start a transaction
+                    async with conn.transaction():
+                        metrics = response_data.get('metrics', {})
+                        
+                        # Log the entire metrics dictionary
+                        logger.debug(f"Full metrics dictionary: {json.dumps(metrics, default=str)}")
+                        
+                        # Get the chat log id from the chatbot_logs table
+                        chat_log_result = await conn.fetchrow("""
+                            SELECT id FROM chatbot_logs 
+                            WHERE user_id = $1 AND query = $2 
+                            ORDER BY timestamp DESC
+                            LIMIT 1
+                        """, user_id, query)
+                        
+                        if not chat_log_result:
+                            logger.warning("Corresponding chat log not found for response quality metrics")
+                            logger.debug(f"Query parameters - user_id: {user_id}, query: {query}")
+                            return
+                        
+                        log_id = chat_log_result['id']
+                        
+                        # Get response quality data from metrics
+                        quality_data = metrics.get('quality', {})
+                        
+                        # Log the extracted quality_data
+                        logger.debug(f"Extracted quality_data: {json.dumps(quality_data, default=str)}")
+                        
+                        # Check if quality data is in a different location as fallback
+                        if not quality_data and 'sentiment' in metrics:
+                            logger.warning("No quality data found, checking sentiment data as fallback")
+                            quality_data = metrics.get('sentiment', {})
+                            logger.debug(f"Using sentiment data instead: {json.dumps(quality_data, default=str)}")
+                        
+                        # Extract values with explicit logging of each
+                        helpfulness_score = quality_data.get('helpfulness_score', 0.0)
+                        logger.debug(f"Extracted helpfulness_score: {helpfulness_score}")
+                        
+                        hallucination_risk = quality_data.get('hallucination_risk', 0.0)
+                        logger.debug(f"Extracted hallucination_risk: {hallucination_risk}")
+                        
+                        factual_grounding_score = quality_data.get('factual_grounding_score', 0.0)
+                        logger.debug(f"Extracted factual_grounding_score: {factual_grounding_score}")
+                        
+                        # Insert quality metrics with proper exception handling
+                        try:
+                            await conn.execute("""
+                                INSERT INTO response_quality_metrics
+                                    (interaction_id, helpfulness_score, hallucination_risk, 
+                                    factual_grounding_score)
+                                VALUES ($1, $2, $3, $4)
+                            """,
+                                log_id,  # Using chatbot_logs.id instead of interaction_id
+                                helpfulness_score,
+                                hallucination_risk,
+                                factual_grounding_score
+                            )
+                            
+                            logger.info(f"Recorded response quality metrics for chat log ID: {log_id}")
+                        except Exception as insert_error:
+                            # Handle specific error cases if needed
+                            logger.error(f"Database error: {str(insert_error)}")
+                            
+                            # If the error is about missing columns, we might try a different schema
+                            if "column" in str(insert_error).lower() and "does not exist" in str(insert_error).lower():
+                                logger.warning("Attempting alternative schema for quality metrics recording")
+                                try:
+                                    # Simplified schema with just the essential columns
+                                    await conn.execute("""
+                                        INSERT INTO response_quality_metrics
+                                            (interaction_id, quality_score)
+                                        VALUES ($1, $2)
+                                    """,
+                                        log_id,
+                                        helpfulness_score
+                                    )
+                                    logger.info(f"Recorded simplified quality metrics for chat log ID: {log_id}")
+                                except Exception as fallback_error:
+                                    logger.error(f"Failed to record quality metrics using alternative schema: {fallback_error}")
+                except Exception as db_error:
+                    logger.error(f"Database error in record_interaction: {db_error}")
         
         except Exception as e:
             logger.error(f"Error recording interaction quality metrics: {e}", exc_info=True)
-            # Printing the full exception for debugging
-            import traceback
-            logger.error(f"Detailed traceback: {traceback.format_exc()}")
-            raise
+            # Do not re-raise the exception so the conversation flow is not disrupted
 
     async def update_session_stats(self, session_id: str, successful: bool = True):
         """Update session statistics with async database."""
