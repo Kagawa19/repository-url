@@ -175,7 +175,7 @@ async def predict_query(
         )
 
 # Add a simple 'search' endpoint
-@router.get("/experts/search/{query}")
+@router.get("/experts/test/search/{query}")
 async def search_experts(
     query: str,
     request: Request,
