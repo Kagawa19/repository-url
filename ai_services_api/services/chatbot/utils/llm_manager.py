@@ -472,18 +472,18 @@ class GeminiLLMManager:
             yield f"Error: {str(e)}"
 
     def _extract_title_from_query(self, query: str) -> Optional[str]:
-    """Extract potential publication title from query."""
-    title_patterns = [
-        r'title[:\s]*["\'](.+?)["\']',
-        r'called ["\'](.+?)["\']',
-        r'named ["\'](.+?)["\']',
-        r'about ["\'](.+?)["\']'
-    ]
-    for pattern in title_patterns:
-        match = re.search(pattern, query, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    return None
+        """Extract potential publication title from query."""
+        title_patterns = [
+            r'title[:\s]*["\'](.+?)["\']',
+            r'called ["\'](.+?)["\']',
+            r'named ["\'](.+?)["\']',
+            r'about ["\'](.+?)["\']'
+        ]
+        for pattern in title_patterns:
+            match = re.search(pattern, query, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return None
 
     def _calculate_publication_match_score(self, metadata: Dict, query_terms: Set[str], title_match: Optional[str]) -> float:
         """Calculate match score between publication and query."""
