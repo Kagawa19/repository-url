@@ -55,7 +55,7 @@ async def get_test_user_id(request: Request) -> str:
 
 
 
-@router.get("/advanced_search")
+@router.get("/test/experts/search/{query}")
 async def advanced_search(
     request: Request,
     user_id: str = Depends(get_user_id),
@@ -137,7 +137,7 @@ async def advanced_search(
         )
 
 # Replace the advanced_predict endpoint with the simpler 'predict' path
-@router.get("/experts/predict/{partial_query}")
+@router.get("/test/experts/predict/{partial_query}")
 async def predict_query(
     partial_query: str,
     request: Request,
@@ -175,7 +175,7 @@ async def predict_query(
         )
 
 # Add a simple 'search' endpoint
-@router.get("/experts/test/search/{query}")
+@router.get("/experts/search/{query}")
 async def search_experts(
     query: str,
     request: Request,
