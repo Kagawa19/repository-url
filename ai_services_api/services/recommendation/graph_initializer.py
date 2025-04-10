@@ -116,7 +116,7 @@ class GraphDatabaseInitializer:
     def __init__(self):
         """Initialize GraphDatabaseInitializer."""
         self._neo4j_driver = GraphDatabase.driver(
-            os.getenv('NEO4J_URI', 'bolt://localhost:7687'),
+            os.getenv('NEO4J_URI', 'bolt://neo4j:7687'),
             auth=(
                 os.getenv('NEO4J_USER', 'neo4j'),
                 os.getenv('NEO4J_PASSWORD')

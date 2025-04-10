@@ -25,7 +25,7 @@ class DatabaseConnectionManager:
     @staticmethod
     def get_neo4j_driver():
         """Create a connection to Neo4j database with enhanced logging and error handling."""
-        neo4j_uri = os.getenv('NEO4J_URI', 'bolt://localhost:7687')
+        neo4j_uri = os.getenv('NEO4J_URI', 'bolt://neo4j:7687')
         neo4j_user = os.getenv('NEO4J_USER', 'neo4j')
         
         try:

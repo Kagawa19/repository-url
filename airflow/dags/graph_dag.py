@@ -101,7 +101,7 @@ class DatabaseConnectionManager:
                 'port': os.getenv('POSTGRES_PORT', '5432'),
                 'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
                 'user': os.getenv('POSTGRES_USER', 'postgres'),
-                'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres')
+                'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres')pexpe
             }
 
         try:
