@@ -143,11 +143,12 @@ class ExpertMatchingService:
                     org_weight = 0.1
                     search_weight = 0.2
                 
-                # Complete matching with balanced weighting including search patterns
+                # Modified query to ensure uniqueness of recommendations
                 query = """
                 MATCH (e1:Expert {id: $expert_id})
                 MATCH (e2:Expert)
                 WHERE e1 <> e2
+                AND e2.is_active = true  // Only return active experts
                 
                 // Core similarity measures
                 OPTIONAL MATCH (e1)-[:HAS_CONCEPT]->(c:Concept)<-[:HAS_CONCEPT]-(e2)
@@ -222,8 +223,8 @@ class ExpertMatchingService:
                     same_theme,
                     same_unit
                 
-                // Always return top results regardless of score
-                RETURN {
+                // Always return top results regardless of score, ensuring unique experts by ID
+                RETURN DISTINCT {
                     id: e2.id,
                     name: e2.name,
                     designation: e2.designation,
@@ -234,9 +235,7 @@ class ExpertMatchingService:
                         shared_domains: [d IN shared_domains WHERE d <> ''],
                         shared_fields: [f IN shared_fields WHERE f <> ''],
                         shared_research_areas: [ra IN shared_areas WHERE ra <> ''],
-                        shared_methods: [m IN shared_methods WHERE m <> ''],
-                        search_strength: search_similarity > 0,
-                        interaction_strength: interaction_similarity > 0
+                        shared_methods: [m IN shared_methods WHERE m <> '']
                     },
                     match_reason: CASE 
                         WHEN search_similarity > 0 THEN 'Frequently searched together'
@@ -270,13 +269,25 @@ class ExpertMatchingService:
                 result = session.run(query, params)
                 similar_experts = [record["result"] for record in result]
                 
+                # Additional deduplication step - ensure unique expert IDs in the result
+                unique_experts = []
+                seen_ids = set()
+                
+                for expert in similar_experts:
+                    if expert['id'] not in seen_ids:
+                        seen_ids.add(expert['id'])
+                        unique_experts.append(expert)
+                
+                # Limit to the requested number if we have more after deduplication
+                unique_experts = unique_experts[:limit]
+                
                 # Performance and result logging
                 end_time = datetime.utcnow()
                 process_time = (end_time - start_time).total_seconds()
                 
                 self.logger.info(
                     f"Recommendation generation for user {user_id}: "
-                    f"Found {len(similar_experts)} experts, "
+                    f"Found {len(unique_experts)} unique experts from {len(similar_experts)} initial matches, "
                     f"Process time: {process_time:.2f} seconds"
                 )
                 
@@ -287,7 +298,7 @@ class ExpertMatchingService:
                     f"available_features={available_features}"
                 )
                 
-                return similar_experts
+                return unique_experts
                 
         except Exception as e:
             self.logger.error(
