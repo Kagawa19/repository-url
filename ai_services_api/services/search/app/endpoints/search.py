@@ -14,7 +14,6 @@ from typing import Any, List, Dict, Optional
 from pydantic import BaseModel
 import logging
 import uuid
-from redis.asyncio import Redis
 
 from ai_services_api.services.search.core.models import PredictionResponse, SearchResponse
 from ai_services_api.services.search.app.endpoints.process_functions import process_advanced_query_prediction, process_advanced_query_prediction
@@ -53,16 +52,7 @@ async def get_test_user_id(request: Request) -> str:
     logger.debug("Using test user ID")
     return TEST_USER_ID
 
-# Redis connection helper
-async def get_redis():
-    """Establish Redis connection with detailed logging"""
-    try:
-        redis_client = Redis(host='redis', port=6379, db=2, decode_responses=True)
-        logger.info(f"Redis connection established successfully to host: redis, port: 6379, db: 2")
-        return redis_client
-    except Exception as e:
-        logger.error(f"Failed to establish Redis connection: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Redis connection failed")
+
 
 
 @router.get("/advanced_search")
@@ -263,8 +253,26 @@ async def health_check():
             "error": str(e),
             "timestamp": datetime.now().isoformat()
         }
+    
+from fastapi import APIRouter, HTTPException, Request, Depends
+from typing import Dict
+import logging
+from redis.asyncio import Redis
 
-# New cache clearing endpoints
+# Add these endpoints to your existing router with minimal change to your existing code
+# You'll need to add the get_redis dependency function if it doesn't exist
+
+async def get_redis():
+    """Establish Redis connection with detailed logging"""
+    try:
+        redis_client = Redis(host='redis', port=6379, db=2, decode_responses=True)
+        logging.info(f"Redis connection established successfully to host: redis, port: 6379, db: 2")
+        return redis_client
+    except Exception as e:
+        logging.error(f"Failed to establish Redis connection: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Redis connection failed")
+
+# Add these to your existing router
 @router.delete("/cache/search/{user_id}")
 async def clear_user_search_cache(
     user_id: str,
@@ -287,7 +295,7 @@ async def clear_user_search_cache(
                 await redis_client.delete(key)
                 total_deleted += 1
         
-        logger.info(f"Search cache cleared for user {user_id}. Total keys deleted: {total_deleted}")
+        logging.info(f"Search cache cleared for user {user_id}. Total keys deleted: {total_deleted}")
         
         return {
             "status": "success", 
@@ -296,7 +304,7 @@ async def clear_user_search_cache(
         }
     
     except Exception as e:
-        logger.error(f"Failed to clear search cache for user {user_id}: {str(e)}", exc_info=True)
+        logging.error(f"Failed to clear search cache for user {user_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Cache clearing error: {str(e)}")
 
 @router.delete("/cache/search")
@@ -321,7 +329,7 @@ async def clear_all_search_cache(
                 await redis_client.delete(key)
                 total_deleted += 1
         
-        logger.info(f"All search caches cleared. Total keys deleted: {total_deleted}")
+        logging.info(f"All search caches cleared. Total keys deleted: {total_deleted}")
         
         return {
             "status": "success", 
@@ -330,5 +338,5 @@ async def clear_all_search_cache(
         }
     
     except Exception as e:
-        logger.error(f"Failed to clear all search caches: {str(e)}", exc_info=True)
+        logging.error(f"Failed to clear all search caches: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Cache clearing error: {str(e)}")
