@@ -176,11 +176,10 @@ async def get_or_create_session(conn, user_id: str) -> str:
     finally:
         if 'cur' in locals():
             cur.close()
-
 def fetch_suggestions_from_db(conn, search_input: str) -> List[Dict]:
     """
     Queries resources and experts tables for matches based on search_input.
-    Fixed to handle missing columns and properly extract data from labels.
+    Fixed to properly extract expert data from the label without querying missing columns.
 
     Args:
         conn: Active database connection
@@ -193,20 +192,7 @@ def fetch_suggestions_from_db(conn, search_input: str) -> List[Dict]:
     
     curr = conn.cursor()
 
-    # First check what columns actually exist in the experts_expert table
-    try:
-        curr.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name = 'experts_expert'
-        """)
-        available_columns = [row[0] for row in curr.fetchall()]
-        logger.info(f"Available columns in experts_expert: {available_columns}")
-    except Exception as e:
-        logger.error(f"Error checking table columns: {e}")
-        available_columns = ['id', 'first_name', 'last_name', 'designation']  # Assume minimal set
-
-    # Build a basic query that works with just the essential columns
+    # Build a basic query with only the essential columns we know exist
     query = """
     SELECT 'expert' AS type, e.id, 
            CONCAT(
@@ -218,82 +204,30 @@ def fetch_suggestions_from_db(conn, search_input: str) -> List[Dict]:
     FROM experts_expert e
     WHERE 
         e.first_name ILIKE %s OR
-        e.last_name ILIKE %s
-    """
+        e.last_name ILIKE %s OR
+        e.designation ILIKE %s
     
-    # Add designation to WHERE clause if it exists
-    if 'designation' in available_columns:
-        query += " OR e.designation ILIKE %s"
-    
-    # Add bio to WHERE clause if it exists
-    if 'bio' in available_columns:
-        query += " OR e.bio ILIKE %s"
-        
-    query += """
     UNION
 
     SELECT 'resource' AS type, r.id, r.title AS label
     FROM resources_resource r
     WHERE 
         r.title ILIKE %s
-    """
     
-    # Add other resource fields if they exist
-    try:
-        curr.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name = 'resources_resource'
-        """)
-        resource_columns = [row[0] for row in curr.fetchall()]
-        
-        if 'abstract' in resource_columns:
-            query += " OR r.abstract ILIKE %s"
-        if 'summary' in resource_columns:
-            query += " OR r.summary ILIKE %s"
-        if 'description' in resource_columns:
-            query += " OR r.description ILIKE %s"
-            
-    except Exception as e:
-        logger.error(f"Error checking resource columns: {e}")
-        # Continue with basic query
-    
-    query += """
     ORDER BY label ASC
     LIMIT 15;
     """
 
-    # Prepare the query parameters based on which columns exist
-    params = []
+    # Prepare the query parameters
     like_query = f"%{search_input}%"
+    curr.execute(query, [like_query, like_query, like_query, like_query])
+    results = curr.fetchall()
     
-    # Expert params
-    params.extend([like_query, like_query])  # first_name, last_name
-    if 'designation' in available_columns:
-        params.append(like_query)
-    if 'bio' in available_columns:
-        params.append(like_query)
+    logger.info(f"fetch_suggestions_from_db found {len(results)} results")
     
-    # Resource params
-    params.append(like_query)  # title
-    if 'abstract' in resource_columns:
-        params.append(like_query)
-    if 'summary' in resource_columns:
-        params.append(like_query)
-    if 'description' in resource_columns:
-        params.append(like_query)
-    
-    try:
-        curr.execute(query, params)
-        results = curr.fetchall()
-        logger.info(f"fetch_suggestions_from_db found {len(results)} results")
-        
-        if results:
-            logger.info(f"Result structure: type={type(results[0])}, columns={len(results[0])}")
-            logger.info(f"Sample result: {results[0]}")
-    except Exception as query_error:
-        logger.error(f"Error executing suggestion query: {query_error}")
-        return []
+    if results:
+        logger.info(f"Result structure: type={type(results[0])}, columns={len(results[0])}")
+        logger.info(f"Sample result: {results[0]}")
     
     # Convert results to properly structured dictionaries with extracted name data
     suggestions = []
@@ -309,35 +243,54 @@ def fetch_suggestions_from_db(conn, search_input: str) -> List[Dict]:
         # If this is an expert suggestion, extract data from the label
         if suggestion_type == 'expert':
             # Parse the label to extract first_name, last_name, and designation
-            # Label format: "First Last - Designation"
-            label_parts = label.split('-')
-            name = label_parts[0].strip()
-            name_parts = name.split()
-            
-            first_name = ""
-            last_name = ""
-            
-            if len(name_parts) == 1:
-                first_name = name_parts[0]
-            elif len(name_parts) >= 2:
-                first_name = name_parts[0]
-                last_name = ' '.join(name_parts[1:])
+            try:
+                # Label format: "First Last - Designation"
+                label_parts = label.split(' - ')
+                name = label_parts[0].strip()
+                name_parts = name.split()
                 
-            designation = label_parts[1].strip() if len(label_parts) > 1 else ""
-            
-            # Add the extracted data to the suggestion
-            suggestion.update({
-                "first_name": first_name,
-                "last_name": last_name,
-                "designation": designation,
-                "theme": "",  # Default empty values for required fields
-                "unit": "",
-                "contact": "",
-                "is_active": True,
-                "bio": "",
-                "knowledge_expertise": [],
-                "score": 0.9  # High score for direct matches
-            })
+                # Extract first and last name
+                first_name = ""
+                last_name = ""
+                
+                if len(name_parts) == 1:
+                    first_name = name_parts[0]
+                elif len(name_parts) >= 2:
+                    first_name = name_parts[0]
+                    last_name = ' '.join(name_parts[1:])
+                    
+                # Extract designation if available
+                designation = label_parts[1].strip() if len(label_parts) > 1 else ""
+                
+                # Add the extracted data to the suggestion
+                suggestion.update({
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "designation": designation,
+                    "theme": "",  # Default empty values for required fields
+                    "unit": "",
+                    "contact": "",
+                    "is_active": True,
+                    "bio": "",
+                    "knowledge_expertise": [],
+                    "score": 0.9  # High score for direct matches
+                })
+                logger.info(f"Extracted name data: first_name='{first_name}', last_name='{last_name}', designation='{designation}'")
+            except Exception as e:
+                logger.error(f"Error parsing expert label '{label}': {e}")
+                # Provide default values even if parsing fails
+                suggestion.update({
+                    "first_name": "",
+                    "last_name": "",
+                    "designation": "",
+                    "theme": "",
+                    "unit": "",
+                    "contact": "",
+                    "is_active": True,
+                    "bio": "",
+                    "knowledge_expertise": [],
+                    "score": 0.5
+                })
         
         suggestions.append(suggestion)
     
