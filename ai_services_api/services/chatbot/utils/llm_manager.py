@@ -368,7 +368,7 @@ class GeminiLLMManager:
             - NAVIGATION (website sections, resources)
             - GENERAL (other queries)
 
-            Return JSON format:
+            Return ONLY the JSON in this format with no other text:
             {{
                 "intent": "PUBLICATION|EXPERT|NAVIGATION|GENERAL",
                 "confidence": 0.0-1.0,
@@ -380,28 +380,43 @@ class GeminiLLMManager:
             response = await model.ainvoke(prompt)
             content = response.content
 
-            try:
-                result = json.loads(content)
-                intent_mapping = {
-                    'PUBLICATION': QueryIntent.PUBLICATION,
-                    'EXPERT': QueryIntent.EXPERT,
-                    'NAVIGATION': QueryIntent.NAVIGATION,
-                    'GENERAL': QueryIntent.GENERAL
-                }
+            # Clean up the response to extract just the JSON part
+            # Remove markdown code blocks if present
+            content = content.replace("```json", "").replace("```", "").strip()
+            
+            # Find JSON content - look for opening and closing braces
+            json_start = content.find('{')
+            json_end = content.rfind('}') + 1
+            
+            if json_start >= 0 and json_end > json_start:
+                # Extract just the JSON part
+                json_content = content[json_start:json_end]
+                
+                try:
+                    result = json.loads(json_content)
+                    intent_mapping = {
+                        'PUBLICATION': QueryIntent.PUBLICATION,
+                        'EXPERT': QueryIntent.EXPERT,
+                        'NAVIGATION': QueryIntent.NAVIGATION,
+                        'GENERAL': QueryIntent.GENERAL
+                    }
 
-                return {
-                    'intent': intent_mapping.get(result.get('intent', 'GENERAL'), QueryIntent.GENERAL),
-                    'confidence': min(1.0, max(0.0, float(result.get('confidence', 0.0)))),
-                    'clarification': result.get('clarification')
-                }
+                    return {
+                        'intent': intent_mapping.get(result.get('intent', 'GENERAL'), QueryIntent.GENERAL),
+                        'confidence': min(1.0, max(0.0, float(result.get('confidence', 0.0)))),
+                        'clarification': result.get('clarification')
+                    }
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse intent detection response: {e}")
+            else:
+                logger.warning("Could not find valid JSON in the response")
 
-            except json.JSONDecodeError:
-                logger.warning("Failed to parse intent detection response")
-                return {
-                    'intent': QueryIntent.GENERAL,
-                    'confidence': 0.0,
-                    'clarification': None
-                }
+            # Default fallback
+            return {
+                'intent': QueryIntent.GENERAL,
+                'confidence': 0.0,
+                'clarification': None
+            }
 
         except Exception as e:
             logger.error(f"Intent detection error: {e}")
