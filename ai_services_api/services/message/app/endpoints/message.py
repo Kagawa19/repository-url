@@ -44,66 +44,7 @@ async def get_test_user_id(request: Request) -> str:
         user_id = "1"
     return user_id
 
-def clean_message_content(text: str, receiver_name: str, context: str) -> str:
-    """
-    Clean the message content and replace empty placeholders.
-    
-    Args:
-        text: The raw message text from the AI
-        receiver_name: The name of the message recipient
-        context: The original context provided by the user
-        
-    Returns:
-        str: The cleaned message text
-    """
-    logger.debug("Cleaning message content")
-    
-    # Remove Subject line if present
-    text = re.sub(r'Subject:.*?\n', '', text)
-    
-    # Remove salutation (Dear X,)
-    text = re.sub(r'Dear [^,\n]*,?\s*', '', text)
-    
-    # Remove signature block (Sincerely, etc.)
-    text = re.sub(r'\s*Sincerely,\s*(\n.*)*$', '', text, flags=re.DOTALL)
-    
-    # Fix empty placeholders - match patterns like "I am a [role] at [institution]"
-    text = re.sub(r'I am a\s+(?:at\s+)?\.', 'I am reaching out to you', text)
-    text = re.sub(r'I am\s+at\s+\.', 'I am reaching out to you', text)
-    text = re.sub(r'expertise in\s+\.', f'expertise in {context}.', text)
-    text = re.sub(r'research on\s+\.', f'research on {context}.', text)
-    text = re.sub(r'Your work on\s+particularly', 'Your work particularly', text)
-    text = re.sub(r'specifically\s+\.', 'specifically.', text)
-    
-    # Replace all remaining empty placeholders [Your X] or just empty brackets
-    text = re.sub(r'\[\s*\]', '', text)
-    text = re.sub(r'\[[^\]]*\]', '', text)
-    
-    # Replace all newlines with spaces
-    text = re.sub(r'\n+', ' ', text)
-    
-    # Remove multiple spaces
-    text = re.sub(r'\s+', ' ', text)
-    
-    # Trim whitespace
-    text = text.strip()
-    
-    logger.debug(f"Message after cleaning: {text[:100]}...")
-    return text
 
-@retry(
-    retry=retry_if_exception_type((
-        google_exceptions.ResourceExhausted,
-        google_exceptions.TooManyRequests,
-        google_exceptions.ServiceUnavailable,
-        google_exceptions.DeadlineExceeded,
-        ConnectionError,
-        TimeoutError,
-        Exception  # Catch-all for any unexpected errors
-    )),
-    wait=wait_exponential(multiplier=1.5, min=4, max=60),
-    stop=stop_after_attempt(5)
-)
 def generate_with_retry(model, prompt):
     """Generate content with retry logic for rate limits."""
     try:
@@ -111,6 +52,117 @@ def generate_with_retry(model, prompt):
     except Exception as e:
         logger.warning(f"API error in generate_content, retrying: {e}")
         raise
+
+def clean_message_content(text: str, receiver: dict, context: str) -> str:
+    """
+    Enhanced cleaning of message content with more context preservation.
+    
+    Args:
+        text: The raw message text from the AI
+        receiver: Dictionary containing receiver details
+        context: The original context provided by the user
+        
+    Returns:
+        str: The cleaned and enhanced message text
+    """
+    logger.debug("Cleaning message content with enhanced preservation")
+    
+    # Remove Subject line if present
+    text = re.sub(r'Subject:.*?\n', '', text)
+    
+    # Preserve professional salutation if possible
+    receiver_name = f"{receiver.get('first_name', '')} {receiver.get('last_name', '').strip()}"
+    receiver_name = receiver_name.strip()
+    
+    # Check if receiver name is missing from the text, if so, add a professional greeting
+    if not re.search(receiver_name, text, re.IGNORECASE):
+        text = f"Dear {receiver_name},\n\n{text}"
+    
+    # Remove generic or repetitive salutations
+    text = re.sub(r'^Dear [^,\n]*,?\s*', f'Dear {receiver_name},\n\n', text, flags=re.MULTILINE)
+    
+    # Remove signature block, but keep professional closing
+    text = re.sub(r'\s*Sincerely,\s*(\n.*)*$', '\n\nBest regards,\nResearch Team', text, flags=re.DOTALL)
+    
+    # Enhance context-specific placeholders
+    text = re.sub(r'I am a\s+(?:at\s+)?\.', f'I am reaching out from the African Population and Health Research Center (APHRC)', text)
+    text = re.sub(r'I am\s+at\s+\.', f'I am a researcher at APHRC', text)
+    
+    # Replace all remaining empty placeholders and brackets
+    text = re.sub(r'\[\s*\]', '', text)
+    text = re.sub(r'\[[^\]]*\]', '', text)
+    
+    # Normalize whitespace
+    text = re.sub(r'\n{3,}', '\n\n', text)  # Reduce multiple newlines
+    text = re.sub(r'\s+', ' ', text)  # Remove excessive spaces
+    
+    # Trim and ensure professional formatting
+    text = text.strip()
+    
+    logger.debug(f"Message after cleaning: {text[:200]}...")
+    return text
+
+def generate_expert_draft_prompt(receiver: dict, content: str) -> str:
+    """
+    Generate a sophisticated prompt for drafting an expert-level message.
+    
+    Args:
+        receiver: Dictionary containing receiver details
+        content: The original message context
+        
+    Returns:
+        str: Comprehensive prompt for message generation
+    """
+    # Prepare receiver details
+    first_name = receiver.get('first_name', 'Respected')
+    last_name = receiver.get('last_name', 'Colleague')
+    designation = receiver.get('designation', 'Research Expert')
+    theme = receiver.get('theme', 'Population Health Research')
+    domains = ', '.join(receiver.get('domains', ['Interdisciplinary Research']))
+    fields = ', '.join(receiver.get('fields', ['Health Systems']))
+    
+    # Construct a nuanced, context-rich prompt
+    prompt = f"""
+    You are an AI assistant helping a researcher from the African Population and Health Research Center (APHRC) draft a professional communication.
+
+    Recipient Details:
+    - Name: {first_name} {last_name}
+    - Designation: {designation}
+    - Research Focus: {theme}
+    - Primary Domains: {domains}
+    - Specialized Fields: {fields}
+
+    Communication Context: {content}
+
+    Drafting Guidelines:
+    1. Craft a concise, professional message that reflects APHRC's research excellence
+    2. Demonstrate genuine interest in potential collaboration or knowledge exchange
+    3. Highlight the relevance of the proposed communication to the recipient's expertise
+    4. Maintain a tone of academic respect and professional curiosity
+    5. Ensure the message is culturally sensitive and aligned with APHRC's mission
+
+    Additional Considerations:
+    - Be specific about the purpose of reaching out
+    - Show preliminary knowledge of the recipient's work
+    - Propose a clear next step or desired outcome
+    - Avoid generic language; make the message feel personalized
+
+    Prohibited Elements:
+    - Do not use placeholder brackets
+    - Avoid overly formal or stiff academic language
+    - Do not make unsupported claims
+    - Refrain from using boilerplate text
+
+    Preferred Communication Style:
+    - Clear and direct
+    - Intellectually engaging
+    - Respectful of the recipient's time and expertise
+    - Demonstrating APHRC's commitment to impactful research
+
+    Draft the message accordingly, focusing on creating a meaningful professional connection.
+    """
+    
+    return prompt
 
 async def process_message_draft(
     user_id: str,
@@ -206,21 +258,10 @@ async def process_message_draft(
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
         logger.debug("Gemini model configured successfully")
         
-        # Keep your original prompt exactly the same
-        prompt = f"""
-            Draft a professional message to {receiver['first_name']} {receiver['last_name']} ({receiver['designation'] or 'Expert'}).
-            The message should be about: {content}
-
-            Context about receiver:
-            - Theme: {receiver['theme'] or 'Research'}
-            - Domains: {', '.join(receiver['domains'] if receiver.get('domains') else ['Research'])}
-            - Fields: {', '.join(receiver['fields'] if receiver.get('fields') else ['Expertise'])}
-
-            Important: DO NOT include placeholders or brackets in your response. Replace any information you don't have with general professional language.
-            DO NOT use phrases like "I am a [role] at [institution]" or any brackets. If you don't know certain information, write around it naturally.
-            """
+        # Use the new prompt generation function
+        prompt = generate_expert_draft_prompt(receiver, content)
         
-        logger.debug(f"Generated prompt for Gemini: {prompt}")
+        logger.debug(f"Generated sophisticated prompt for Gemini: {prompt[:500]}...")
         
         try:
             # Use the retry-wrapped function
@@ -228,20 +269,26 @@ async def process_message_draft(
             draft_content = response.text
             logger.info(f"Generated draft content of length: {len(draft_content)}")
             
-            # Apply cleaning function to the response with all required parameters
-            receiver_name = f"{receiver['first_name']} {receiver['last_name']}"
+            # Apply enhanced cleaning function to the response
             cleaned_content = clean_message_content(
                 text=draft_content,
-                receiver_name=receiver_name,
+                receiver=receiver,
                 context=content
             )
             logger.info(f"Cleaned content of length: {len(cleaned_content)}")
             
         except Exception as api_error:
             logger.error(f"Error generating content after retries: {str(api_error)}")
-            # More descriptive fallback message
-            cleaned_content = f"I'm reaching out regarding {content}. I would appreciate the opportunity to discuss this with you. [Note: This is a simplified message as our AI service is experiencing high demand at the moment.]"
-            logger.info("Using fallback content due to API error")
+            # More descriptive APHRC-specific fallback message
+            receiver_name = f"{receiver.get('first_name', '')} {receiver.get('last_name', '')}".strip()
+            cleaned_content = f"""Dear {receiver_name},
+
+I am reaching out from the African Population and Health Research Center (APHRC) regarding {content}. 
+Despite current service constraints, I would appreciate the opportunity to discuss this matter further.
+
+Best regards,
+Research Team at APHRC"""
+            logger.info("Using APHRC-specific fallback content due to API error")
 
         # Insert the draft message with cleaned content
         cur.execute("""
@@ -269,7 +316,7 @@ async def process_message_draft(
             "created_at": created_at,
             "draft": False,
             "receiver_name": f"{receiver['first_name']} {receiver['last_name']}",
-            "sender_name": "Test User"
+            "sender_name": "APHRC Research Team"
         }
         
         # Cache the response if Redis client is provided
