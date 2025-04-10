@@ -351,7 +351,63 @@ class GeminiLLMManager:
         """Reset rate limited flag after specified seconds."""
         await asyncio.sleep(seconds)
         self._rate_limited = False
-        logger.info(f"Rate limit cooldown expired after {seconds} seconds")\
+        logger.info(f"Rate limit cooldown expired after {seconds} seconds")
+
+    async def detect_intent(self, message: str) -> Dict[str, Any]:
+        """Advanced intent detection using Gemini"""
+        try:
+            prompt = f"""
+            Analyze this query and classify its intent:
+            Query: "{message}"
+            
+            Options:
+            - PUBLICATION (research papers, studies)
+            - EXPERT (researchers, specialists)
+            - NAVIGATION (website sections, resources)
+            - GENERAL (other queries)
+            
+            Return JSON format:
+            {{
+                "intent": "PUBLICATION|EXPERT|NAVIGATION|GENERAL",
+                "confidence": 0.0-1.0,
+                "clarification": "optional clarification question"
+            }}
+            """
+            
+            model = self.get_gemini_model()
+            response = await model.ainvoke(prompt)
+            content = response.content
+            
+            try:
+                result = json.loads(content)
+                intent_mapping = {
+                    'PUBLICATION': QueryIntent.PUBLICATION,
+                    'EXPERT': QueryIntent.EXPERT,
+                    'NAVIGATION': QueryIntent.NAVIGATION,
+                    'GENERAL': QueryIntent.GENERAL
+                }
+                
+                return {
+                    'intent': intent_mapping.get(result.get('intent', 'GENERAL'), 
+                    'confidence': min(1.0, max(0.0, float(result.get('confidence', 0.0))),
+                    'clarification': result.get('clarification')
+                }
+                
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse intent detection response")
+                return {
+                    'intent': QueryIntent.GENERAL,
+                    'confidence': 0.0,
+                    'clarification': None
+                }
+                
+        except Exception as e:
+            logger.error(f"Intent detection error: {e}")
+            return {
+                'intent': QueryIntent.GENERAL,
+                'confidence': 0.0,
+                'clarification': None
+            }
 
     async def generate_async_response(self, message: str) -> AsyncGenerator[str, None]:
         """
