@@ -4,6 +4,9 @@ import json
 import logging
 import random
 import re
+from sentence_transformers import SentenceTransformer
+import numpy as np  # For the embedding verification
+import os  # For path operations
 import time
 import numpy as np
 from typing import Dict, Set, Tuple, Any, List, AsyncGenerator, Optional
@@ -14,8 +17,9 @@ from langchain.schema.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.callbacks import AsyncIteratorCallbackHandler
 from ai_services_api.services.search.indexing.redis_index_manager import ExpertRedisIndexManager
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
+from langchain.callbacks.streaming_aiter import AsyncIteratorCallbackHandler
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -23,19 +27,22 @@ class QueryIntent(Enum):
     """Enum for different types of query intents."""
     NAVIGATION = "navigation"
     PUBLICATION = "publication"
-    EXPERT = "expert"
+    EXPERT = "expert"  # New intent type for expert queries
     GENERAL = "general"
+from langchain.callbacks.streaming_aiter import AsyncIteratorCallbackHandler
 
 class CustomAsyncCallbackHandler(AsyncIteratorCallbackHandler):
     """Custom callback handler for streaming responses."""
     
     def __init__(self):
+        """Initialize the callback handler with a queue."""
         super().__init__()
         self.queue = asyncio.Queue()
         self.finished = False
         self.error = None
 
     async def on_llm_start(self, *args, **kwargs):
+        """Handle LLM start."""
         self.finished = False
         self.error = None
         while not self.queue.empty():
@@ -45,10 +52,13 @@ class CustomAsyncCallbackHandler(AsyncIteratorCallbackHandler):
                 break
 
     async def on_chat_model_start(self, serialized, messages, *args, **kwargs):
+        """Handle chat model start by delegating to on_llm_start."""
         try:
+            # Extract content safely from messages which can be in various formats
             prompts = []
             for msg in messages:
                 if isinstance(msg, list):
+                    # If message is a list, process each item
                     for item in msg:
                         if hasattr(item, 'content'):
                             prompts.append(item.content)
@@ -57,18 +67,23 @@ class CustomAsyncCallbackHandler(AsyncIteratorCallbackHandler):
                         elif isinstance(item, str):
                             prompts.append(item)
                 elif hasattr(msg, 'content'):
+                    # If message has content attribute
                     prompts.append(msg.content)
                 elif isinstance(msg, dict) and 'content' in msg:
+                    # If message is a dict with content key
                     prompts.append(msg['content'])
                 elif isinstance(msg, str):
+                    # If message is a string
                     prompts.append(msg)
             
+            # Call on_llm_start with extracted prompts
             await self.on_llm_start(serialized, prompts, *args, **kwargs)
         except Exception as e:
             logger.error(f"Error in on_chat_model_start: {e}")
             self.error = e
 
     async def on_llm_new_token(self, token: str, *args, **kwargs):
+        """Handle new token."""
         if token and not self.finished:
             try:
                 await self.queue.put(token)
@@ -77,6 +92,7 @@ class CustomAsyncCallbackHandler(AsyncIteratorCallbackHandler):
                 self.error = e
 
     async def on_llm_end(self, *args, **kwargs):
+        """Handle LLM end."""
         try:
             self.finished = True
             await self.queue.put(None)
@@ -85,6 +101,7 @@ class CustomAsyncCallbackHandler(AsyncIteratorCallbackHandler):
             self.error = e
 
     async def on_llm_error(self, error: Exception, *args, **kwargs):
+        """Handle LLM error."""
         try:
             self.error = error
             self.finished = True
@@ -94,13 +111,14 @@ class CustomAsyncCallbackHandler(AsyncIteratorCallbackHandler):
             logger.error(f"Error in on_llm_error handler: {e}")
 
     def reset(self):
+        """Reset the handler state."""
         self.finished = False
         self.error = None
         self.queue = asyncio.Queue()
 
 class GeminiLLMManager:
     def __init__(self):
-        """Initialize the LLM manager with semantic search capabilities."""
+        """Initialize the LLM manager with required components."""
         try:
             # Load API key
             self.api_key = os.getenv("GEMINI_API_KEY")
@@ -110,22 +128,42 @@ class GeminiLLMManager:
             # Initialize callback handler
             self.callback = CustomAsyncCallbackHandler()
             
-            # Initialize Redis manager
+            # Initialize Redis manager for accessing real data
             try:
                 self.redis_manager = ExpertRedisIndexManager()
                 logger.info("Redis manager initialized successfully")
             except Exception as redis_error:
                 logger.error(f"Error initializing Redis manager: {redis_error}")
                 self.redis_manager = None
-            
-            # Initialize semantic search model
-            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+                logger.warning("Continuing without Redis integration - will use generative responses")
             
             # Initialize context management
             self.context_window = []
             self.max_context_items = 5
             self.context_expiry = 1800  # 30 minutes
             self.confidence_threshold = 0.6
+            # Set model cache paths (matches your Dockerfile)
+            model_cache_path = "/app/models"
+            os.environ['TRANSFORMERS_CACHE'] = model_cache_path
+            os.environ['HF_HOME'] = model_cache_path
+            
+            # Configure offline mode (as set in Dockerfile)
+            os.environ['TRANSFORMERS_OFFLINE'] = '1'
+            os.environ['HF_DATASETS_OFFLINE'] = '1'
+
+            # Initialize embedding model with explicit cache and local_files_only
+            self.embedding_model = SentenceTransformer(
+                'all-MiniLM-L6-v2',
+                cache_folder=model_cache_path,
+                local_files_only=True  # Critical for offline use
+            )
+            
+            # Test the model
+            test_embedding = self.embedding_model.encode("test")
+            if not isinstance(test_embedding, np.ndarray):
+                raise RuntimeError("Model initialization failed - invalid embedding output")
+                
+            logger.info(f"SentenceTransformer model loaded successfully from {model_cache_path}")
             
             # Initialize intent patterns
             self.intent_patterns = {
@@ -143,6 +181,7 @@ class GeminiLLMManager:
                     ],
                     'threshold': 0.6
                 },
+                
                 QueryIntent.PUBLICATION: {
                     'patterns': [
                         (r'research', 1.0),
@@ -174,6 +213,7 @@ class GeminiLLMManager:
                     ],
                     'threshold': 0.6
                 }
+
             }
             
             logger.info("GeminiLLMManager initialized successfully")
@@ -181,538 +221,12 @@ class GeminiLLMManager:
             logger.error(f"Error initializing GeminiLLMManager: {e}", exc_info=True)
             raise
 
-    # Core Methods
-    def get_gemini_model(self):
-        """Initialize and return the Gemini model."""
-        return ChatGoogleGenerativeAI(
-            google_api_key=self.api_key,
-            stream=True,
-            model="gemini-2.0-flash-thinking-exp-01-21",
-            convert_system_message_to_human=True,
-            callbacks=[self.callback],
-            temperature=0.7,
-            top_p=0.9,
-            top_k=40,
-            max_retries=5,
-            timeout=30
-        )
-
-    def _extract_content_safely(self, model_response):
-        """Safely extract content from model response."""
-        try:
-            if isinstance(model_response, str):
-                return model_response
-            if hasattr(model_response, 'content'):
-                return model_response.content
-            if isinstance(model_response, list):
-                if model_response and hasattr(model_response[-1], 'content'):
-                    return model_response[-1].content
-                contents = []
-                for msg in model_response:
-                    if hasattr(msg, 'content'):
-                        contents.append(msg.content)
-                if contents:
-                    return ''.join(contents)
-            if isinstance(model_response, dict) and 'content' in model_response:
-                return model_response['content']
-            if hasattr(model_response, 'generations'):
-                generations = model_response.generations
-                if generations and generations[0]:
-                    if hasattr(generations[0][0], 'text'):
-                        return generations[0][0].text
-            if hasattr(model_response, 'text'):
-                return model_response.text
-            return str(model_response)
-        except Exception as e:
-            logger.error(f"Error extracting content from model response: {e}")
-            return ""
-
-    def _get_default_quality(self) -> Dict:
-        """Return default quality metric values."""
-        return {
-            'helpfulness_score': 0.5,
-            'hallucination_risk': 0.5,
-            'factual_grounding_score': 0.5,
-            'unclear_elements': [],
-            'potentially_fabricated_elements': [],
-            'requires_review': False
-        }
-
-    # Intent Detection
-    def detect_intent(self, query: str) -> Tuple[QueryIntent, float]:
-        """Detect query intent using semantic similarity and pattern matching."""
-        try:
-            # First check for exact matches in patterns
-            for intent, config in self.intent_patterns.items():
-                for pattern, weight in config['patterns']:
-                    if re.search(pattern, query, re.IGNORECASE):
-                        return intent, weight
-            
-            # Fall back to semantic similarity if no pattern matches
-            query_embedding = self.embedding_model.encode(query)
-            
-            intent_scores = {}
-            for intent, config in self.intent_patterns.items():
-                # Create embedding for intent description
-                intent_description = f"Find information about {intent.value}"
-                intent_embedding = self.embedding_model.encode(intent_description)
-                
-                # Calculate cosine similarity
-                similarity = cosine_similarity(
-                    [query_embedding],
-                    [intent_embedding]
-                )[0][0]
-                
-                intent_scores[intent] = similarity
-            
-            # Get the highest scoring intent
-            best_intent = max(intent_scores.items(), key=lambda x: x[1])
-            
-            if best_intent[1] >= self.confidence_threshold:
-                return best_intent[0], best_intent[1]
-            else:
-                return QueryIntent.GENERAL, best_intent[1]
-                
-        except Exception as e:
-            logger.error(f"Error detecting intent: {e}")
-            return QueryIntent.GENERAL, 0.0
-
-    # Publication Retrieval
-    async def get_relevant_publications(self, query: str, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        """Retrieve publications using semantic similarity."""
-        try:
-            if not self.redis_manager:
-                logger.warning("Redis manager not available")
-                return [], "Our publication database is currently unavailable."
-            
-            # Get all publication keys
-            publication_keys = await self._get_all_publication_keys()
-            
-            if not publication_keys:
-                return [], "No publications found in the database."
-            
-            # Generate query embedding
-            query_embedding = self.embedding_model.encode(query)
-            
-            matched_publications = []
-            
-            # Process publications in batches for efficiency
-            batch_size = 50
-            for i in range(0, len(publication_keys), batch_size):
-                batch_keys = publication_keys[i:i+batch_size]
-                
-                # Get batch metadata
-                batch_metadata = []
-                for key in batch_keys:
-                    try:
-                        raw_metadata = self.redis_manager.redis_text.hgetall(key)
-                        if raw_metadata:
-                            metadata = self._reconstruct_publication_metadata(raw_metadata)
-                            batch_metadata.append(metadata)
-                    except Exception as e:
-                        logger.error(f"Error processing publication {key}: {e}")
-                
-                # Skip if no valid metadata in batch
-                if not batch_metadata:
-                    continue
-                
-                # Generate embeddings for batch
-                search_texts = [
-                    self._prepare_publication_metadata(pub) 
-                    for pub in batch_metadata
-                ]
-                batch_embeddings = self.embedding_model.encode(search_texts)
-                
-                # Calculate similarities
-                similarities = cosine_similarity(
-                    [query_embedding],
-                    batch_embeddings
-                )[0]
-                
-                # Add to matched publications with scores
-                for idx, similarity in enumerate(similarities):
-                    if similarity > 0.3:  # Minimum similarity threshold
-                        pub = batch_metadata[idx]
-                        pub['_similarity'] = similarity
-                        matched_publications.append(pub)
-            
-            # Sort by similarity and limit results
-            matched_publications.sort(key=lambda x: x.get('_similarity', 0), reverse=True)
-            top_publications = matched_publications[:limit]
-            
-            # Remove internal similarity score
-            for pub in top_publications:
-                pub.pop('_similarity', None)
-            
-            logger.info(f"Found {len(top_publications)} publications matching query")
-            return top_publications, None
-            
-        except Exception as e:
-            logger.error(f"Error retrieving publications: {e}")
-            return [], "We encountered an error searching publications."
-
-    def _prepare_publication_metadata(self, pub: Dict) -> str:
-        """Prepare publication metadata text for embedding."""
-        text_parts = [
-            pub.get('title', ''),
-            pub.get('abstract', ''),
-            pub.get('summary', ''),
-            ' '.join(pub.get('authors', [])),
-            ' '.join(pub.get('domains', [])),
-            pub.get('description', '')
-        ]
-        return ' '.join([p for p in text_parts if p])
-
-    def _reconstruct_publication_metadata(self, raw_metadata: Dict) -> Dict:
-        """Reconstruct publication metadata from Redis hash."""
-        return {
-            'id': raw_metadata.get('id', ''),
-            'doi': raw_metadata.get('doi', ''),
-            'title': raw_metadata.get('title', ''),
-            'abstract': raw_metadata.get('abstract', ''),
-            'summary': raw_metadata.get('summary', ''),
-            'domains': self._safe_json_load(raw_metadata.get('domains', '[]')),
-            'topics': self._safe_json_load(raw_metadata.get('topics', '{}')),
-            'description': raw_metadata.get('description', ''),
-            'expert_id': raw_metadata.get('expert_id', ''),
-            'type': raw_metadata.get('type', 'publication'),
-            'subtitles': self._safe_json_load(raw_metadata.get('subtitles', '{}')),
-            'publishers': self._safe_json_load(raw_metadata.get('publishers', '{}')),
-            'collection': raw_metadata.get('collection', ''),
-            'date_issue': raw_metadata.get('date_issue', ''),
-            'citation': raw_metadata.get('citation', ''),
-            'language': raw_metadata.get('language', ''),
-            'identifiers': self._safe_json_load(raw_metadata.get('identifiers', '{}')),
-            'created_at': raw_metadata.get('created_at', ''),
-            'updated_at': raw_metadata.get('updated_at', ''),
-            'source': raw_metadata.get('source', 'unknown'),
-            'authors': self._safe_json_load(raw_metadata.get('authors', '[]')),
-            'publication_year': raw_metadata.get('publication_year', '')
-        }
-
-    async def _get_all_publication_keys(self):
-        """Get all publication keys from Redis."""
-        try:
-            if not self.redis_manager:
-                return []
-                
-            cursor = 0
-            publication_keys = []
-            
-            while cursor != 0 or len(publication_keys) == 0:
-                cursor, batch = self.redis_manager.redis_text.scan(
-                    cursor=cursor, 
-                    match='meta:resource:*', 
-                    count=100
-                )
-                publication_keys.extend(batch)
-                
-                if cursor == 0:
-                    break
-            
-            return list(set(publication_keys))
-        except Exception as e:
-            logger.error(f"Error retrieving publication keys: {e}")
-            return []
-
-    # Expert Retrieval
-    async def get_relevant_experts(self, query: str, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        """Retrieve experts using semantic similarity."""
-        try:
-            if not self.redis_manager:
-                logger.warning("Redis manager not available")
-                return [], "Our expert database is currently unavailable."
-            
-            # Get all expert keys
-            expert_keys = await self._get_all_expert_keys()
-            
-            if not expert_keys:
-                return [], "No experts found in the database."
-            
-            # Generate query embedding
-            query_embedding = self.embedding_model.encode(query)
-            
-            matched_experts = []
-            
-            # Process experts in batches
-            batch_size = 50
-            for i in range(0, len(expert_keys), batch_size):
-                batch_keys = expert_keys[i:i+batch_size]
-                
-                # Get batch metadata
-                batch_metadata = []
-                for key in batch_keys:
-                    try:
-                        raw_metadata = self.redis_manager.redis_text.hgetall(key)
-                        if raw_metadata:
-                            metadata = self._reconstruct_expert_metadata(raw_metadata)
-                            batch_metadata.append(metadata)
-                    except Exception as e:
-                        logger.error(f"Error processing expert {key}: {e}")
-                
-                if not batch_metadata:
-                    continue
-                
-                # Generate embeddings for batch
-                search_texts = [
-                    self._prepare_expert_metadata(expert) 
-                    for expert in batch_metadata
-                ]
-                batch_embeddings = self.embedding_model.encode(search_texts)
-                
-                # Calculate similarities
-                similarities = cosine_similarity(
-                    [query_embedding],
-                    batch_embeddings
-                )[0]
-                
-                # Add to matched experts with scores
-                for idx, similarity in enumerate(similarities):
-                    if similarity > 0.3:  # Minimum similarity threshold
-                        expert = batch_metadata[idx]
-                        expert['_similarity'] = similarity
-                        matched_experts.append(expert)
-            
-            # Sort by similarity and limit results
-            matched_experts.sort(key=lambda x: x.get('_similarity', 0), reverse=True)
-            top_experts = matched_experts[:limit]
-            
-            # Remove internal similarity score
-            for expert in top_experts:
-                expert.pop('_similarity', None)
-            
-            logger.info(f"Found {len(top_experts)} experts matching query")
-            return top_experts, None
-            
-        except Exception as e:
-            logger.error(f"Error retrieving experts: {e}")
-            return [], "We encountered an error searching experts."
-
-    def _prepare_expert_metadata(self, expert: Dict) -> str:
-        """Prepare expert metadata text for embedding."""
-        text_parts = [
-            expert.get('first_name', ''),
-            expert.get('last_name', ''),
-            expert.get('title', ''),
-            expert.get('bio', ''),
-            ' '.join(expert.get('expertise', [])),
-            ' '.join(expert.get('domains', [])),
-            expert.get('institution', '')
-        ]
-        return ' '.join([p for p in text_parts if p])
-
-    def _reconstruct_expert_metadata(self, raw_metadata: Dict) -> Dict:
-        """Reconstruct expert metadata from Redis hash."""
-        return {
-            'id': raw_metadata.get('id', ''),
-            'first_name': raw_metadata.get('first_name', ''),
-            'last_name': raw_metadata.get('last_name', ''),
-            'title': raw_metadata.get('title', ''),
-            'bio': raw_metadata.get('bio', ''),
-            'expertise': self._safe_json_load(raw_metadata.get('expertise', '[]')),
-            'domains': self._safe_json_load(raw_metadata.get('domains', '[]')),
-            'institution': raw_metadata.get('institution', ''),
-            'profile_url': raw_metadata.get('profile_url', ''),
-            'created_at': raw_metadata.get('created_at', ''),
-            'updated_at': raw_metadata.get('updated_at', '')
-        }
-
-    async def _get_all_expert_keys(self):
-        """Get all expert keys from Redis."""
-        try:
-            if not self.redis_manager:
-                return []
-                
-            cursor = 0
-            expert_keys = []
-            
-            while cursor != 0 or len(expert_keys) == 0:
-                cursor, batch = self.redis_manager.redis_text.scan(
-                    cursor=cursor, 
-                    match='meta:expert:*', 
-                    count=100
-                )
-                expert_keys.extend(batch)
-                
-                if cursor == 0:
-                    break
-            
-            return list(set(expert_keys))
-        except Exception as e:
-            logger.error(f"Error retrieving expert keys: {e}")
-            return []
-
-    # Response Generation
-    async def generate_async_response(self, query: str) -> AsyncGenerator[str, None]:
-        """Generate response with semantic context."""
-        try:
-            # Detect intent
-            intent, confidence = self.detect_intent(query)
-            
-            # Get relevant content based on intent
-            context = ""
-            metadata = {
-                'intent': {'type': intent.value, 'confidence': confidence},
-                'content_matches': []
-            }
-            
-            if intent == QueryIntent.PUBLICATION:
-                publications, error = await self.get_relevant_publications(query)
-                if publications:
-                    context = self.format_publication_context(publications)
-                    metadata['content_matches'] = [p['id'] for p in publications]
-                    metadata['content_types'] = {'publication': len(publications)}
-            
-            elif intent == QueryIntent.EXPERT:
-                experts, error = await self.get_relevant_experts(query)
-                if experts:
-                    context = self.format_expert_context(experts)
-                    metadata['content_matches'] = [e['id'] for e in experts]
-                    metadata['content_types'] = {'expert': len(experts)}
-            
-            # Prepare messages for LLM
-            messages = [
-                SystemMessage(content="You are a helpful research assistant."),
-                HumanMessage(content=f"Context:\n{context}\n\nQuestion: {query}")
-            ]
-            
-            # Generate response
-            model = self.get_gemini_model()
-            response = await model.agenerate([messages])
-            
-            # Add metadata to response
-            yield {'is_metadata': True, 'metadata': metadata}
-            
-            # Stream response content
-            async for token in self.callback.aiter():
-                if token is not None:
-                    yield token
-                    
-        except Exception as e:
-            logger.error(f"Error generating response: {e}")
-            yield f"Error: {str(e)}"
-
-    def format_publication_context(self, publications: List[Dict]) -> str:
-        """Format publication data for context."""
-        if not publications:
-            return ""
-            
-        context = "Relevant Publications:\n"
-        for i, pub in enumerate(publications, 1):
-            context += f"{i}. Title: {pub.get('title', 'N/A')}\n"
-            context += f"   Authors: {', '.join(pub.get('authors', ['Unknown']))}\n"
-            context += f"   Year: {pub.get('publication_year', 'Unknown')}\n"
-            if pub.get('doi'):
-                context += f"   DOI: {pub.get('doi')}\n"
-            if pub.get('abstract'):
-                context += f"   Abstract: {pub.get('abstract')[:200]}...\n"
-            context += "\n"
-        
-        return context
-
-    def format_expert_context(self, experts: List[Dict]) -> str:
-        """Format expert data for context."""
-        if not experts:
-            return ""
-            
-        context = "Relevant Experts:\n"
-        for i, expert in enumerate(experts, 1):
-            context += f"{i}. Name: {expert.get('first_name', '')} {expert.get('last_name', '')}\n"
-            context += f"   Title: {expert.get('title', 'N/A')}\n"
-            if expert.get('expertise'):
-                context += f"   Expertise: {', '.join(expert.get('expertise'))}\n"
-            if expert.get('bio'):
-                context += f"   Bio: {expert.get('bio')[:200]}...\n"
-            context += "\n"
-        
-        return context
-
-    def create_context(self, relevant_data: List[Dict]) -> str:
-        """Create context from relevant data."""
-        if not relevant_data:
-            return ""
-            
-        context_parts = []
-        for item in relevant_data:
-            text = item.get('text', '')
-            metadata = item.get('metadata', {})
-            
-            if metadata.get('type') == 'publication':
-                context_parts.append(
-                    f"Publication: {metadata.get('title', 'N/A')}\n"
-                    f"Authors: {', '.join(metadata.get('authors', ['Unknown']))}\n"
-                    f"Content: {text[:300]}..."
-                )
-            elif metadata.get('type') == 'expert':
-                context_parts.append(
-                    f"Expert: {metadata.get('first_name', '')} {metadata.get('last_name', '')}\n"
-                    f"Expertise: {', '.join(metadata.get('expertise', ['Unknown']))}\n"
-                    f"Bio: {text[:300]}..."
-                )
-        
-        return "\n\n".join(context_parts)
-
-    def manage_context_window(self, new_context: Dict):
-        """Manage conversation context window."""
-        current_time = datetime.now().timestamp()
-        
-        # Remove expired contexts
-        self.context_window = [
-            ctx for ctx in self.context_window 
-            if current_time - ctx.get('timestamp', 0) < self.context_expiry
-        ]
-        
-        # Add new context
-        new_context['timestamp'] = current_time
-        self.context_window.append(new_context)
-        
-        # Maintain maximum window size
-        if len(self.context_window) > self.max_context_items:
-            self.context_window.pop(0)
-
-    # Database Interactions
-    async def _get_expert_for_publications(self, publication_ids: List[str]) -> Dict[str, List[Dict]]:
-        """Get experts associated with publications."""
-        try:
-            async with DatabaseConnector.get_connection() as conn:
-                query = """
-                    SELECT l.resource_id, e.id, e.first_name, e.last_name, 
-                           e.title, l.confidence_score
-                    FROM expert_resource_links l
-                    JOIN experts_expert e ON l.expert_id = e.id
-                    WHERE l.resource_id = ANY($1)
-                    AND l.confidence_score >= 0.7
-                    ORDER BY l.confidence_score DESC
-                """
-                
-                rows = await conn.fetch(query, publication_ids)
-                
-                # Map publications to experts
-                pub_expert_map = {}
-                for row in rows:
-                    pub_id = row['resource_id']
-                    if pub_id not in pub_expert_map:
-                        pub_expert_map[pub_id] = []
-                    
-                    pub_expert_map[pub_id].append({
-                        'id': row['id'],
-                        'first_name': row['first_name'],
-                        'last_name': row['last_name'],
-                        'title': row['title'],
-                        'confidence': row['confidence_score']
-                    })
-                
-                return pub_expert_map
-                
-        except Exception as e:
-            logger.error(f"Error fetching experts for publications: {e}")
-            return {}
-
     async def _get_expert_publications(self, expert_id: str, limit: int = 3) -> List[Dict[str, Any]]:
         """Get publications associated with an expert."""
         try:
+            # Create placeholders for SQL query
             async with DatabaseConnector.get_connection() as conn:
-                query = """
+                query = f"""
                     SELECT r.id, r.title, r.publication_year, r.doi, l.confidence_score
                     FROM expert_resource_links l
                     JOIN resources_resource r ON l.resource_id = r.id
@@ -724,6 +238,7 @@ class GeminiLLMManager:
                 
                 rows = await conn.fetch(query, expert_id, limit)
                 
+                # Format results
                 publications = []
                 for row in rows:
                     publications.append({
@@ -740,64 +255,385 @@ class GeminiLLMManager:
             logger.error(f"Error fetching publications for expert {expert_id}: {e}")
             return []
 
-    async def _get_expertise_summary(self, expert_id: str) -> str:
-        """Get summary of expert's expertise."""
-        try:
-            async with DatabaseConnector.get_connection() as conn:
-                query = """
-                    SELECT expertise FROM experts_expert
-                    WHERE id = $1
-                """
-                
-                row = await conn.fetchrow(query, expert_id)
-                if row and row['expertise']:
-                    return ', '.join(row['expertise'])
-                
-                return ""
-                
-        except Exception as e:
-            logger.error(f"Error fetching expertise for expert {expert_id}: {e}")
-            return ""
+    # 2. Update _get_all_expert_keys method in GeminiLLMManager
 
-    # Quality Analysis
-    async def analyze_quality(self, message: str, response: str = "") -> Dict:
-        """Analyze response quality with hallucination detection."""
+    async def _get_all_expert_keys(self):
+        """Helper method to get all expert keys from Redis with improved error handling."""
         try:
-            prompt = f"""Analyze this query and response for quality metrics.
-            Return ONLY a JSON object with these fields:
-            {{
-                "helpfulness_score": <0-1>,
-                "hallucination_risk": <0-1>,
-                "factual_grounding_score": <0-1>,
-                "unclear_elements": [<strings>],
-                "potentially_fabricated_elements": [<strings>]
-            }}
-            
-            Query: {message}
-            Response: {response if response else 'N/A'}
-            """
-            
-            model = self.get_gemini_model()
-            model_response = await model.ainvoke(prompt)
-            response_text = self._extract_content_safely(model_response)
-            
-            if not response_text:
-                return self._get_default_quality()
-            
-            try:
-                return json.loads(response_text.strip())
-            except json.JSONDecodeError:
-                return self._get_default_quality()
+            if not self.redis_manager:
+                logger.warning("Redis manager not available, cannot retrieve expert keys")
+                return []
                 
+            patterns = [
+                'meta:expert:*'  # Primary pattern for expert data
+            ]
+            
+            all_keys = []
+            
+            # For each pattern, scan Redis for matching keys
+            for pattern in patterns:
+                cursor = 0
+                pattern_keys = []
+                
+                while True:
+                    try:
+                        cursor, batch = self.redis_manager.redis_text.scan(
+                            cursor=cursor, 
+                            match=pattern, 
+                            count=100
+                        )
+                        pattern_keys.extend(batch)
+                        
+                        if cursor == 0:
+                            break
+                    except Exception as scan_error:
+                        logger.warning(f"Error scanning with pattern '{pattern}': {scan_error}")
+                        break
+                
+                logger.info(f"Found {len(pattern_keys)} keys with pattern '{pattern}'")
+                all_keys.extend(pattern_keys)
+            
+            # Remove any duplicates
+            unique_keys = list(set(all_keys))
+            
+            logger.info(f"Found {len(unique_keys)} total unique expert keys in Redis")
+            return unique_keys
+            
+        except Exception as e:
+            logger.error(f"Error retrieving expert keys: {e}")
+            return []
+
+    # 3. Update get_relevant_experts method to better handle empty results
+
+
+   
+    def get_gemini_model(self):
+        """Initialize and return the Gemini model with built-in retry logic."""
+        return ChatGoogleGenerativeAI(
+            google_api_key=self.api_key,
+            stream=True,
+            model="gemini-2.0-flash-thinking-exp-01-21",
+            convert_system_message_to_human=True,
+            callbacks=[self.callback],
+            temperature=0.7,
+            top_p=0.9,
+            top_k=40,
+            max_retries=5,  # Use built-in retry mechanism
+            timeout=30  # Set a reasonable timeout
+        )
+
+    
+    
+
+    
+    async def _get_all_publication_keys(self):
+        """Helper method to get all publication keys from Redis"""
+        try:
+            # Use scan to find all publication keys
+            cursor = 0
+            publication_keys = []
+            
+            while cursor != 0 or len(publication_keys) == 0:
+                cursor, batch = self.redis_manager.redis_text.scan(
+                    cursor=cursor, 
+                    match='meta:resource:*', 
+                    count=100
+                )
+                publication_keys.extend(batch)
+                
+                if cursor == 0:
+                    break
+            
+            logger.info(f"Found {len(publication_keys)} total publications in Redis")
+            return publication_keys
+        
+        except Exception as e:
+            logger.error(f"Error retrieving publication keys: {e}")
+            return []
+
+    
+
+   
+    async def _reset_rate_limited_after(self, seconds: int):
+        """Reset rate limited flag after specified seconds."""
+        await asyncio.sleep(seconds)
+        self._rate_limited = False
+        logger.info(f"Rate limit cooldown expired after {seconds} seconds")
+
+    async def analyze_quality(self, message: str, response: str = "") -> Dict:
+        """
+        Analyze the quality of a response with enhanced hallucination detection for publications.
+        
+        Args:
+            message (str): The user's original query
+            response (str): The chatbot's response to analyze (if available)
+        
+        Returns:
+            Dict: Quality metrics including helpfulness, hallucination risk, and factual grounding
+        """
+        try:
+            # Limit analysis during high load periods or if a rate limit was recently hit
+            if hasattr(self, '_rate_limited') and self._rate_limited:
+                logger.warning("Skipping quality analysis due to recent rate limit")
+                return self._get_default_quality()
+            
+            # Check if query relates to publications
+            is_publication_query = False
+            publication_patterns = [
+                r'publications?', r'papers?', r'research', r'articles?', 
+                r'studies', r'doi', r'authors?', r'published'
+            ]
+            if any(re.search(pattern, message.lower()) for pattern in publication_patterns):
+                is_publication_query = True
+                logger.info("Detected publication-related query - applying enhanced quality checks")
+            
+            # If no response provided, analyze the query only
+            if not response:
+                prompt = f"""Analyze this query for an APHRC chatbot and return a JSON object with quality expectations.
+                The chatbot helps users find publications and navigate APHRC resources.
+                Return ONLY the JSON object with no markdown formatting, no code blocks, and no additional text.
+                
+                Required format:
+                {{
+                    "helpfulness_score": <float between 0 and 1, representing expected helpfulness>,
+                    "hallucination_risk": <float between 0 and 1, representing risk based on query complexity>,
+                    "factual_grounding_score": <float between 0 and 1, representing how much factual knowledge is needed>,
+                    "unclear_elements": [<array of strings representing potential unclear aspects of the query>],
+                    "potentially_fabricated_elements": []
+                }}
+                
+                Query to analyze: {message}
+                """
+            else:
+                # For publication queries, add specific checks for hallucination
+                if is_publication_query:
+                    prompt = f"""Analyze the quality of this chatbot response about APHRC publications and return a JSON object.
+                    Focus especially on detecting potential fabrication of publication details.
+                    Return ONLY the JSON object with no markdown formatting, no code blocks, and no additional text.
+                    
+                    Required format:
+                    {{
+                        "helpfulness_score": <float between 0 and 1>,
+                        "hallucination_risk": <float between 0 and 1>,
+                        "factual_grounding_score": <float between 0 and 1>,
+                        "unclear_elements": [<array of strings representing unclear aspects of the response>],
+                        "potentially_fabricated_elements": [<array of specific publication details that may be fabricated>]
+                    }}
+                    
+                    Pay special attention to:
+                    1. Publication titles that seem generic or made-up
+                    2. Author names
+                    3. DOIs that don't follow standard formats (e.g., missing "10." prefix)
+                    4. Specific years or dates mentioned without context
+                    5. Publication findings or conclusions stated without reference to actual documents
+                    
+                    Flag any specific sections of the response that appear fabricated or hallucinated.
+                    
+                    User query: {message}
+                    
+                    Chatbot response: {response}
+                    """
+                else:
+                    # For non-publication queries, use standard analysis
+                    prompt = f"""Analyze the quality of this chatbot response for the given query and return a JSON object.
+                    The APHRC chatbot helps users find publications and navigate APHRC resources.
+                    Evaluate helpfulness, factual accuracy, and potential hallucination.
+                    Return ONLY the JSON object with no markdown formatting, no code blocks, and no additional text.
+                    
+                    Required format:
+                    {{
+                        "helpfulness_score": <float between 0 and 1>,
+                        "hallucination_risk": <float between 0 and 1>,
+                        "factual_grounding_score": <float between 0 and 1>,
+                        "unclear_elements": [<array of strings representing unclear aspects of the response>],
+                        "potentially_fabricated_elements": [<array of strings representing statements that may be hallucinated>]
+                    }}
+                    
+                    User query: {message}
+                    
+                    Chatbot response: {response}
+                    """
+            
+            # Use model with retry logic already built in from get_gemini_model()
+            try:
+                model = self.get_gemini_model()
+                
+                # Call the model and get response content safely
+                try:
+                    # Handle async or sync invoke results properly
+                    model_response = await model.ainvoke(prompt)
+                    response_text = self._extract_content_safely(model_response)
+                    
+                    # Reset any rate limit flag if successful
+                    if hasattr(self, '_rate_limited'):
+                        self._rate_limited = False
+                    
+                    if not response_text:
+                        logger.warning("Empty response from quality analysis model")
+                        return self._get_default_quality()
+                    
+                    cleaned_response = response_text.strip()
+                    cleaned_response = cleaned_response.replace('```json', '').replace('```', '').strip()
+                    
+                    try:
+                        quality_data = json.loads(cleaned_response)
+                        logger.info(f"Response quality analysis result: {quality_data}")
+                        
+                        # For publication queries, add an additional check for post-processing action
+                        if is_publication_query and 'potentially_fabricated_elements' in quality_data:
+                            if quality_data['potentially_fabricated_elements']:
+                                logger.warning(f"Detected potentially fabricated publication elements: {quality_data['potentially_fabricated_elements']}")
+                                # Flag this response for review or intervention
+                                quality_data['requires_review'] = True
+                                
+                        return quality_data
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Failed to parse quality analysis response: {cleaned_response}")
+                        logger.error(f"JSON parse error: {e}")
+                        return self._get_default_quality()
+                        
+                except Exception as api_error:
+                    # Check if this was a rate limit error
+                    if any(x in str(api_error).lower() for x in ["429", "quota", "rate limit", "resource exhausted"]):
+                        logger.warning("Rate limit detected in quality analysis, marking for cooldown")
+                        self._rate_limited = True
+                        # Set expiry for rate limit status
+                        asyncio.create_task(self._reset_rate_limited_after(300))  # 5 minutes cooldown
+                    
+                    logger.error(f"API error in quality analysis: {api_error}")
+                    return self._get_default_quality()
+                        
+            except Exception as e:
+                logger.error(f"Error in quality analysis: {e}")
+                return self._get_default_quality()
+
         except Exception as e:
             logger.error(f"Error in quality analysis: {e}")
             return self._get_default_quality()
 
-    async def analyze_sentiment(self, message: str) -> Dict:
-        """Legacy sentiment analysis (redirects to quality analysis)."""
-        quality_data = await self.analyze_quality(message)
+    def _extract_content_safely(self, model_response):
+        """
+        Safely extract content from model response with multiple format support.
+        
+        Args:
+            model_response: The response from the model which could be in various formats
+            
+        Returns:
+            str: The extracted content text, or empty string if extraction fails
+        """
+        try:
+            # Case 1: Direct string
+            if isinstance(model_response, str):
+                return model_response
+                
+            # Case 2: Object with content attribute (like AIMessage)
+            if hasattr(model_response, 'content'):
+                return model_response.content
+                
+            # Case 3: List of messages
+            if isinstance(model_response, list):
+                # Try to get the last message
+                if model_response and hasattr(model_response[-1], 'content'):
+                    return model_response[-1].content
+                # Try to join all message contents
+                contents = []
+                for msg in model_response:
+                    if hasattr(msg, 'content'):
+                        contents.append(msg.content)
+                if contents:
+                    return ''.join(contents)
+                    
+            # Case 4: Dictionary with content key
+            if isinstance(model_response, dict) and 'content' in model_response:
+                return model_response['content']
+                
+            # Case 5: Generation object from LangChain
+            if hasattr(model_response, 'generations'):
+                generations = model_response.generations
+                if generations and generations[0]:
+                    if hasattr(generations[0][0], 'text'):
+                        return generations[0][0].text
+            
+            # Case 6: Object with text attribute
+            if hasattr(model_response, 'text'):
+                return model_response.text
+                
+            # If we can't determine the format, convert to string safely
+            return str(model_response)
+            
+        except Exception as e:
+            logger.error(f"Error extracting content from model response: {e}")
+            return ""
+
+    def _get_default_quality(self) -> Dict:
+        """Return default quality metric values with publication-specific flags."""
         return {
-            'sentiment_score': quality_data.get('helpfulness_score', 0.5) * 2 - 1,
+            'helpfulness_score': 0.5,
+            'hallucination_risk': 0.5,
+            'factual_grounding_score': 0.5,
+            'unclear_elements': [],
+            'potentially_fabricated_elements': [],
+            'requires_review': False
+        }
+    
+    # 2. Updated _get_all_publication_keys method in GeminiLLMManager
+    async def _get_all_publication_keys(self):
+        """Helper method to get all publication keys from Redis with consistent patterns."""
+        try:
+            # Use the exact same patterns as used in the _store_resource_data method
+            patterns = [
+                'meta:resource:*',  # Primary pattern used by _store_resource_data
+                'meta::*'  # Alternative pattern
+            ]
+            
+            all_keys = []
+            
+            # For each pattern, scan Redis for matching keys
+            for pattern in patterns:
+                cursor = 0
+                pattern_keys = []
+                
+                while cursor != 0 or len(pattern_keys) == 0:
+                    try:
+                        cursor, batch = self.redis_manager.redis_text.scan(
+                            cursor=cursor, 
+                            match=pattern, 
+                            count=100
+                        )
+                        pattern_keys.extend(batch)
+                        
+                        if cursor == 0:
+                            break
+                    except Exception as scan_error:
+                        logger.warning(f"Error scanning with pattern '{pattern}': {scan_error}")
+                        break
+                
+                logger.info(f"Found {len(pattern_keys)} keys with pattern '{pattern}'")
+                all_keys.extend(pattern_keys)
+            
+            # Remove any duplicates
+            unique_keys = list(set(all_keys))
+            
+            logger.info(f"Found {len(unique_keys)} total unique publication keys in Redis")
+            return unique_keys
+            
+        except Exception as e:
+            logger.error(f"Error retrieving publication keys: {e}")
+            return []
+
+    # This maintains backwards compatibility with code still calling analyze_sentiment
+    async def analyze_sentiment(self, message: str) -> Dict:
+        """
+        Legacy method maintained for backwards compatibility.
+        Now redirects to analyze_quality.
+        """
+        logger.warning("analyze_sentiment is deprecated, using analyze_quality instead")
+        quality_data = await self.analyze_quality(message)
+        
+        # Transform quality data to match the expected sentiment structure
+        # This ensures old code expecting sentiment data continues to work
+        return {
+            'sentiment_score': quality_data.get('helpfulness_score', 0.5) * 2 - 1,  # Map 0-1 to -1-1
             'emotion_labels': [],
             'confidence': 1.0 - quality_data.get('hallucination_risk', 0.5),
             'aspects': {
@@ -806,10 +642,252 @@ class GeminiLLMManager:
                 'clarity': quality_data.get('factual_grounding_score', 0.5)
             }
         }
+    
+    
 
-    # Utility Methods
+    
+
+   
+
+  
+
+    
+    async def get_relevant_publications(self, query: str, limit: int = 5) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """
+        Retrieve publications from Redis with advanced matching capabilities
+        """
+        try:
+            if not self.redis_manager:
+                logger.warning("Redis manager not available, cannot retrieve publications")
+                return [], "Our publication database is currently unavailable. Please try again later."
+            
+            # Get all publication keys
+            publication_keys = await self._get_all_publication_keys()
+            
+            if not publication_keys:
+                return [], "No publications found in the database."
+            
+            # Parse specific requests for publication counts
+            count_pattern = r'(\d+)\s+publications?'
+            count_match = re.search(count_pattern, query, re.IGNORECASE)
+            requested_count = int(count_match.group(1)) if count_match else limit
+            
+            # Comprehensive publication retrieval
+            matched_publications = []
+            query_terms = set(query.lower().split())
+            
+            # Extract potential exact title match
+            title_match = self._extract_title_from_query(query)
+            
+            for key in publication_keys:
+                try:
+                    # Retrieve full publication metadata
+                    raw_metadata = self.redis_manager.redis_text.hgetall(key)
+                    
+                    # Skip entries without essential metadata
+                    if not raw_metadata or 'title' not in raw_metadata:
+                        continue
+                    
+                    # Reconstruct metadata exactly as it was stored
+                    metadata = {
+                        'id': raw_metadata.get('id', ''),
+                        'doi': raw_metadata.get('doi', ''),
+                        'title': raw_metadata.get('title', ''),
+                        'abstract': raw_metadata.get('abstract', ''),
+                        'summary': raw_metadata.get('summary', ''),
+                        'domains': json.loads(raw_metadata.get('domains', '[]')),
+                        'topics': json.loads(raw_metadata.get('topics', '{}')),
+                        'description': raw_metadata.get('description', ''),
+                        'expert_id': raw_metadata.get('expert_id', ''),
+                        'type': raw_metadata.get('type', 'publication'),
+                        'subtitles': json.loads(raw_metadata.get('subtitles', '{}')),
+                        'publishers': json.loads(raw_metadata.get('publishers', '{}')),
+                        'collection': raw_metadata.get('collection', ''),
+                        'date_issue': raw_metadata.get('date_issue', ''),
+                        'citation': raw_metadata.get('citation', ''),
+                        'language': raw_metadata.get('language', ''),
+                        'identifiers': json.loads(raw_metadata.get('identifiers', '{}')),
+                        'created_at': raw_metadata.get('created_at', ''),
+                        'updated_at': raw_metadata.get('updated_at', ''),
+                        'source': raw_metadata.get('source', 'unknown'),
+                        'authors': json.loads(raw_metadata.get('authors', '[]')),
+                        'publication_year': raw_metadata.get('publication_year', '')
+                    }
+                    
+                    # Prepare comprehensive search text
+                    search_text = ' '.join([
+                        str(metadata.get('title', '')).lower(),
+                        str(metadata.get('description', '')).lower(),
+                        str(metadata.get('abstract', '')).lower(),
+                        str(metadata.get('summary', '')).lower(),
+                        ' '.join([str(a).lower() for a in metadata.get('authors', []) if a]),
+                    ])
+                    
+                    # Advanced matching logic
+                    match_score = self._calculate_publication_match_score(
+                        metadata, 
+                        query_terms, 
+                        title_match
+                    )
+                    
+                    if match_score > 0:
+                        # Attach match score for later sorting
+                        metadata['_match_score'] = match_score
+                        matched_publications.append(metadata)
+                
+                except Exception as e:
+                    logger.error(f"Error processing publication {key}: {e}")
+            
+            # Sort publications by match score and year
+            sorted_publications = sorted(
+                matched_publications,
+                key=lambda x: (x.get('_match_score', 0), x.get('publication_year', '0000')),
+                reverse=True
+            )
+            
+            # Limit to requested count
+            top_publications = sorted_publications[:requested_count]
+            
+            # Remove internal match score before returning
+            for pub in top_publications:
+                pub.pop('_match_score', None)
+            
+            logger.info(f"Found {len(top_publications)} publications matching query")
+            return top_publications, None
+        
+        except Exception as e:
+            logger.error(f"Error retrieving publications: {e}")
+            return [], "We encountered an error searching publications. Try simplifying your query."
+
+   
+
+
+    def create_context(self, relevant_data: List[Dict]) -> str:
+        """
+        Create a flowing context narrative from relevant content.
+        """
+        if not relevant_data:
+            return ""
+        
+        navigation_content = []
+        publication_content = []
+        
+        for item in relevant_data:
+            text = item.get('text', '')
+            metadata = item.get('metadata', {})
+            content_type = metadata.get('type', 'unknown')
+            
+            if content_type == 'navigation':
+                navigation_content.append(
+                    f"The {metadata.get('title', 'section')} of our website ({metadata.get('url', '')}) "
+                    f"provides information about {text[:300].strip()}..."
+                )
+            
+            elif content_type == 'publication':
+                authors = metadata.get('authors', 'our researchers')
+                date = metadata.get('date', '')
+                date_text = f" in {date}" if date else ""
+                
+                publication_content.append(
+                    f"In a study published{date_text}, {authors} explored {metadata.get('title', 'research')}. "
+                    f"Their work revealed that {text[:300].strip()}..."
+                )
+        
+        context_parts = []
+        
+        if navigation_content:
+            context_parts.append(
+                "Regarding our online resources: " + 
+                " ".join(navigation_content)
+            )
+        
+        if publication_content:
+            context_parts.append(
+                "Our research has produced several relevant findings: " + 
+                " ".join(publication_content)
+            )
+        
+        return "\n\n".join(context_parts)
+
+    def manage_context_window(self, new_context: Dict):
+        """Manage sliding window of conversation context."""
+        current_time = datetime.now().timestamp()
+        
+        # Remove expired contexts
+        self.context_window = [
+            ctx for ctx in self.context_window 
+            if current_time - ctx.get('timestamp', 0) < self.context_expiry
+        ]
+        
+        # Add new context
+        new_context['timestamp'] = current_time
+        self.context_window.append(new_context)
+        
+        # Maintain maximum window size
+        if len(self.context_window) > self.max_context_items:
+            self.context_window.pop(0)
+
+    async def _enrich_publications_with_experts(self, publications: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Enrich publication data with information about associated experts.
+        
+        Args:
+            publications: List of publication dictionaries
+            
+        Returns:
+            Enriched publication list with expert information
+        """
+        if not publications:
+            return publications
+            
+        try:
+            # Extract publication IDs
+            pub_ids = [str(pub.get('id', '')) for pub in publications if pub.get('id')]
+            if not pub_ids:
+                return publications
+                
+            # Get expert information for these publications
+            pub_expert_map = await self._get_expert_for_publications(pub_ids)
+            
+            # Enrich each publication with expert information
+            for pub in publications:
+                pub_id = str(pub.get('id', ''))
+                if pub_id in pub_expert_map and pub_expert_map[pub_id]:
+                    # Add expert information to publication
+                    experts = pub_expert_map[pub_id]
+                    
+                    # Format expert names consistently
+                    expert_names = []
+                    for expert in experts:
+                        name = f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip()
+                        if name:
+                            expert_names.append(name)
+                    
+                    if expert_names:
+                        # Add to publication metadata
+                        pub['aphrc_experts'] = expert_names
+                        
+                        # Also add expert details for better context
+                        pub['expert_details'] = [
+                            {
+                                'name': f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip(),
+                                'id': expert.get('id'),
+                                'confidence': expert.get('confidence', 0.0)
+                            }
+                            for expert in experts
+                        ]
+            
+            return publications
+            
+        except Exception as e:
+            logger.error(f"Error enriching publications with expert information: {e}")
+            # Return original publications if enrichment fails
+            return publications
+
+    
+
     def _safe_json_load(self, json_str: str) -> Any:
-        """Safely load JSON string."""
+        """Safely load JSON string to Python object."""
         try:
             if not json_str:
                 return {} if json_str.startswith('{') else []
@@ -819,8 +897,16 @@ class GeminiLLMManager:
         except Exception:
             return {} if json_str.startswith('{') else []
 
+    
+
+    
     async def _throttle_request(self):
-        """Apply request throttling."""
+        """Apply throttling to incoming requests to help prevent rate limits."""
+        await self.new_method()
+
+    async def new_method(self):
+        """Apply throttling to incoming requests to help prevent rate limits."""
+        # Get global throttling status from class variable
         if not hasattr(self.__class__, '_last_request_time'):
             self.__class__._last_request_time = 0
             self.__class__._request_count = 0
@@ -830,31 +916,57 @@ class GeminiLLMManager:
             current_time = time.time()
             time_since_last = current_time - self.__class__._last_request_time
                 
+            # Reset counter if more than 1 minute has passed
             if time_since_last > 60:
                 self.__class__._request_count = 0
                     
+            # Increment request counter
             self.__class__._request_count += 1
                 
-            if self.__class__._request_count > 50:
-                delay = 2.0
+            # Calculate delay based on request count within the minute
+            # As we approach Gemini's limits, add increasingly longer delays
+            if self.__class__._request_count > 50:  # Getting close to limit
+                delay = 2.0  # 2 seconds
             elif self.__class__._request_count > 30:
-                delay = 1.0
+                delay = 1.0  # 1 second
             elif self.__class__._request_count > 20:
-                delay = 0.5
+                delay = 0.5  # 0.5 seconds
             elif self.__class__._request_count > 10:
-                delay = 0.2
+                delay = 0.2  # 0.2 seconds
             else:
                 delay = 0
                     
+            # Add randomization to prevent request bunching
             if delay > 0:
-                jitter = delay * 0.2 * (random.random() * 2 - 1)
+                jitter = delay * 0.2 * (random.random() * 2 - 1)  # ±20% jitter
                 delay += jitter
+                logger.debug(f"Adding throttling delay of {delay:.2f}s (request {self.__class__._request_count})")
                 await asyncio.sleep(delay)
                     
+            # Update last request time
             self.__class__._last_request_time = time.time()
 
-    async def _reset_rate_limited_after(self, seconds: int):
-        """Reset rate limited flag."""
-        await asyncio.sleep(seconds)
-        self._rate_limited = False
-        logger.info(f"Rate limit cooldown expired after {seconds} seconds")
+class ConversationHelper:
+    """New helper class for conversation enhancements"""
+    
+    def __init__(self, llm_manager):
+        self.llm_manager = llm_manager
+        self.summary_cache = {}
+        
+    async def generate_summary(self, conversation_id: str, turns: List[Dict]) -> str:
+        """Generate conversation summary"""
+        if conversation_id in self.summary_cache:
+            return self.summary_cache[conversation_id]
+            
+        key_points = []
+        for turn in turns[-5:]:  # Last 5 turns
+            if turn.get('intent') == QueryIntent.PUBLICATION:
+                key_points.append(f"Discussed publications about {turn.get('topics', 'various topics')}")
+            elif turn.get('intent') == QueryIntent.NAVIGATION:
+                key_points.append(f"Asked about {turn.get('section', 'website sections')}")
+        
+        summary = "Our conversation so far:\n- " + "\n- ".join(key_points[-3:])  # Last 3 points
+        self.summary_cache[conversation_id] = summary
+        return summary
+        
+  
