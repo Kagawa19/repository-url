@@ -58,7 +58,7 @@ async def get_test_user_id(request: Request) -> str:
 @router.get("/test/experts/search/{query}")
 async def advanced_search(
     request: Request,
-    user_id: str = Depends(get_user_id),
+    user_id: str = Depends(get_test_user_id),
     query: Optional[str] = None,
     search_type: Optional[str] = None,
     active_only: bool = True,
