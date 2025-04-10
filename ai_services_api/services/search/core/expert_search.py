@@ -301,26 +301,25 @@ def fetch_suggestions_from_db(conn, search_input: str) -> List[Dict]:
     
     return suggestions
 
-
 def get_expert_by_id_or_name(self, query: str) -> List[Dict[str, Any]]:
     """
     Try to find an expert by ID first, then fall back to name search.
-    
-    Args:
-        query: Expert ID or name
-        
-    Returns:
-        List of expert details matching the query
     """
+    logger.info(f"Attempting to find expert by ID or name: '{query}'")
     try:
         # First, try to treat the query as an ID
         if query.isdigit():
+            logger.info(f"Query '{query}' appears to be a numeric ID, trying exact ID lookup")
             expert = self.get_expert_by_id(query)
             if expert:
+                logger.info(f"Found expert with ID {query}")
                 return [expert]
+            else:
+                logger.info(f"No expert found with ID {query}")
         
-        # If that fails or query isn't numeric, extract name parts
+        # Extract name parts
         name_parts = query.split()
+        logger.info(f"Extracted name parts from '{query}': {name_parts}")
         
         # Connect to database
         conn = self.db.get_connection()
@@ -329,6 +328,7 @@ def get_expert_by_id_or_name(self, query: str) -> List[Dict[str, Any]]:
             if len(name_parts) > 1:
                 first_name = name_parts[0]
                 last_name = ' '.join(name_parts[1:])
+                logger.info(f"Searching for expert with first_name='{first_name}', last_name='{last_name}'")
                 
                 cur.execute("""
                     SELECT e.id, e.first_name, e.last_name, 
@@ -340,11 +340,13 @@ def get_expert_by_id_or_name(self, query: str) -> List[Dict[str, Any]]:
                            e.is_active
                     FROM experts_expert e
                     WHERE 
-                        LOWER(e.first_name) = LOWER(%s) AND
-                        LOWER(e.last_name) = LOWER(%s)
-                """, [first_name, last_name])
+                        (LOWER(e.first_name) = LOWER(%s) AND LOWER(e.last_name) = LOWER(%s))
+                        OR
+                        (LOWER(CONCAT(e.first_name, ' ', e.last_name)) = LOWER(%s))
+                """, [first_name, last_name, query])
             else:
                 # Search by single name part (first or last)
+                logger.info(f"Searching for expert with single name part: '{query}'")
                 cur.execute("""
                     SELECT e.id, e.first_name, e.last_name, 
                            COALESCE(e.designation, '') as designation,
@@ -360,12 +362,20 @@ def get_expert_by_id_or_name(self, query: str) -> List[Dict[str, Any]]:
                 """, [query, query])
             
             # Format results
+            rows = cur.fetchall()
+            logger.info(f"Database search returned {len(rows)} results")
+            
             results = []
-            for row in cur.fetchall():
+            for row in rows:
+                expert_id = str(row[0])
+                first_name = row[1] or ""
+                last_name = row[2] or ""
+                logger.info(f"Found expert: {first_name} {last_name} (ID: {expert_id})")
+                
                 results.append({
-                    "id": str(row[0]),
-                    "first_name": row[1] or "",
-                    "last_name": row[2] or "",
+                    "id": expert_id,
+                    "first_name": first_name,
+                    "last_name": last_name,
                     "designation": row[3] or "",
                     "theme": row[4] or "",
                     "unit": row[5] or "",
@@ -434,20 +444,10 @@ def get_expert_by_id(self, expert_id: str) -> Dict[str, Any]:
     finally:
         if 'conn' in locals():
             conn.close()
-
 async def process_expert_search(query: str, user_id: str, active_only: bool = True, k: int = 5) -> SearchResponse:
     """
     Process expert search, returning suggestions for user input and performing full search.
     Enhanced to handle exact name matches through get_expert_by_id_or_name.
-    
-    Args:
-        query (str): Search query
-        user_id (str): User identifier
-        active_only (bool): Filter for active experts only
-        k (int): Number of results to return
-    
-    Returns:
-        SearchResponse: Search results including suggested matches
     """
     logger.info(f"Processing expert search - Query: '{query}', User: {user_id}")
     
@@ -470,24 +470,28 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
             is_complex_query = len(query.split()) > 3 or any(c in query for c in [':', '&', '|', '"', "'"])
             
             try:
-                # Check if we should try direct lookup for simple name queries
-                # This handles the suggestion click case
-                if not is_complex_query and ' ' in query and len(query.split()) <= 3:
-                    # This looks like a name query - try direct lookup first
+                # First try the direct lookup for any query that looks like a name
+                # This should happen BEFORE other search methods
+                if ' ' in query:  # If there's a space, it might be a full name
+                    logger.info(f"Attempting direct name lookup for: '{query}'")
+                    # Run this in executor to avoid blocking
+                    loop = asyncio.get_event_loop()
                     search_manager = ExpertSearchIndexManager()
-                    direct_results = search_manager.get_expert_by_id_or_name(query)
+                    direct_results = await loop.run_in_executor(
+                        None,
+                        lambda: search_manager.get_expert_by_id_or_name(query)
+                    )
                     
                     if direct_results:
                         logger.info(f"Found direct name match for '{query}' - {len(direct_results)} results")
                         results = direct_results
-                    else:
-                        logger.info(f"No direct name match for '{query}', falling back to regular search")
+                        # Skip other search methods if we found direct matches
                 
-                # If no direct results found, proceed with normal search
+                # Only continue with regular search if no direct results found
                 if not results:
                     # Search execution (autocomplete vs full search)
                     if query:
-                        # If query is relatively short/simple, check for autocomplete suggestions first
+                        # If query is relatively short/simple, check for autocomplete suggestions 
                         loop = asyncio.get_event_loop()
                         suggestions = await loop.run_in_executor(
                             None,  # Default executor
