@@ -55,7 +55,7 @@ def generate_with_retry(model, prompt):
 
 def clean_message_content(text: str, receiver: dict, context: str) -> str:
     """
-    Enhanced cleaning of message content with more aggressive placeholder removal.
+    Enhanced cleaning of message content with more context preservation.
     
     Args:
         text: The raw message text from the AI
@@ -65,47 +65,41 @@ def clean_message_content(text: str, receiver: dict, context: str) -> str:
     Returns:
         str: The cleaned and enhanced message text
     """
-    logger.debug("Cleaning message content with enhanced placeholder removal")
+    logger.debug("Cleaning message content with enhanced preservation")
     
     # Remove Subject line if present
     text = re.sub(r'Subject:.*?\n', '', text)
     
-    # Prepare receiver and context details
+    # Preserve professional salutation if possible
     receiver_name = f"{receiver.get('first_name', '')} {receiver.get('last_name', '').strip()}"
     receiver_name = receiver_name.strip()
-    designation = receiver.get('designation', 'Researcher')
     
-    # Remove duplicate salutations
-    text = re.sub(rf'^Dear {re.escape(receiver_name)},\s*Dear {re.escape(receiver_name)},', f'Dear {receiver_name},', text, flags=re.MULTILINE)
+    # Check if receiver name is missing from the text, if so, add a professional greeting
+    if not re.search(receiver_name, text, re.IGNORECASE):
+        text = f"Dear {receiver_name},\n\n{text}"
     
-    # Aggressive placeholder removal and replacement
-    placeholders = [
-        (r'My name is\s*and\s*I am a\s*at', f'I am a researcher'),
-        (r'particularly your contributions to\s*\.', 'your significant research contributions.'),
-        (r'current research on\s*\.', f'current research exploring population health.'),
-        (r'exploring\s*\.', 'investigating emerging health challenges.'),
-        (r'expertise in\s*could', 'expertise could'),
-        (r'understanding of\s*\.', 'understanding of complex health dynamics.')
-    ]
+    # Remove generic or repetitive salutations
+    text = re.sub(r'^Dear [^,\n]*,?\s*', f'Dear {receiver_name},\n\n', text, flags=re.MULTILINE)
     
-    for pattern, replacement in placeholders:
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    # Remove signature block, but keep professional closing
+    text = re.sub(r'\s*Sincerely,\s*(\n.*)*$', '\n\nBest regards,\nResearch Team', text, flags=re.DOTALL)
     
-    # Remove specific acronyms or vague references if not properly contextualized
-    text = re.sub(r'\bHAW\b', 'health and wellness', text, flags=re.IGNORECASE)
+    # Enhance context-specific placeholders
+    text = re.sub(r'I am a\s+(?:at\s+)?\.', f'I am reaching out from the African Population and Health Research Center (APHRC)', text)
+    text = re.sub(r'I am\s+at\s+\.', f'I am a researcher at APHRC', text)
     
-    # Ensure a single, clean salutation
-    text = re.sub(r'^Dear [^,\n]*,', f'Dear {receiver_name},', text, flags=re.MULTILINE)
+    # Replace all remaining empty placeholders and brackets
+    text = re.sub(r'\[\s*\]', '', text)
+    text = re.sub(r'\[[^\]]*\]', '', text)
     
-    # Ensure professional closing
-    if not re.search(r'Best regards,\s*Research Team', text, re.IGNORECASE):
-        text += "\n\nBest regards,\nResearch Team at APHRC"
+    # Normalize whitespace
+    text = re.sub(r'\n{3,}', '\n\n', text)  # Reduce multiple newlines
+    text = re.sub(r'\s+', ' ', text)  # Remove excessive spaces
     
-    # Remove multiple newlines and excessive whitespace
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    text = re.sub(r'\s+', ' ', text).strip()
+    # Trim and ensure professional formatting
+    text = text.strip()
     
-    logger.debug(f"Message after cleaning: {text[:500]}...")
+    logger.debug(f"Message after cleaning: {text[:200]}...")
     return text
 
 def generate_expert_draft_prompt(receiver: dict, content: str) -> str:
