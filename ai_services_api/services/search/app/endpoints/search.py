@@ -174,37 +174,7 @@ async def predict_query(
             detail=f"An error occurred while generating predictions: {str(e)}"
         )
 
-# Add a simple 'search' endpoint
-@router.get("/experts/search/{query}")
-async def search_experts(
-    query: str,
-    request: Request,
-    user_id: str = Depends(get_user_id),
-    active_only: bool = True,
-    k: int = 5
-):
-    """
-    Search for experts by query.
-    """
-    logger.info(f"Expert search request - User: {user_id}, Query: {query}")
-    
-    try:
-        # Use the process_expert_search function
-        search_response = await process_expert_search(
-            query=query,
-            user_id=user_id,
-            active_only=active_only,
-            k=k
-        )
-        
-        return search_response
-    
-    except Exception as e:
-        logger.error(f"Error in expert search: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500, 
-            detail="An error occurred while processing the expert search"
-        )
+
 @router.post("/experts/track-suggestion")
 async def track_suggestion(
     request: Request,

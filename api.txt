@@ -1,0 +1,553 @@
+api-1  | [Thu Apr 10 12:19:35 UTC 2025] Starting initialization...
+api-1  | tee: /app/logs/init.log: Permission denied
+api-1  | /usr/local/bin/python: No module named ai_services_api.health_check
+api-1  | [Thu Apr 10 12:19:36 UTC 2025] Waiting for PostgreSQL...
+api-1  | [Thu Apr 10 12:19:36 UTC 2025] PostgreSQL is available
+api-1  | [Thu Apr 10 12:19:36 UTC 2025] Waiting for Redis...
+api-1  | [Thu Apr 10 12:19:36 UTC 2025] Redis is available
+api-1  | [Thu Apr 10 12:19:36 UTC 2025] Waiting for Neo4j...
+api-1  | [Thu Apr 10 12:19:36 UTC 2025] Neo4j is available
+api-1  | [Thu Apr 10 12:19:36 UTC 2025] Running setup with args:  --skip-database --skip-openalex --skip-publications --skip-graph --skip-search --skip-redis --skip-scraping --skip-classification
+api-1  | 2025-04-10 12:19:43 - INFO: DNS resolution for Gemini API: 142.251.179.95
+api-1  | 2025-04-10 12:19:43 - INFO: HTTP connectivity check: Status 404
+api-1  | 2025-04-10 12:19:43 - INFO: Gemini API key found, configuring client
+api-1  | 2025-04-10 12:19:43 - INFO: Gemini model initialized successfully
+api-1  | 2025-04-10 12:19:43 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-04-10 12:19:43 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-04-10 12:20:15 - INFO: Starting system initialization...
+api-1  | 2025-04-10 12:20:15 - INFO: Initializing text summarizer...
+api-1  | 2025-04-10 12:20:15 - INFO: Gemini model setup completed
+api-1  | 2025-04-10 12:20:15 - INFO: TextSummarizer initialized successfully
+api-1  | 2025-04-10 12:20:15 - INFO: Text summarizer initialized successfully.
+api-1  | 2025-04-10 12:20:15 - INFO: Creating search index...
+api-1  | 2025-04-10 12:20:15 - INFO: Initializing offline embedding model
+api-1  | 2025-04-10 12:20:15 - INFO: Initialized OfflineEmbedder with dimension 384
+api-1  | 2025-04-10 12:20:15 - INFO: Search index created successfully.
+api-1  | 2025-04-10 12:20:15 - INFO: Creating Redis index...
+api-1  | 2025-04-10 12:20:15 - INFO: Redis index created successfully.
+api-1  | 2025-04-10 12:20:15 - INFO: Matching experts with resources...
+api-1  | 2025-04-10 12:20:15 - INFO: Starting expert-resource matching process...
+api-1  | 🔍 Starting expert-resource matching process...
+api-1  | 2025-04-10 12:20:16 - INFO: Found 108 experts and 475 resources for matching.
+api-1  | 📊 Found 108 experts and 475 resources for matching.
+api-1  | 2025-04-10 12:20:16,033 - INFO: Found 0 expert-resource matches
+api-1  | 2025-04-10 12:20:16,033 - INFO: Found 0 expert-resource matches
+api-1  | 2025-04-10 12:20:16 - INFO: Found 0 expert-resource matches
+api-1  | 2025-04-10 12:20:16 - WARNING: No matches found between experts and resources.
+api-1  | ⚠️ No matches found between experts and resources.
+api-1  | 2025-04-10 12:20:16 - INFO: Expert-resource matching process completed.
+api-1  | 🎉 Expert-resource matching process completed.
+api-1  | 2025-04-10 12:20:16 - INFO: Expert-resource matching completed successfully.
+api-1  | 2025-04-10 12:20:16 - INFO: System initialization completed successfully!
+api-1  | 2025-04-10 12:20:16 - INFO: Database connection closed
+api-1  | [Thu Apr 10 12:20:22 UTC 2025] Initialization complete
+api-1  | [Thu Apr 10 12:20:22 UTC 2025] Starting application...
+api-1  | INFO:     Will watch for changes in these directories: ['/app']
+api-1  | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+api-1  | INFO:     Started reloader process [1] using StatReload
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-04-10 12:20:49 - INFO: Attempting to load model from /app/models
+api-1  | 2025-04-10 12:20:49 - INFO: Use pytorch device_name: cpu
+api-1  | 2025-04-10 12:20:49 - INFO: Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+api-1  | 2025-04-10 12:20:49 - WARNING: No sentence-transformers model found with name sentence-transformers/all-MiniLM-L6-v2. Creating a new one with mean pooling.
+api-1  | 2025-04-10 12:20:49 - ERROR: Failed to load model: We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.
+api-1  | Checkout your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.
+api-1  | 2025-04-10 12:20:49 - WARNING: Falling back to None and using manual embedding
+api-1  | 2025-04-10 12:20:49 - INFO: Redis connections established successfully
+api-1  | 2025-04-10 12:20:49 - INFO: ExpertRedisIndexManager initialized successfully
+api-1  | 2025-04-10 12:20:49 - INFO: Redis manager initialized successfully
+api-1  | 2025-04-10 12:20:49 - INFO: GeminiLLMManager initialized successfully
+api-1  | 2025-04-10 12:20:49 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-04-10 12:20:49 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | INFO:     Started server process [86]
+api-1  | INFO:     Waiting for application startup.
+api-1  | INFO:     Application startup complete.
+api-1  | INFO:     127.0.0.1:59880 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:36510 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:38978 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:55052 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:34542 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:50878 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:43346 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     172.18.0.1:46738 - "GET / HTTP/1.1" 200 OK
+api-1  | INFO:     172.18.0.1:46740 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+api-1  | INFO:     172.18.0.1:46742 - "GET /docs HTTP/1.1" 200 OK
+api-1  | INFO:     172.18.0.1:34916 - "GET /openapi.json HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:44694 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:34162 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:39080 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:60312 - "GET /health HTTP/1.1" 200 OK
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/app/endpoints/search.py'. Reloading...
+api-1  | INFO:     Shutting down
+api-1  | INFO:     Waiting for application shutdown.
+api-1  | INFO:     Application shutdown complete.
+api-1  | INFO:     Finished server process [86]
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/app/endpoints/search.py'. Reloading...
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/app/endpoints/search.py'. Reloading...
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/app/endpoints/search.py'. Reloading...
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/app/endpoints/search.py'. Reloading...
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/app/endpoints/search.py'. Reloading...
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/app/endpoints/search.py'. Reloading...
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-04-10 12:29:55 - INFO: Attempting to load model from /app/models
+api-1  | 2025-04-10 12:29:55 - INFO: Use pytorch device_name: cpu
+api-1  | 2025-04-10 12:29:55 - INFO: Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+api-1  | 2025-04-10 12:29:55 - WARNING: No sentence-transformers model found with name sentence-transformers/all-MiniLM-L6-v2. Creating a new one with mean pooling.
+api-1  | 2025-04-10 12:29:55 - ERROR: Failed to load model: We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.
+api-1  | Checkout your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.
+api-1  | 2025-04-10 12:29:55 - WARNING: Falling back to None and using manual embedding
+api-1  | 2025-04-10 12:29:55 - INFO: Redis connections established successfully
+api-1  | 2025-04-10 12:29:55 - INFO: ExpertRedisIndexManager initialized successfully
+api-1  | 2025-04-10 12:29:55 - INFO: Redis manager initialized successfully
+api-1  | 2025-04-10 12:29:55 - INFO: GeminiLLMManager initialized successfully
+api-1  | 2025-04-10 12:29:55 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-04-10 12:29:55 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | INFO:     Started server process [201]
+api-1  | INFO:     Waiting for application startup.
+api-1  | INFO:     Application startup complete.
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/app/endpoints/search.py'. Reloading...
+api-1  | INFO:     Shutting down
+api-1  | INFO:     Waiting for application shutdown.
+api-1  | INFO:     Application shutdown complete.
+api-1  | INFO:     Finished server process [201]
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/app/endpoints/search.py'. Reloading...
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-04-10 12:30:18 - INFO: Attempting to load model from /app/models
+api-1  | 2025-04-10 12:30:18 - INFO: Use pytorch device_name: cpu
+api-1  | 2025-04-10 12:30:18 - INFO: Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+api-1  | 2025-04-10 12:30:18 - WARNING: No sentence-transformers model found with name sentence-transformers/all-MiniLM-L6-v2. Creating a new one with mean pooling.
+api-1  | 2025-04-10 12:30:18 - ERROR: Failed to load model: We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.
+api-1  | Checkout your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.
+api-1  | 2025-04-10 12:30:18 - WARNING: Falling back to None and using manual embedding
+api-1  | 2025-04-10 12:30:18 - INFO: Redis connections established successfully
+api-1  | 2025-04-10 12:30:18 - INFO: ExpertRedisIndexManager initialized successfully
+api-1  | 2025-04-10 12:30:18 - INFO: Redis manager initialized successfully
+api-1  | 2025-04-10 12:30:18 - INFO: GeminiLLMManager initialized successfully
+api-1  | 2025-04-10 12:30:18 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-04-10 12:30:18 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | INFO:     Started server process [215]
+api-1  | INFO:     Waiting for application startup.
+api-1  | INFO:     Application startup complete.
+api-1  | INFO:     127.0.0.1:37148 - "GET /health HTTP/1.1" 200 OK
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/app/endpoints/search.py'. Reloading...
+api-1  | INFO:     Shutting down
+api-1  | INFO:     Waiting for application shutdown.
+api-1  | INFO:     Application shutdown complete.
+api-1  | INFO:     Finished server process [215]
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/app/endpoints/search.py'. Reloading...
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-04-10 12:31:26 - INFO: Attempting to load model from /app/models
+api-1  | 2025-04-10 12:31:26 - INFO: Use pytorch device_name: cpu
+api-1  | 2025-04-10 12:31:26 - INFO: Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+api-1  | 2025-04-10 12:31:26 - WARNING: No sentence-transformers model found with name sentence-transformers/all-MiniLM-L6-v2. Creating a new one with mean pooling.
+api-1  | 2025-04-10 12:31:26 - ERROR: Failed to load model: We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.
+api-1  | Checkout your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.
+api-1  | 2025-04-10 12:31:26 - WARNING: Falling back to None and using manual embedding
+api-1  | 2025-04-10 12:31:26 - INFO: Redis connections established successfully
+api-1  | 2025-04-10 12:31:26 - INFO: ExpertRedisIndexManager initialized successfully
+api-1  | 2025-04-10 12:31:26 - INFO: Redis manager initialized successfully
+api-1  | 2025-04-10 12:31:26 - INFO: GeminiLLMManager initialized successfully
+api-1  | 2025-04-10 12:31:26 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-04-10 12:31:26 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | INFO:     Started server process [230]
+api-1  | INFO:     Waiting for application startup.
+api-1  | INFO:     Application startup complete.
+api-1  | INFO:     127.0.0.1:36950 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:32776 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:50668 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:39700 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:48512 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:48884 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:58272 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:51264 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:41780 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:56666 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:48302 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:50718 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:45738 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:51036 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:50608 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:40770 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:39454 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:44098 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:46954 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:50938 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:44966 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:47854 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:44936 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:59352 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:46486 - "GET /health HTTP/1.1" 200 OK
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/app/endpoints/search.py'. Reloading...
+api-1  | INFO:     Shutting down
+api-1  | INFO:     Waiting for application shutdown.
+api-1  | INFO:     Application shutdown complete.
+api-1  | INFO:     Finished server process [230]
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-04-10 12:52:54 - INFO: Attempting to load model from /app/models
+api-1  | 2025-04-10 12:52:54 - INFO: Use pytorch device_name: cpu
+api-1  | 2025-04-10 12:52:54 - INFO: Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+api-1  | 2025-04-10 12:52:54 - WARNING: No sentence-transformers model found with name sentence-transformers/all-MiniLM-L6-v2. Creating a new one with mean pooling.
+api-1  | 2025-04-10 12:52:54 - ERROR: Failed to load model: We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.
+api-1  | Checkout your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.
+api-1  | 2025-04-10 12:52:54 - WARNING: Falling back to None and using manual embedding
+api-1  | 2025-04-10 12:52:54 - INFO: Redis connections established successfully
+api-1  | 2025-04-10 12:52:54 - INFO: ExpertRedisIndexManager initialized successfully
+api-1  | 2025-04-10 12:52:54 - INFO: Redis manager initialized successfully
+api-1  | 2025-04-10 12:52:54 - INFO: GeminiLLMManager initialized successfully
+api-1  | 2025-04-10 12:52:54 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-04-10 12:52:54 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | INFO:     Started server process [387]
+api-1  | INFO:     Waiting for application startup.
+api-1  | INFO:     Application startup complete.
+api-1  | INFO:     127.0.0.1:56076 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:41138 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:44580 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:44976 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:35308 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:55504 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:56890 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:40444 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:55154 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:34236 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:44524 - "GET /health HTTP/1.1" 200 OK
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/app/endpoints/search.py'. Reloading...
+api-1  | INFO:     Shutting down
+api-1  | INFO:     Waiting for application shutdown.
+api-1  | INFO:     Application shutdown complete.
+api-1  | INFO:     Finished server process [387]
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-04-10 13:02:14 - INFO: Attempting to load model from /app/models
+api-1  | 2025-04-10 13:02:14 - INFO: Use pytorch device_name: cpu
+api-1  | 2025-04-10 13:02:14 - INFO: Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+api-1  | 2025-04-10 13:02:14 - WARNING: No sentence-transformers model found with name sentence-transformers/all-MiniLM-L6-v2. Creating a new one with mean pooling.
+api-1  | 2025-04-10 13:02:14 - ERROR: Failed to load model: We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.
+api-1  | Checkout your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.
+api-1  | 2025-04-10 13:02:14 - WARNING: Falling back to None and using manual embedding
+api-1  | 2025-04-10 13:02:14 - INFO: Redis connections established successfully
+api-1  | 2025-04-10 13:02:14 - INFO: ExpertRedisIndexManager initialized successfully
+api-1  | 2025-04-10 13:02:14 - INFO: Redis manager initialized successfully
+api-1  | 2025-04-10 13:02:14 - INFO: GeminiLLMManager initialized successfully
+api-1  | 2025-04-10 13:02:14 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-04-10 13:02:14 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | INFO:     Started server process [462]
+api-1  | INFO:     Waiting for application startup.
+api-1  | INFO:     Application startup complete.
+api-1  | INFO:     127.0.0.1:33644 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:42644 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:46064 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:54612 - "GET /health HTTP/1.1" 200 OK
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/core/expert_search.py'. Reloading...
+api-1  | INFO:     Shutting down
+api-1  | INFO:     Waiting for application shutdown.
+api-1  | INFO:     Application shutdown complete.
+api-1  | INFO:     Finished server process [462]
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-04-10 13:05:45 - INFO: Attempting to load model from /app/models
+api-1  | 2025-04-10 13:05:45 - INFO: Use pytorch device_name: cpu
+api-1  | 2025-04-10 13:05:45 - INFO: Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+api-1  | 2025-04-10 13:05:45 - WARNING: No sentence-transformers model found with name sentence-transformers/all-MiniLM-L6-v2. Creating a new one with mean pooling.
+api-1  | 2025-04-10 13:05:45 - ERROR: Failed to load model: We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.
+api-1  | Checkout your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.
+api-1  | 2025-04-10 13:05:45 - WARNING: Falling back to None and using manual embedding
+api-1  | 2025-04-10 13:05:45 - INFO: Redis connections established successfully
+api-1  | 2025-04-10 13:05:45 - INFO: ExpertRedisIndexManager initialized successfully
+api-1  | 2025-04-10 13:05:45 - INFO: Redis manager initialized successfully
+api-1  | 2025-04-10 13:05:45 - INFO: GeminiLLMManager initialized successfully
+api-1  | 2025-04-10 13:05:45 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-04-10 13:05:45 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | INFO:     Started server process [492]
+api-1  | INFO:     Waiting for application startup.
+api-1  | INFO:     Application startup complete.
+api-1  | INFO:     127.0.0.1:51772 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:44856 - "GET /health HTTP/1.1" 200 OK
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/core/expert_search.py'. Reloading...
+api-1  | INFO:     Shutting down
+api-1  | INFO:     Waiting for application shutdown.
+api-1  | INFO:     Application shutdown complete.
+api-1  | INFO:     Finished server process [492]
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-04-10 13:07:39 - INFO: Attempting to load model from /app/models
+api-1  | 2025-04-10 13:07:39 - INFO: Use pytorch device_name: cpu
+api-1  | 2025-04-10 13:07:39 - INFO: Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+api-1  | 2025-04-10 13:07:39 - WARNING: No sentence-transformers model found with name sentence-transformers/all-MiniLM-L6-v2. Creating a new one with mean pooling.
+api-1  | 2025-04-10 13:07:39 - ERROR: Failed to load model: We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.
+api-1  | Checkout your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.
+api-1  | 2025-04-10 13:07:39 - WARNING: Falling back to None and using manual embedding
+api-1  | 2025-04-10 13:07:39 - INFO: Redis connections established successfully
+api-1  | 2025-04-10 13:07:39 - INFO: ExpertRedisIndexManager initialized successfully
+api-1  | 2025-04-10 13:07:39 - INFO: Redis manager initialized successfully
+api-1  | 2025-04-10 13:07:39 - INFO: GeminiLLMManager initialized successfully
+api-1  | 2025-04-10 13:07:39 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-04-10 13:07:39 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | INFO:     Started server process [515]
+api-1  | INFO:     Waiting for application startup.
+api-1  | INFO:     Application startup complete.
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/core/expert_search.py'. Reloading...
+api-1  | INFO:     Shutting down
+api-1  | INFO:     Waiting for application shutdown.
+api-1  | INFO:     Application shutdown complete.
+api-1  | INFO:     Finished server process [515]
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-04-10 13:08:02 - INFO: Attempting to load model from /app/models
+api-1  | 2025-04-10 13:08:02 - INFO: Use pytorch device_name: cpu
+api-1  | 2025-04-10 13:08:02 - INFO: Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+api-1  | 2025-04-10 13:08:02 - WARNING: No sentence-transformers model found with name sentence-transformers/all-MiniLM-L6-v2. Creating a new one with mean pooling.
+api-1  | 2025-04-10 13:08:02 - ERROR: Failed to load model: We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.
+api-1  | Checkout your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.
+api-1  | 2025-04-10 13:08:02 - WARNING: Falling back to None and using manual embedding
+api-1  | 2025-04-10 13:08:02 - INFO: Redis connections established successfully
+api-1  | 2025-04-10 13:08:02 - INFO: ExpertRedisIndexManager initialized successfully
+api-1  | 2025-04-10 13:08:02 - INFO: Redis manager initialized successfully
+api-1  | 2025-04-10 13:08:02 - INFO: GeminiLLMManager initialized successfully
+api-1  | 2025-04-10 13:08:02 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-04-10 13:08:02 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | INFO:     Started server process [520]
+api-1  | INFO:     Waiting for application startup.
+api-1  | INFO:     Application startup complete.
+api-1  | INFO:     127.0.0.1:35836 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:52806 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:39178 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:57714 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:56046 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:60770 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:56088 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:48582 - "GET /health HTTP/1.1" 200 OK
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/indexing/index_creator.py'. Reloading...
+api-1  | INFO:     Shutting down
+api-1  | INFO:     Waiting for application shutdown.
+api-1  | INFO:     Application shutdown complete.
+api-1  | INFO:     Finished server process [520]
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/core/expert_search.py'. Reloading...
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/core/expert_search.py'. Reloading...
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/core/expert_search.py'. Reloading...
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/core/expert_search.py'. Reloading...
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/core/expert_search.py'. Reloading...
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-04-10 13:14:42 - INFO: Attempting to load model from /app/models
+api-1  | 2025-04-10 13:14:42 - INFO: Use pytorch device_name: cpu
+api-1  | 2025-04-10 13:14:42 - INFO: Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+api-1  | 2025-04-10 13:14:42 - WARNING: No sentence-transformers model found with name sentence-transformers/all-MiniLM-L6-v2. Creating a new one with mean pooling.
+api-1  | 2025-04-10 13:14:42 - ERROR: Failed to load model: We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.
+api-1  | Checkout your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.
+api-1  | 2025-04-10 13:14:42 - WARNING: Falling back to None and using manual embedding
+api-1  | 2025-04-10 13:14:42 - INFO: Redis connections established successfully
+api-1  | 2025-04-10 13:14:42 - INFO: ExpertRedisIndexManager initialized successfully
+api-1  | 2025-04-10 13:14:42 - INFO: Redis manager initialized successfully
+api-1  | 2025-04-10 13:14:42 - INFO: GeminiLLMManager initialized successfully
+api-1  | 2025-04-10 13:14:42 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-04-10 13:14:43 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | INFO:     Started server process [582]
+api-1  | INFO:     Waiting for application startup.
+api-1  | INFO:     Application startup complete.
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/core/expert_search.py'. Reloading...
+api-1  | INFO:     Shutting down
+api-1  | INFO:     Waiting for application shutdown.
+api-1  | INFO:     Application shutdown complete.
+api-1  | INFO:     Finished server process [582]
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-04-10 13:15:03 - INFO: Attempting to load model from /app/models
+api-1  | 2025-04-10 13:15:03 - INFO: Use pytorch device_name: cpu
+api-1  | 2025-04-10 13:15:03 - INFO: Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+api-1  | 2025-04-10 13:15:03 - WARNING: No sentence-transformers model found with name sentence-transformers/all-MiniLM-L6-v2. Creating a new one with mean pooling.
+api-1  | 2025-04-10 13:15:03 - ERROR: Failed to load model: We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.
+api-1  | Checkout your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.
+api-1  | 2025-04-10 13:15:03 - WARNING: Falling back to None and using manual embedding
+api-1  | 2025-04-10 13:15:03 - INFO: Redis connections established successfully
+api-1  | 2025-04-10 13:15:03 - INFO: ExpertRedisIndexManager initialized successfully
+api-1  | 2025-04-10 13:15:03 - INFO: Redis manager initialized successfully
+api-1  | 2025-04-10 13:15:03 - INFO: GeminiLLMManager initialized successfully
+api-1  | 2025-04-10 13:15:03 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-04-10 13:15:03 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | INFO:     Started server process [587]
+api-1  | INFO:     Waiting for application startup.
+api-1  | INFO:     Application startup complete.
+api-1  | INFO:     127.0.0.1:37624 - "GET /health HTTP/1.1" 200 OK
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/core/expert_search.py'. Reloading...
+api-1  | INFO:     Shutting down
+api-1  | INFO:     Waiting for application shutdown.
+api-1  | INFO:     Application shutdown complete.
+api-1  | INFO:     Finished server process [587]
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/core/expert_search.py'. Reloading...
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/core/expert_search.py'. Reloading...
+api-1  | WARNING:  StatReload detected changes in 'ai_services_api/services/search/core/expert_search.py'. Reloading...
+api-1  | /usr/local/lib/python3.11/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+api-1  |   warnings.warn(
+api-1  | 2025-04-10 13:15:52 - INFO: Attempting to load model from /app/models
+api-1  | 2025-04-10 13:15:52 - INFO: Use pytorch device_name: cpu
+api-1  | 2025-04-10 13:15:52 - INFO: Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+api-1  | 2025-04-10 13:15:52 - WARNING: No sentence-transformers model found with name sentence-transformers/all-MiniLM-L6-v2. Creating a new one with mean pooling.
+api-1  | 2025-04-10 13:15:52 - ERROR: Failed to load model: We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.
+api-1  | Checkout your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.
+api-1  | 2025-04-10 13:15:52 - WARNING: Falling back to None and using manual embedding
+api-1  | 2025-04-10 13:15:52 - INFO: Redis connections established successfully
+api-1  | 2025-04-10 13:15:52 - INFO: ExpertRedisIndexManager initialized successfully
+api-1  | 2025-04-10 13:15:52 - INFO: Redis manager initialized successfully
+api-1  | 2025-04-10 13:15:52 - INFO: GeminiLLMManager initialized successfully
+api-1  | 2025-04-10 13:15:53 - INFO: Loading faiss with AVX2 support.
+api-1  | 2025-04-10 13:15:53 - INFO: Successfully loaded faiss with AVX2 support.
+api-1  | INFO:     Started server process [608]
+api-1  | INFO:     Waiting for application startup.
+api-1  | INFO:     Application startup complete.
+api-1  | INFO:     127.0.0.1:54996 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     172.18.0.1:51848 - "GET /search/search/experts/search/nutrition?active_only=true&k=5 HTTP/1.1" 404 Not Found
+api-1  | INFO:     127.0.0.1:43742 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:60864 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:44998 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     172.18.0.1:49432 - "GET /search/search/experts/search/nutrition?active_only=true&k=5 HTTP/1.1" 404 Not Found
+api-1  | INFO:     172.18.0.1:41620 - "GET /docs HTTP/1.1" 200 OK
+api-1  | INFO:     172.18.0.1:41632 - "GET /docs HTTP/1.1" 200 OK
+api-1  | INFO:     172.18.0.1:41642 - "GET /openapi.json HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:32824 - "GET /health HTTP/1.1" 200 OK
+api-1  | 2025-04-10 13:19:30 - INFO: Advanced search request - User: 123
+api-1  | 2025-04-10 13:19:30 - INFO: Constructed effective query: 'nutrition'
+api-1  | 2025-04-10 13:19:30 - INFO: Processing expert search - Query: 'nutrition', User: 123
+api-1  | 2025-04-10 13:19:31 - INFO: Successfully connected to database: aphrc at postgres
+api-1  | 2025-04-10 13:19:31 - INFO: Getting or creating session for user: 123
+api-1  | 2025-04-10 13:19:31 - ERROR: Error creating/retrieving session: there is no unique or exclusion constraint matching the ON CONFLICT specification
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/search/core/expert_search.py", line 132, in get_or_create_session
+api-1  |     cur.execute("""
+api-1  | psycopg2.errors.InvalidColumnReference: there is no unique or exclusion constraint matching the ON CONFLICT specification
+api-1  | 
+api-1  | 2025-04-10 13:19:31 - ERROR: Error creating session: there is no unique or exclusion constraint matching the ON CONFLICT specification
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/search/core/expert_search.py", line 343, in process_expert_search
+api-1  |     session_id = await get_or_create_session(conn, user_id)
+api-1  |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/app/ai_services_api/services/search/core/expert_search.py", line 132, in get_or_create_session
+api-1  |     cur.execute("""
+api-1  | psycopg2.errors.InvalidColumnReference: there is no unique or exclusion constraint matching the ON CONFLICT specification
+api-1  | 
+api-1  | 2025-04-10 13:19:31 - INFO: Starting fetch_suggestions_from_db for query: 'nutrition'
+api-1  | 2025-04-10 13:19:31 - INFO: fetch_suggestions_from_db found 8 results
+api-1  | 2025-04-10 13:19:31 - INFO: Result structure: type=<class 'tuple'>, columns=3
+api-1  | 2025-04-10 13:19:31 - INFO: Sample result: ('resource', 19, 'Effect of mother’s education on child’s nutritional status in the slums of Nairobi')
+api-1  | 2025-04-10 13:19:31 - INFO: Converted suggestion structure: ['type', 'id', 'label']
+api-1  | 2025-04-10 13:19:31 - INFO: Sample suggestion: {'type': 'resource', 'id': 19, 'label': 'Effect of mother’s education on child’s nutritional status in the slums of Nairobi'}
+api-1  | 2025-04-10 13:19:31 - INFO: Received 8 suggestions
+api-1  | 2025-04-10 13:19:31 - INFO: Suggestion types: [<class 'dict'>, <class 'dict'>]
+api-1  | 2025-04-10 13:19:31 - INFO: First suggestion sample: {'type': 'resource', 'id': 19, 'label': 'Effect of mother’s education on child’s nutritional status in the slums of Nairobi'}
+api-1  | 2025-04-10 13:19:31 - INFO: Simple query, using suggestions directly
+api-1  | 2025-04-10 13:19:31 - INFO: Filtered to 0 expert suggestions
+api-1  | 2025-04-10 13:19:31 - INFO: Search found 0 results
+api-1  | 2025-04-10 13:19:31 - INFO: Successfully connected to database: aphrc at postgres
+api-1  | 2025-04-10 13:19:31 - ERROR: Error recording search history in database: relation "user_search_history" does not exist
+api-1  | LINE 2:                     INSERT INTO user_search_history
+api-1  |                                         ^
+api-1  | 
+api-1  | 2025-04-10 13:19:31 - INFO: Results before formatting: 0 items
+api-1  | 2025-04-10 13:19:31 - INFO: Normalizing results to consistent dictionary format
+api-1  | 2025-04-10 13:19:31 - INFO: Formatted 0 results
+api-1  | 2025-04-10 13:19:31 - INFO: Total processing time: 0.117s
+api-1  | INFO:     172.18.0.1:58126 - "GET /search/search/test/experts/search/nutrition?active_only=true&k=5 HTTP/1.1" 200 OK
+api-1  | 2025-04-10 13:19:42 - INFO: Advanced search request - User: 123
+api-1  | 2025-04-10 13:19:42 - INFO: Constructed effective query: 'michael'
+api-1  | 2025-04-10 13:19:42 - INFO: Processing expert search - Query: 'michael', User: 123
+api-1  | 2025-04-10 13:19:42 - INFO: Successfully connected to database: aphrc at postgres
+api-1  | 2025-04-10 13:19:42 - INFO: Getting or creating session for user: 123
+api-1  | 2025-04-10 13:19:42 - ERROR: Error creating/retrieving session: there is no unique or exclusion constraint matching the ON CONFLICT specification
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/search/core/expert_search.py", line 132, in get_or_create_session
+api-1  |     cur.execute("""
+api-1  | psycopg2.errors.InvalidColumnReference: there is no unique or exclusion constraint matching the ON CONFLICT specification
+api-1  | 
+api-1  | 2025-04-10 13:19:42 - ERROR: Error creating session: there is no unique or exclusion constraint matching the ON CONFLICT specification
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/search/core/expert_search.py", line 343, in process_expert_search
+api-1  |     session_id = await get_or_create_session(conn, user_id)
+api-1  |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/app/ai_services_api/services/search/core/expert_search.py", line 132, in get_or_create_session
+api-1  |     cur.execute("""
+api-1  | psycopg2.errors.InvalidColumnReference: there is no unique or exclusion constraint matching the ON CONFLICT specification
+api-1  | 
+api-1  | 2025-04-10 13:19:42 - INFO: Starting fetch_suggestions_from_db for query: 'michael'
+api-1  | 2025-04-10 13:19:42 - INFO: fetch_suggestions_from_db found 0 results
+api-1  | 2025-04-10 13:19:42 - INFO: Received 0 suggestions
+api-1  | 2025-04-10 13:19:42 - INFO: Simple query, using suggestions directly
+api-1  | 2025-04-10 13:19:42 - INFO: Filtered to 0 expert suggestions
+api-1  | 2025-04-10 13:19:42 - INFO: Search found 0 results
+api-1  | 2025-04-10 13:19:42 - INFO: Successfully connected to database: aphrc at postgres
+api-1  | 2025-04-10 13:19:42 - ERROR: Error recording search history in database: relation "user_search_history" does not exist
+api-1  | LINE 2:                     INSERT INTO user_search_history
+api-1  |                                         ^
+api-1  | 
+api-1  | 2025-04-10 13:19:42 - INFO: Results before formatting: 0 items
+api-1  | 2025-04-10 13:19:42 - INFO: Normalizing results to consistent dictionary format
+api-1  | 2025-04-10 13:19:42 - INFO: Formatted 0 results
+api-1  | 2025-04-10 13:19:42 - INFO: Total processing time: 0.048s
+api-1  | INFO:     172.18.0.1:34558 - "GET /search/search/test/experts/search/michael?active_only=true&k=5 HTTP/1.1" 200 OK
+api-1  | 2025-04-10 13:20:00 - INFO: Advanced search request - User: 123
+api-1  | 2025-04-10 13:20:00 - INFO: Constructed effective query: 'sylvia'
+api-1  | 2025-04-10 13:20:00 - INFO: Processing expert search - Query: 'sylvia', User: 123
+api-1  | 2025-04-10 13:20:00 - INFO: Successfully connected to database: aphrc at postgres
+api-1  | 2025-04-10 13:20:00 - INFO: Getting or creating session for user: 123
+api-1  | 2025-04-10 13:20:00 - ERROR: Error creating/retrieving session: there is no unique or exclusion constraint matching the ON CONFLICT specification
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/search/core/expert_search.py", line 132, in get_or_create_session
+api-1  |     cur.execute("""
+api-1  | psycopg2.errors.InvalidColumnReference: there is no unique or exclusion constraint matching the ON CONFLICT specification
+api-1  | 
+api-1  | 2025-04-10 13:20:00 - ERROR: Error creating session: there is no unique or exclusion constraint matching the ON CONFLICT specification
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/search/core/expert_search.py", line 343, in process_expert_search
+api-1  |     session_id = await get_or_create_session(conn, user_id)
+api-1  |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/app/ai_services_api/services/search/core/expert_search.py", line 132, in get_or_create_session
+api-1  |     cur.execute("""
+api-1  | psycopg2.errors.InvalidColumnReference: there is no unique or exclusion constraint matching the ON CONFLICT specification
+api-1  | 
+api-1  | 2025-04-10 13:20:00 - INFO: Starting fetch_suggestions_from_db for query: 'sylvia'
+api-1  | 2025-04-10 13:20:00 - INFO: fetch_suggestions_from_db found 1 results
+api-1  | 2025-04-10 13:20:00 - INFO: Result structure: type=<class 'tuple'>, columns=3
+api-1  | 2025-04-10 13:20:00 - INFO: Sample result: ('expert', 87, 'Sylvia Kimingi - KML Officer')
+api-1  | 2025-04-10 13:20:00 - ERROR: Error enriching expert data: column "contact" does not exist
+api-1  | LINE 4:                     contact, is_active, bio, knowledge_exper...
+api-1  |                             ^
+api-1  | 
+api-1  | 2025-04-10 13:20:00 - INFO: Converted suggestion structure: ['type', 'id', 'label', 'first_name', 'last_name', 'designation', 'theme', 'unit', 'contact', 'is_active', 'bio', 'knowledge_expertise', 'score']
+api-1  | 2025-04-10 13:20:00 - INFO: Sample suggestion: {'type': 'expert', 'id': 87, 'label': 'Sylvia Kimingi - KML Officer', 'first_name': '', 'last_name': '', 'designation': '', 'theme': '', 'unit': '', 'contact': '', 'is_active': True, 'bio': '', 'knowledge_expertise': [], 'score': 0.3}
+api-1  | 2025-04-10 13:20:00 - INFO: Received 1 suggestions
+api-1  | 2025-04-10 13:20:00 - INFO: Suggestion types: [<class 'dict'>]
+api-1  | 2025-04-10 13:20:00 - INFO: First suggestion sample: {'type': 'expert', 'id': 87, 'label': 'Sylvia Kimingi - KML Officer', 'first_name': '', 'last_name': '', 'designation': '', 'theme': '', 'unit': '', 'contact': '', 'is_active': True, 'bio': '', 'knowledge_expertise': [], 'score': 0.3}
+api-1  | 2025-04-10 13:20:00 - INFO: Simple query, using suggestions directly
+api-1  | 2025-04-10 13:20:00 - INFO: Filtered to 1 expert suggestions
+api-1  | 2025-04-10 13:20:00 - INFO: Search found 1 results
+api-1  | 2025-04-10 13:20:00 - INFO: Successfully connected to database: aphrc at postgres
+api-1  | 2025-04-10 13:20:00 - ERROR: Error recording search history in database: relation "user_search_history" does not exist
+api-1  | LINE 2:                     INSERT INTO user_search_history
+api-1  |                                         ^
+api-1  | 
+api-1  | 2025-04-10 13:20:00 - INFO: Results before formatting: 1 items
+api-1  | 2025-04-10 13:20:00 - INFO: Sample result type: <class 'dict'>
+api-1  | 2025-04-10 13:20:00 - INFO: Sample result keys: ['type', 'id', 'label', 'first_name', 'last_name', 'designation', 'theme', 'unit', 'contact', 'is_active', 'bio', 'knowledge_expertise', 'score']
+api-1  | 2025-04-10 13:20:00 - INFO: Normalizing results to consistent dictionary format
+api-1  | 2025-04-10 13:20:00 - INFO: Normalized 1 results
+api-1  | 2025-04-10 13:20:00 - INFO: Sample normalized result: {'id': '87', 'first_name': '', 'last_name': '', 'designation': '', 'theme': '', 'unit': '', 'contact': '', 'is_active': True, 'score': 0.3, 'bio': '', 'knowledge_expertise': []}
+api-1  | 2025-04-10 13:20:00 - INFO: Formatted 1 results
+api-1  | 2025-04-10 13:20:00 - INFO: Recording search analytics - Session: a58b8b6f, User: 123
+api-1  | 2025-04-10 13:20:00 - ERROR: Error recording search: current transaction is aborted, commands ignored until end of transaction block
+api-1  | Traceback (most recent call last):
+api-1  |   File "/app/ai_services_api/services/search/core/expert_search.py", line 1262, in record_search
+api-1  |     cur.execute("""
+api-1  | psycopg2.errors.InFailedSqlTransaction: current transaction is aborted, commands ignored until end of transaction block
+api-1  | 
+api-1  | 2025-04-10 13:20:00 - INFO: Total processing time: 0.067s
+api-1  | INFO:     172.18.0.1:60844 - "GET /search/search/test/experts/search/sylvia?active_only=true&k=5 HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:48910 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:40520 - "GET /health HTTP/1.1" 200 OK
+api-1  | INFO:     127.0.0.1:42120 - "GET /health HTTP/1.1" 200 OK

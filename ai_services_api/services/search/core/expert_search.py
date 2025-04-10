@@ -118,253 +118,235 @@ class AsyncDatabaseConnection:
         return False  # Propagate any exceptions
 
 async def get_or_create_session(conn, user_id: str) -> str:
-    """Create a session for tracking user interactions."""
+    """
+    Create a session for tracking user interactions.
+    Fixed to handle missing constraints and tables.
+
+    Args:
+        conn: Database connection
+        user_id: User identifier
+        
+    Returns:
+        str: Session ID
+    """
     logger.info(f"Getting or creating session for user: {user_id}")
 
     try:
-        # Generate a numeric session ID based on current timestamp
-        session_id = int(str(int(datetime.utcnow().timestamp()))[-8:])
+        # Generate a unique session ID
+        session_id = str(uuid.uuid4())[:8]
         logger.debug(f"Generated session ID: {session_id}")
         
         cur = conn.cursor()
         
-        # Insert or retrieve existing session
+        # First check if the table exists
         cur.execute("""
-            INSERT INTO search_sessions 
-                (session_id, user_id, start_timestamp, is_active)
-            VALUES (%s, %s, CURRENT_TIMESTAMP, true)
-            ON CONFLICT (session_id) DO NOTHING
-            RETURNING session_id
-        """, (session_id, user_id))
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'search_sessions'
+            );
+        """)
         
-        result = cur.fetchone()
-        conn.commit()
+        table_exists = cur.fetchone()[0]
         
-        # If no result, it means the session already existed
-        if not result:
-            # Retrieve the existing session
+        if not table_exists:
+            logger.warning("search_sessions table does not exist, using generated session_id")
+            cur.close()
+            return session_id
+        
+        # Try a simple insert without the ON CONFLICT clause
+        try:
             cur.execute("""
-                SELECT session_id 
-                FROM search_sessions 
-                WHERE session_id = %s AND user_id = %s
+                INSERT INTO search_sessions 
+                    (session_id, user_id, start_timestamp, is_active)
+                VALUES (%s, %s, CURRENT_TIMESTAMP, true)
             """, (session_id, user_id))
-            result = cur.fetchone()
-        
-        logger.debug(f"Session created/retrieved successfully: {session_id}")
-        return str(result[0]) if result else str(session_id)
+            
+            conn.commit()
+            logger.debug(f"Session created successfully with ID: {session_id}")
+            return session_id
+        except Exception as insert_error:
+            logger.error(f"Error inserting session: {insert_error}")
+            conn.rollback()
+            return session_id
     
     except Exception as e:
         logger.error(f"Error creating/retrieving session: {str(e)}", exc_info=True)
-        conn.rollback()
-        raise
+        # Return the generated session_id even if there was an error
+        return session_id
     finally:
         if 'cur' in locals():
             cur.close()
 
-async def record_search(conn, session_id: str, user_id: str, query: str, results: list, response_time: float):
-    """
-    Record search analytics in the database.
-    
-    Args:
-        conn: Database connection
-        session_id: Session identifier
-        user_id: User identifier
-        query: Search query
-        results: Search results
-        response_time: Time taken to perform the search
-    
-    Returns:
-        int: Search record ID or None if recording failed
-    """
-    logger.info(f"Recording search analytics - Session: {session_id}, User: {user_id}")
-    
-    if not conn:
-        logger.error("Cannot record search: No database connection provided")
-        return None
-    
-    cur = conn.cursor()
-    try:
-        # Record search analytics
-        cur.execute("""
-            INSERT INTO search_analytics
-                (search_id, query, user_id, response_time,
-                 result_count, search_type, timestamp)
-            VALUES
-                ((SELECT id FROM search_sessions WHERE session_id = %s),
-                %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-            RETURNING id
-        """, (
-            session_id,
-            query,
-            user_id,
-            response_time,
-            len(results),
-            'expert_search'
-        ))
-        
-        search_id = cur.fetchone()[0]
-        logger.debug(f"Created search analytics record with ID: {search_id}")
-
-        # Record top 5 expert matches
-        for rank, result in enumerate(results[:5], 1):
-            cur.execute("""
-                INSERT INTO expert_search_matches
-                    (search_id, expert_id, rank_position, similarity_score)
-                VALUES (%s, %s, %s, %s)
-            """, (
-                search_id,
-                result.get("id", "unknown"),
-                rank,
-                result.get("score", 0.0)
-            ))
-            logger.debug(f"Recorded match - Expert ID: {result.get('id')}, Rank: {rank}")
-
-        conn.commit()
-        logger.info(f"Successfully recorded all search data for search ID: {search_id}")
-        return search_id
-        
-    except Exception as e:
-        logger.error(f"Error recording search: {str(e)}", exc_info=True)
-        conn.rollback()
-        return None
-    finally:
-        cur.close()
-
-
-async def record_search(conn, session_id: str, user_id: str, query: str, results: list, response_time: float):
-    """
-    Record search analytics in the database.
-    
-    Args:
-        conn: Database connection
-        session_id: Session identifier
-        user_id: User identifier
-        query: Search query
-        results: Search results
-        response_time: Time taken to perform the search
-    
-    Returns:
-        int: Search record ID or None if recording failed
-    """
-    logger.info(f"Recording search analytics - Session: {session_id}, User: {user_id}")
-    
-    if not conn:
-        logger.error("Cannot record search: No database connection provided")
-        return None
-    
-    cur = conn.cursor()
-    try:
-        # Record search analytics
-        cur.execute("""
-            INSERT INTO search_analytics
-                (search_id, query, user_id, response_time,
-                 result_count, search_type, timestamp)
-            VALUES
-                ((SELECT id FROM search_sessions WHERE session_id = %s),
-                %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-            RETURNING id
-        """, (
-            session_id,
-            query,
-            user_id,
-            response_time,
-            len(results),
-            'expert_search'
-        ))
-        
-        search_id = cur.fetchone()[0]
-        logger.debug(f"Created search analytics record with ID: {search_id}")
-
-        # Record top 5 expert matches
-        for rank, result in enumerate(results[:5], 1):
-            cur.execute("""
-                INSERT INTO expert_search_matches
-                    (search_id, expert_id, rank_position, similarity_score)
-                VALUES (%s, %s, %s, %s)
-            """, (
-                search_id,
-                result.get("id", "unknown"),
-                rank,
-                result.get("score", 0.0)
-            ))
-            logger.debug(f"Recorded match - Expert ID: {result.get('id')}, Rank: {rank}")
-
-        conn.commit()
-        logger.info(f"Successfully recorded all search data for search ID: {search_id}")
-        return search_id
-        
-    except Exception as e:
-        logger.error(f"Error recording search: {str(e)}", exc_info=True)
-        conn.rollback()
-        return None
-    finally:
-        cur.close()
-
-
-# search/utils.py
-
-import psycopg2  # or your DB connection library
-from typing import List, Dict
-
 def fetch_suggestions_from_db(conn, search_input: str) -> List[Dict]:
     """
     Queries resources and experts tables for matches based on search_input.
-    This replaces reliance on history when user starts typing.
+    Fixed to handle missing columns and properly extract data from labels.
 
     Args:
-        db_conn: Active database connection
-        search_input (str): The user’s typed search string
+        conn: Active database connection
+        search_input (str): The user's typed search string
 
     Returns:
         List[Dict]: Combined list of matching suggestions
     """
+    logger.info(f"Starting fetch_suggestions_from_db for query: '{search_input}'")
+    
     curr = conn.cursor()
 
+    # First check what columns actually exist in the experts_expert table
+    try:
+        curr.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'experts_expert'
+        """)
+        available_columns = [row[0] for row in curr.fetchall()]
+        logger.info(f"Available columns in experts_expert: {available_columns}")
+    except Exception as e:
+        logger.error(f"Error checking table columns: {e}")
+        available_columns = ['id', 'first_name', 'last_name', 'designation']  # Assume minimal set
+
+    # Build a basic query that works with just the essential columns
     query = """
-    SELECT 'resource' AS type, r.id, r.title AS label
-    FROM resources_resource r
-    WHERE 
-        r.title ILIKE %s OR
-        r.abstract ILIKE %s OR
-        r.summary ILIKE %s OR
-        r.description ILIKE %s
-
-    UNION
-
     SELECT 'expert' AS type, e.id, 
-           CONCAT(e.first_name, ' ', e.last_name, ' - ', COALESCE(e.designation, '')) AS label
+           CONCAT(
+               COALESCE(e.first_name, ''), 
+               ' ', 
+               COALESCE(e.last_name, ''),
+               CASE WHEN e.designation IS NOT NULL THEN CONCAT(' - ', e.designation) ELSE '' END
+           ) AS label
     FROM experts_expert e
     WHERE 
         e.first_name ILIKE %s OR
-        e.last_name ILIKE %s OR
-        e.designation ILIKE %s OR
-        e.bio ILIKE %s
+        e.last_name ILIKE %s
+    """
+    
+    # Add designation to WHERE clause if it exists
+    if 'designation' in available_columns:
+        query += " OR e.designation ILIKE %s"
+    
+    # Add bio to WHERE clause if it exists
+    if 'bio' in available_columns:
+        query += " OR e.bio ILIKE %s"
+        
+    query += """
+    UNION
 
+    SELECT 'resource' AS type, r.id, r.title AS label
+    FROM resources_resource r
+    WHERE 
+        r.title ILIKE %s
+    """
+    
+    # Add other resource fields if they exist
+    try:
+        curr.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'resources_resource'
+        """)
+        resource_columns = [row[0] for row in curr.fetchall()]
+        
+        if 'abstract' in resource_columns:
+            query += " OR r.abstract ILIKE %s"
+        if 'summary' in resource_columns:
+            query += " OR r.summary ILIKE %s"
+        if 'description' in resource_columns:
+            query += " OR r.description ILIKE %s"
+            
+    except Exception as e:
+        logger.error(f"Error checking resource columns: {e}")
+        # Continue with basic query
+    
+    query += """
     ORDER BY label ASC
     LIMIT 15;
     """
 
+    # Prepare the query parameters based on which columns exist
+    params = []
     like_query = f"%{search_input}%"
-    curr.execute(query, [like_query] * 8)
-    results = curr.fetchall()
-
-    return [{"type": row[0], "id": row[1], "label": row[2]} for row in results]
-
-
-
-import asyncpg
-import logging
-from datetime import datetime
-
-logger = logging.getLogger(__name__)
-
-async def get_connection_pool():
-    """Get the async connection pool."""
-    # Assuming you have a method to fetch connection params.
-    params = get_connection_params()
-    return await asyncpg.create_pool(**params)
-
-
+    
+    # Expert params
+    params.extend([like_query, like_query])  # first_name, last_name
+    if 'designation' in available_columns:
+        params.append(like_query)
+    if 'bio' in available_columns:
+        params.append(like_query)
+    
+    # Resource params
+    params.append(like_query)  # title
+    if 'abstract' in resource_columns:
+        params.append(like_query)
+    if 'summary' in resource_columns:
+        params.append(like_query)
+    if 'description' in resource_columns:
+        params.append(like_query)
+    
+    try:
+        curr.execute(query, params)
+        results = curr.fetchall()
+        logger.info(f"fetch_suggestions_from_db found {len(results)} results")
+        
+        if results:
+            logger.info(f"Result structure: type={type(results[0])}, columns={len(results[0])}")
+            logger.info(f"Sample result: {results[0]}")
+    except Exception as query_error:
+        logger.error(f"Error executing suggestion query: {query_error}")
+        return []
+    
+    # Convert results to properly structured dictionaries with extracted name data
+    suggestions = []
+    for row in results:
+        suggestion_type, suggestion_id, label = row
+        
+        suggestion = {
+            "type": suggestion_type,
+            "id": suggestion_id,
+            "label": label
+        }
+        
+        # If this is an expert suggestion, extract data from the label
+        if suggestion_type == 'expert':
+            # Parse the label to extract first_name, last_name, and designation
+            # Label format: "First Last - Designation"
+            label_parts = label.split('-')
+            name = label_parts[0].strip()
+            name_parts = name.split()
+            
+            first_name = ""
+            last_name = ""
+            
+            if len(name_parts) == 1:
+                first_name = name_parts[0]
+            elif len(name_parts) >= 2:
+                first_name = name_parts[0]
+                last_name = ' '.join(name_parts[1:])
+                
+            designation = label_parts[1].strip() if len(label_parts) > 1 else ""
+            
+            # Add the extracted data to the suggestion
+            suggestion.update({
+                "first_name": first_name,
+                "last_name": last_name,
+                "designation": designation,
+                "theme": "",  # Default empty values for required fields
+                "unit": "",
+                "contact": "",
+                "is_active": True,
+                "bio": "",
+                "knowledge_expertise": [],
+                "score": 0.9  # High score for direct matches
+            })
+        
+        suggestions.append(suggestion)
+    
+    # Log final suggestion structure
+    if suggestions:
+        logger.info(f"Converted suggestion structure: {list(suggestions[0].keys())}")
+        logger.info(f"Sample suggestion: {suggestions[0]}")
+    
+    return suggestions
 
 async def process_expert_search(query: str, user_id: str, active_only: bool = True, k: int = 5) -> SearchResponse:
     """
@@ -409,12 +391,17 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
                         lambda: fetch_suggestions_from_db(conn, query)
                     )
                     
+                    # Filter suggestions to only keep experts
+                    expert_suggestions = [s for s in suggestions if s.get("type") == "expert"]
+                    
                     # If query is complex, perform full search for experts and resources
                     if is_complex_query:
                         search_manager = ExpertSearchIndexManager()
-                        results = search_manager.search_experts(query, k=k, active_only=active_only)
+                        search_results = search_manager.search_experts(query, k=k, active_only=active_only)
+                        results = search_results
                     else:
-                        results = suggestions  # For simple queries, provide suggestions immediately
+                        # For simple queries, use the suggestions
+                        results = expert_suggestions
 
                 logger.info(f"Search found {len(results)} results")
                 
@@ -431,23 +418,65 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
             
             response_time = (datetime.utcnow() - start_time).total_seconds()
             
-            # Format results - handle empty results gracefully
+            # Ensure all results are in a consistent dictionary format
+            normalized_results = []
+            for result in results:
+                if isinstance(result, dict):
+                    # Ensure all required fields exist in the dictionary
+                    normalized_result = {
+                        "id": str(result.get("id", "unknown")),
+                        "first_name": result.get("first_name", ""),
+                        "last_name": result.get("last_name", ""),
+                        "designation": result.get("designation", ""),
+                        "theme": result.get("theme", ""),
+                        "unit": result.get("unit", ""),
+                        "contact": result.get("contact", ""),
+                        "is_active": result.get("is_active", True),
+                        "score": result.get("score", 1.0),
+                        "bio": result.get("bio", ""),
+                        "knowledge_expertise": result.get("knowledge_expertise", [])
+                    }
+                    normalized_results.append(normalized_result)
+                elif isinstance(result, (list, tuple)):
+                    # Convert tuple/list to dictionary with proper field names
+                    # This assumes a specific order of fields in the tuple
+                    try:
+                        normalized_result = {
+                            "id": str(result[1]),  # Assuming ID is at index 1
+                            "first_name": "",  # Default values for missing fields
+                            "last_name": "",
+                            "designation": "",
+                            "theme": "",
+                            "unit": "",
+                            "contact": "",
+                            "is_active": True,
+                            "score": 1.0,
+                            "bio": "",
+                            "knowledge_expertise": []
+                        }
+                        normalized_results.append(normalized_result)
+                    except (IndexError, TypeError) as e:
+                        logger.error(f"Error normalizing result tuple/list: {e}", exc_info=True)
+                else:
+                    logger.warning(f"Skipping result of unexpected type: {type(result)}")
+            
+            # Format normalized results into ExpertSearchResult objects
             formatted_results = []
             try:
                 formatted_results = [
                     ExpertSearchResult(
-                        id=str(result.get('id', 'unknown')) if isinstance(result, dict) else result[1],
-                        first_name=result.get('first_name', '') if isinstance(result, dict) else '',
-                        last_name=result.get('last_name', '') if isinstance(result, dict) else '',
-                        designation=result.get('designation', '') if isinstance(result, dict) else '',
-                        theme=result.get('theme', '') if isinstance(result, dict) else '',
-                        unit=result.get('unit', '') if isinstance(result, dict) else '',
-                        contact=result.get('contact', '') if isinstance(result, dict) else '',
-                        is_active=result.get('is_active', True) if isinstance(result, dict) else True,
-                        score=result.get('score') if isinstance(result, dict) else 0.0,
-                        bio=result.get('bio', '') if isinstance(result, dict) else '',
-                        knowledge_expertise=result.get('knowledge_expertise', []) if isinstance(result, dict) else []
-                    ) for result in results
+                        id=result["id"],
+                        first_name=result["first_name"],
+                        last_name=result["last_name"],
+                        designation=result["designation"],
+                        theme=result["theme"],
+                        unit=result["unit"],
+                        contact=result["contact"],
+                        is_active=result["is_active"],
+                        score=result["score"],
+                        bio=result["bio"],
+                        knowledge_expertise=result["knowledge_expertise"]
+                    ) for result in normalized_results
                 ]
             except Exception as format_error:
                 logger.error(f"Result formatting error: {format_error}", exc_info=True)
@@ -455,7 +484,7 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
             # Record search analytics directly using the current connection
             if results:
                 try:
-                    await record_search(conn, session_id, user_id, query, results, response_time)
+                    await record_search(conn, session_id, user_id, query, normalized_results, response_time)
                 except Exception as record_error:
                     logger.error(f"Error recording search: {record_error}", exc_info=True)
             
@@ -486,6 +515,164 @@ async def process_expert_search(query: str, user_id: str, active_only: bool = Tr
             session_id=session_id,
             refinements={}
         )
+
+async def record_search(conn, session_id: str, user_id: str, query: str, results: list, response_time: float):
+    """
+    Record search analytics in the database.
+    
+    Args:
+        conn: Database connection
+        session_id: Session identifier
+        user_id: User identifier
+        query: Search query
+        results: Search results
+        response_time: Time taken to perform the search
+    
+    Returns:
+        int: Search record ID or None if recording failed
+    """
+    logger.info(f"Recording search analytics - Session: {session_id}, User: {user_id}")
+    
+    if not conn:
+        logger.error("Cannot record search: No database connection provided")
+        return None
+    
+    cur = conn.cursor()
+    try:
+        # Record search analytics
+        cur.execute("""
+            INSERT INTO search_analytics
+                (search_id, query, user_id, response_time,
+                 result_count, search_type, timestamp)
+            VALUES
+                ((SELECT id FROM search_sessions WHERE session_id = %s),
+                %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            RETURNING id
+        """, (
+            session_id,
+            query,
+            user_id,
+            response_time,
+            len(results),
+            'expert_search'
+        ))
+        
+        search_id = cur.fetchone()[0]
+        logger.debug(f"Created search analytics record with ID: {search_id}")
+
+        # Record top 5 expert matches
+        for rank, result in enumerate(results[:5], 1):
+            cur.execute("""
+                INSERT INTO expert_search_matches
+                    (search_id, expert_id, rank_position, similarity_score)
+                VALUES (%s, %s, %s, %s)
+            """, (
+                search_id,
+                result.get("id", "unknown"),
+                rank,
+                result.get("score", 0.0)
+            ))
+            logger.debug(f"Recorded match - Expert ID: {result.get('id')}, Rank: {rank}")
+
+        conn.commit()
+        logger.info(f"Successfully recorded all search data for search ID: {search_id}")
+        return search_id
+        
+    except Exception as e:
+        logger.error(f"Error recording search: {str(e)}", exc_info=True)
+        conn.rollback()
+        return None
+    finally:
+        cur.close()
+
+
+async def record_search(conn, session_id: str, user_id: str, query: str, results: list, response_time: float):
+    """
+    Record search analytics in the database.
+    
+    Args:
+        conn: Database connection
+        session_id: Session identifier
+        user_id: User identifier
+        query: Search query
+        results: Search results
+        response_time: Time taken to perform the search
+    
+    Returns:
+        int: Search record ID or None if recording failed
+    """
+    logger.info(f"Recording search analytics - Session: {session_id}, User: {user_id}")
+    
+    if not conn:
+        logger.error("Cannot record search: No database connection provided")
+        return None
+    
+    cur = conn.cursor()
+    try:
+        # Record search analytics
+        cur.execute("""
+            INSERT INTO search_analytics
+                (search_id, query, user_id, response_time,
+                 result_count, search_type, timestamp)
+            VALUES
+                ((SELECT id FROM search_sessions WHERE session_id = %s),
+                %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            RETURNING id
+        """, (
+            session_id,
+            query,
+            user_id,
+            response_time,
+            len(results),
+            'expert_search'
+        ))
+        
+        search_id = cur.fetchone()[0]
+        logger.debug(f"Created search analytics record with ID: {search_id}")
+
+        # Record top 5 expert matches
+        for rank, result in enumerate(results[:5], 1):
+            cur.execute("""
+                INSERT INTO expert_search_matches
+                    (search_id, expert_id, rank_position, similarity_score)
+                VALUES (%s, %s, %s, %s)
+            """, (
+                search_id,
+                result.get("id", "unknown"),
+                rank,
+                result.get("score", 0.0)
+            ))
+            logger.debug(f"Recorded match - Expert ID: {result.get('id')}, Rank: {rank}")
+
+        conn.commit()
+        logger.info(f"Successfully recorded all search data for search ID: {search_id}")
+        return search_id
+        
+    except Exception as e:
+        logger.error(f"Error recording search: {str(e)}", exc_info=True)
+        conn.rollback()
+        return None
+    finally:
+        cur.close()
+
+
+
+
+
+import asyncpg
+import logging
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+async def get_connection_pool():
+    """Get the async connection pool."""
+    # Assuming you have a method to fetch connection params.
+    params = get_connection_params()
+    return await asyncpg.create_pool(**params)
+
+
+
 
 
 # Optimized version of process_expert_name_search
@@ -786,6 +973,214 @@ async def _generate_refinements(query: str, results: List[Dict], search_manager)
         }
 # Properly implement background task with safe_background_task
 
+async def record_search(conn, session_id: str, user_id: str, query: str, results: List[Dict], response_time: float):
+    """
+    Record search analytics in the database.
+    Fixed to handle missing tables and transaction failures.
+    
+    Args:
+        conn: Database connection
+        session_id: Session identifier
+        user_id: User identifier
+        query: Search query
+        results: Search results
+        response_time: Time taken to perform the search
+    
+    Returns:
+        int: Search record ID or None if recording failed
+    """
+    logger.info(f"Recording search analytics - Session: {session_id}, User: {user_id}")
+    
+    if not conn:
+        logger.error("Cannot record search: No database connection provided")
+        return None
+    
+    cur = None
+    try:
+        # First check if tables exist
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'search_analytics'
+            );
+        """)
+        
+        analytics_table_exists = cur.fetchone()[0]
+        
+        if not analytics_table_exists:
+            logger.warning("search_analytics table does not exist, skipping analytics recording")
+            return None
+        
+        # Get search_id if search_sessions table exists
+        search_id = None
+        try:
+            cur.execute("""
+                SELECT id FROM search_sessions WHERE session_id = %s
+            """, (session_id,))
+            
+            row = cur.fetchone()
+            if row:
+                search_id = row[0]
+            else:
+                # Use session_id as fallback
+                search_id = session_id
+                
+        except Exception as session_error:
+            logger.error(f"Error getting session ID: {session_error}")
+            search_id = session_id  # Fallback to using session_id directly
+            conn.rollback()  # Rollback failed transaction
+            
+            # Get a fresh cursor after rollback
+            cur.close()
+            cur = conn.cursor()
+        
+        # Record search analytics
+        try:
+            # Simplified insert that doesn't rely on search_sessions table
+            cur.execute("""
+                INSERT INTO search_analytics
+                    (query, user_id, response_time,
+                     result_count, search_type, timestamp)
+                VALUES
+                    (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                RETURNING id
+            """, (
+                query,
+                user_id,
+                response_time,
+                len(results),
+                'expert_search'
+            ))
+            
+            search_id = cur.fetchone()[0]
+            logger.debug(f"Created search analytics record with ID: {search_id}")
+        except Exception as analytics_error:
+            logger.error(f"Error recording search analytics: {analytics_error}")
+            conn.rollback()
+            return None
+
+        # Check if matches table exists before trying to record matches
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'expert_search_matches'
+            );
+        """)
+        
+        matches_table_exists = cur.fetchone()[0]
+        
+        if matches_table_exists and search_id:
+            try:
+                # Record top 5 expert matches
+                for rank, result in enumerate(results[:5], 1):
+                    # Ensure we have a valid ID even if it's a string
+                    expert_id = str(result.get("id", "unknown"))
+                    score = float(result.get("score", 0.0))
+                    
+                    cur.execute("""
+                        INSERT INTO expert_search_matches
+                            (search_id, expert_id, rank_position, similarity_score)
+                        VALUES (%s, %s, %s, %s)
+                    """, (
+                        search_id,
+                        expert_id,
+                        rank,
+                        score
+                    ))
+                    logger.debug(f"Recorded match - Expert ID: {expert_id}, Rank: {rank}")
+            except Exception as matches_error:
+                logger.error(f"Error recording search matches: {matches_error}")
+                conn.rollback()
+                return search_id  # Still return search_id since analytics were recorded
+
+        conn.commit()
+        logger.info(f"Successfully recorded search data for search ID: {search_id}")
+        return search_id
+        
+    except Exception as e:
+        logger.error(f"Error recording search: {str(e)}", exc_info=True)
+        if hasattr(conn, 'rollback'):
+            conn.rollback()
+        return None
+    finally:
+        if cur:
+            cur.close()
+
+async def _record_search_history_task(conn, user_id: str, query: str, result_count: int):
+    """
+    Record search in user history - implementation for safe_background_task.
+    Modified to handle missing tables.
+    
+    Args:
+        conn: Database connection (provided by safe_background_task)
+        user_id: User identifier
+        query: The search query
+        result_count: Number of results found
+    """
+    try:
+        # Connect to Redis for search history (this part should work)
+        redis_client = redis.Redis(
+            host=os.getenv('REDIS_HOST', 'localhost'),
+            port=int(os.getenv('REDIS_PORT', 6379)),
+            db=int(os.getenv('REDIS_HISTORY_DB', 3)),
+            decode_responses=True
+        )
+        
+        # Create history entry
+        history_entry = {
+            "query": query,
+            "timestamp": datetime.utcnow().isoformat(),
+            "result_count": result_count
+        }
+        
+        # Add to user-specific history list with limit
+        history_key = f"search_history:{user_id}"
+        redis_client.lpush(history_key, json.dumps(history_entry))
+        redis_client.ltrim(history_key, 0, 99)  # Keep most recent 100 searches
+        redis_client.expire(history_key, 86400 * 30)  # 30-day expiry
+        
+        # Also add to global search history for trending analytics
+        popular_key = "popular_searches"
+        redis_client.zincrby(popular_key, 1, query.lower())
+        redis_client.expire(popular_key, 86400 * 7)  # 7-day expiry for popular searches
+        
+        # Check if database table exists before trying to use it
+        if conn:
+            try:
+                cur = conn.cursor()
+                
+                # Check if the table exists
+                cur.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_name = 'user_search_history'
+                    );
+                """)
+                
+                table_exists = cur.fetchone()[0]
+                
+                if table_exists:
+                    cur.execute("""
+                        INSERT INTO user_search_history
+                            (user_id, query, result_count, timestamp)
+                        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                    """, (user_id, query, result_count))
+                    conn.commit()
+                else:
+                    logger.warning("user_search_history table does not exist, skipping DB recording")
+                
+                cur.close()
+            except Exception as db_error:
+                logger.error(f"Error recording search history in database: {db_error}")
+                if hasattr(conn, 'rollback'):
+                    conn.rollback()
+        
+    except Exception as e:
+        logger.error(f"Error recording search history: {e}")
+
+
 # 
 
 # Wrapper function to launch the background task with proper connection handling
@@ -913,221 +1308,7 @@ async def update_trending_suggestions(partial_query: str, selected_suggestion: s
     except Exception as e:
         logger.error(f"Failed to start trending suggestions update task: {e}")
 
-# Similar pattern for recording search history
-async def _record_search_history_task(conn, user_id: str, query: str, result_count: int):
-    """
-    Record search in user history - implementation for safe_background_task.
-    
-    Args:
-        conn: Database connection (provided by safe_background_task)
-        user_id: User identifier
-        query: The search query
-        result_count: Number of results found
-    """
-    try:
-        # Connect to Redis for search history
-        redis_client = redis.Redis(
-            host=os.getenv('REDIS_HOST', 'localhost'),
-            port=int(os.getenv('REDIS_PORT', 6379)),
-            db=int(os.getenv('REDIS_HISTORY_DB', 3)),
-            decode_responses=True
-        )
-        
-        # Create history entry
-        history_entry = {
-            "query": query,
-            "timestamp": datetime.utcnow().isoformat(),
-            "result_count": result_count
-        }
-        
-        # Add to user-specific history list with limit
-        history_key = f"search_history:{user_id}"
-        redis_client.lpush(history_key, json.dumps(history_entry))
-        redis_client.ltrim(history_key, 0, 99)  # Keep most recent 100 searches
-        redis_client.expire(history_key, 86400 * 30)  # 30-day expiry
-        
-        # Also add to global search history for trending analytics
-        popular_key = "popular_searches"
-        redis_client.zincrby(popular_key, 1, query.lower())
-        redis_client.expire(popular_key, 86400 * 7)  # 7-day expiry for popular searches
-        
-        # Also record in the database if connection is provided
-        if conn:
-            try:
-                cur = conn.cursor()
-                cur.execute("""
-                    INSERT INTO user_search_history
-                        (user_id, query, result_count, timestamp)
-                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
-                """, (user_id, query, result_count))
-                conn.commit()
-                cur.close()
-            except Exception as db_error:
-                logger.error(f"Error recording search history in database: {db_error}")
-                conn.rollback()
-        
-    except Exception as e:
-        logger.error(f"Error recording search history: {e}")
-
-# Wrapper function for search history recording
-async def record_search_history(user_id: str, query: str, result_count: int):
-    """
-    Record search in user history - wrapper that uses safe_background_task.
-    
-    Args:
-        user_id: User identifier
-        query: The search query
-        result_count: Number of results found
-    """
-    try:
-        await safe_background_task(_record_search_history_task, user_id, query, result_count)
-    except Exception as e:
-        logger.error(f"Failed to start search history recording task: {e}")
-
-# Modified version of _record_search_history to work with safe_background_task
-async def _record_search_history_task(conn, user_id: str, query: str, result_count: int):
-    """
-    Record search in user history - implementation for safe_background_task.
-    
-    Args:
-        conn: Database connection (provided by safe_background_task)
-        user_id: User identifier
-        query: The search query
-        result_count: Number of results found
-    """
-    try:
-        # Connect to Redis for search history
-        redis_client = redis.Redis(
-            host=os.getenv('REDIS_HOST', 'localhost'),
-            port=int(os.getenv('REDIS_PORT', 6379)),
-            db=int(os.getenv('REDIS_HISTORY_DB', 3)),
-            decode_responses=True
-        )
-        
-        # Create history entry
-        history_entry = {
-            "query": query,
-            "timestamp": datetime.utcnow().isoformat(),
-            "result_count": result_count
-        }
-        
-        # Add to user-specific history list with limit
-        history_key = f"search_history:{user_id}"
-        redis_client.lpush(history_key, json.dumps(history_entry))
-        redis_client.ltrim(history_key, 0, 99)  # Keep most recent 100 searches
-        redis_client.expire(history_key, 86400 * 30)  # 30-day expiry
-        
-        # Also add to global search history for trending analytics
-        popular_key = "popular_searches"
-        redis_client.zincrby(popular_key, 1, query.lower())
-        redis_client.expire(popular_key, 86400 * 7)  # 7-day expiry for popular searches
-        
-        # Also record in the database if connection is provided
-        if conn:
-            try:
-                cur = conn.cursor()
-                cur.execute("""
-                    INSERT INTO user_search_history
-                        (user_id, query, result_count, timestamp)
-                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
-                """, (user_id, query, result_count))
-                conn.commit()
-                cur.close()
-            except Exception as db_error:
-                logger.error(f"Error recording search history in database: {db_error}")
-                if hasattr(conn, 'rollback'):
-                    conn.rollback()
-        
-    except Exception as e:
-        logger.error(f"Error recording search history: {e}")
-
-# Wrapper function for _record_search_history with safe_background_task
-async def record_search_history(user_id: str, query: str, result_count: int):
-    """
-    Record search in user history - wrapper that uses safe_background_task.
-    
-    Args:
-        user_id: User identifier
-        query: The search query
-        result_count: Number of results found
-    """
-    try:
-        await safe_background_task(_record_search_history_task, user_id, query, result_count)
-    except Exception as e:
-        logger.error(f"Failed to start search history recording task: {e}")
-
-# Modified version of record_search to use DatabaseConnection
-async def record_search(conn, session_id: str, user_id: str, query: str, results: List[Dict], response_time: float):
-    """
-    Record search analytics in the database.
-    Uses the provided connection but with improved error handling.
-    
-    Args:
-        conn: Database connection
-        session_id: Session identifier
-        user_id: User identifier
-        query: The search query
-        results: Search results
-        response_time: Time taken to perform the search
-    """
-    logger.info(f"Recording search analytics - Session: {session_id}, User: {user_id}")
-    logger.debug(f"Recording search for query: {query} with {len(results)} results")
-    
-    if not conn:
-        logger.error("Cannot record search: No database connection provided")
-        return None
-    
-    cur = conn.cursor()
-    try:
-        # Record search analytics
-        cur.execute("""
-            INSERT INTO search_analytics
-                (search_id, query, user_id, response_time,
-                 result_count, search_type, timestamp)
-            VALUES
-                ((SELECT id FROM search_sessions WHERE session_id = %s),
-                %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-            RETURNING id
-        """, (
-            session_id,
-            query,
-            user_id,
-            response_time,
-            len(results),
-            'expert_search'
-        ))
-        
-        search_id = cur.fetchone()[0]
-        logger.debug(f"Created search analytics record with ID: {search_id}")
-
-        # Record top 5 expert matches
-        logger.debug(f"Recording top 5 matches from {len(results)} total results")
-        for rank, result in enumerate(results[:5], 1):
-            cur.execute("""
-                INSERT INTO expert_search_matches
-                    (search_id, expert_id, rank_position, similarity_score)
-                VALUES (%s, %s, %s, %s)
-            """, (
-                search_id,
-                result["id"],
-                rank,
-                result.get("score", 0.0)
-            ))
-            logger.debug(f"Recorded match - Expert ID: {result['id']}, Rank: {rank}")
-
-        conn.commit()
-        logger.info(f"Successfully recorded all search data for search ID: {search_id}")
-        return search_id
-        
-    except Exception as e:
-        logger.error(f"Error recording search: {str(e)}", exc_info=True)
-        logger.debug(f"Search recording failed: {str(e)}")
-        if hasattr(conn, 'rollback'):
-            conn.rollback()
-        return None
-    finally:
-        cur.close()
-        # Note: We don't close the connection here as it was passed in
+# S
 
 # Modified version of record_search to be used as a background task
 async def _record_search_background(conn, session_id: str, user_id: str, query: str, results: List[Dict], response_time: float):
