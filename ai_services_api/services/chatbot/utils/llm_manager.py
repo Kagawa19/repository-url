@@ -485,13 +485,13 @@ class GeminiLLMManager:
 
     def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
         """
-        Format expert information into a readable context for the LLM.
+        Format expert information into a readable bulleted list context for the LLM.
         
         Args:
             experts: List of expert dictionaries
             
         Returns:
-            Formatted context string
+            Formatted context string with bulleted lists
         """
         if not experts:
             return "No expert information available."
@@ -500,45 +500,47 @@ class GeminiLLMManager:
         
         for idx, expert in enumerate(experts):
             full_name = f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip()
-            position = expert.get('position', 'Researcher')
-            department = expert.get('department', '')
             
-            expert_info = [f"Expert {idx+1}: {full_name}"]
+            # Create expert entry with name in bold
+            expert_info = [f"**{full_name}**"]
             
-            if position:
-                expert_info.append(f"Position: {position}")
-            
-            if department:
-                expert_info.append(f"Department: {department}")
-            
-            # Add expertise
+            # Add expertise areas as bullet points
             expertise = expert.get('expertise', [])
-            if expertise:
-                if isinstance(expertise, list):
-                    expert_info.append(f"Areas of expertise: {', '.join(expertise[:5])}")
-                else:
-                    expert_info.append(f"Areas of expertise: {expertise}")
+            if expertise and isinstance(expertise, list):
+                for area in expertise:
+                    expert_info.append(f"* {area}")
+            elif expertise:
+                expert_info.append(f"* {expertise}")
             
-            # Add bio snippet
-            bio = expert.get('bio', '')
-            if bio:
-                # Truncate long bios
-                if len(bio) > 300:
-                    bio = bio[:297] + "..."
-                expert_info.append(f"Bio: {bio}")
+            # Add research interests as bullet points if available
+            research_interests = expert.get('research_interests', [])
+            if research_interests and isinstance(research_interests, list):
+                for interest in research_interests:
+                    expert_info.append(f"* {interest}")
             
-            # Add publications if available
-            publications = expert.get('publications', [])
-            if publications:
-                pub_titles = [p.get('title', 'Untitled') for p in publications[:2]]
-                expert_info.append(f"Notable publications: {'; '.join(pub_titles)}")
+            # Add position and department as bullet points if available
+            position = expert.get('position', '')
+            if position:
+                expert_info.append(f"* Position: {position}")
                 
-            # Add contact if available
+            department = expert.get('department', '')
+            if department:
+                expert_info.append(f"* Department: {department}")
+            
+            # Add contact info as a bullet point if available
             email = expert.get('email', '')
             if email:
-                expert_info.append(f"Contact: {email}")
-                
-            # Combine all information about this expert
+                expert_info.append(f"* Contact: {email}")
+            
+            # Add publications as bullet points if available
+            publications = expert.get('publications', [])
+            if publications:
+                expert_info.append("* Notable publications:")
+                for pub in publications[:2]:  # Limit to 2 publications
+                    pub_title = pub.get('title', 'Untitled')
+                    expert_info.append(f"  * {pub_title}")
+            
+            # Combine all information about this expert with proper line breaks
             context_parts.append("\n".join(expert_info))
         
         return "\n\n".join(context_parts)
