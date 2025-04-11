@@ -54,7 +54,7 @@ class ExpertRedisIndexManager:
 
         for attempt in range(max_retries):
             try:
-                self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+                self.redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
                 
                 # Initialize Redis connections
                 self.redis_text = redis.StrictRedis.from_url(
