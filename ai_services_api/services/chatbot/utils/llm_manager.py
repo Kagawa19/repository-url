@@ -1695,6 +1695,66 @@ class GeminiLLMManager:
             logger.error(f"Error updating expert-resource links: {e}")
             return False
 
+    def matches_query(publication: Dict, query: str) -> bool:
+        """
+        Check if a publication matches the given query.
+        
+        Args:
+            publication (Dict): Dictionary containing publication metadata from Redis
+            query (str): Search query string
+        
+        Returns:
+            bool: True if publication matches query, False otherwise
+        """
+        if not query:
+            return True  # Return all publications if no query specified
+        
+        # Convert query to lowercase for case-insensitive matching
+        query = query.lower().strip()
+        
+        # Check against various publication fields
+        fields_to_search = [
+            'title', 
+            'abstract', 
+            'summary', 
+            'description',
+            'doi',
+            'topics',
+            'domains'
+        ]
+        
+        for field in fields_to_search:
+            field_value = publication.get(field, '')
+            
+            # Ensure field_value is a string
+            if not isinstance(field_value, str):
+                try:
+                    # Try to convert to JSON string if it's a dict or list
+                    field_value = json.dumps(field_value).lower()
+                except:
+                    field_value = str(field_value).lower()
+            
+            # Lowercase for case-insensitive search
+            field_value = field_value.lower()
+            
+            # Check if query is in field value
+            if query in field_value:
+                return True
+        
+        # Check authors separately
+        authors = publication.get('authors', [])
+        if isinstance(authors, str):
+            try:
+                authors = json.loads(authors)
+            except json.JSONDecodeError:
+                authors = [authors]
+        
+        # Check if query matches any author
+        if any(query in str(author).lower() for author in authors):
+            return True
+        
+        return False
+
     async def get_publications(self, query: str = None, expert_id: str = None, limit: int = 3) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         try:
             if not self.redis_manager:

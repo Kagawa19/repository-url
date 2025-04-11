@@ -16,6 +16,8 @@ class EnhancedMatcher:
         self.logger = Logger(__name__)
         self.name_similarity_threshold = 0.8  # Threshold for fuzzy name matching
         self.expertise_similarity_threshold = 0.3  # Threshold for expertise similarity
+        self.aphrc_expert_ids = set() 
+
 
     def _normalize_name(self, name: str) -> str:
         """Normalize author name for comparison"""
@@ -194,6 +196,13 @@ class EnhancedMatcher:
             for expert in experts
         }
 
+        # Create expert_lookup for expertise matching
+        expert_lookup = {
+            expert[0]: {
+                'expertise': self._get_expert_expertise(expert)
+            } for expert in experts
+        }
+
         matches = {}
 
         for resource in resources:
@@ -310,8 +319,7 @@ class Matcher:
         self.logger = Logger(__name__)
         # Create enhanced matcher instance for use when requested
         self.enhanced_matcher = EnhancedMatcher()
-        self.aphrc_expert_ids = set() 
-
+        
     def _normalize_name(self, name: str) -> str:
         """Normalize author name for comparison"""
         return ' '.join(str(name).lower().split())

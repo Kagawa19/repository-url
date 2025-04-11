@@ -875,6 +875,8 @@ class ExpertRedisIndexManager:
                     conn.close()
 
 
+
+
     def _store_resource_data(self, resource: Dict[str, Any], text_content: str, 
                        embedding: np.ndarray) -> None:
         """
@@ -951,6 +953,8 @@ class ExpertRedisIndexManager:
         except Exception as e:
             pipeline.reset()
             raise
+
+    
 
 
 
