@@ -483,67 +483,7 @@ class GeminiLLMManager:
         # Simple score based on percentage of query terms matched
         return matches / max(1, len(query_terms))
 
-    def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
-        """
-        Format expert information into a readable bulleted list context for the LLM.
-        
-        Args:
-            experts: List of expert dictionaries
-            
-        Returns:
-            Formatted context string with bulleted lists
-        """
-        if not experts:
-            return "No expert information available."
-        
-        context_parts = ["Here is information about relevant APHRC experts:"]
-        
-        for idx, expert in enumerate(experts):
-            full_name = f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip()
-            
-            # Create expert entry with name in bold
-            expert_info = [f"**{full_name}**"]
-            
-            # Add expertise areas as bullet points
-            expertise = expert.get('expertise', [])
-            if expertise and isinstance(expertise, list):
-                for area in expertise:
-                    expert_info.append(f"* {area}")
-            elif expertise:
-                expert_info.append(f"* {expertise}")
-            
-            # Add research interests as bullet points if available
-            research_interests = expert.get('research_interests', [])
-            if research_interests and isinstance(research_interests, list):
-                for interest in research_interests:
-                    expert_info.append(f"* {interest}")
-            
-            # Add position and department as bullet points if available
-            position = expert.get('position', '')
-            if position:
-                expert_info.append(f"* Position: {position}")
-                
-            department = expert.get('department', '')
-            if department:
-                expert_info.append(f"* Department: {department}")
-            
-            # Add contact info as a bullet point if available
-            email = expert.get('email', '')
-            if email:
-                expert_info.append(f"* Contact: {email}")
-            
-            # Add publications as bullet points if available
-            publications = expert.get('publications', [])
-            if publications:
-                expert_info.append("* Notable publications:")
-                for pub in publications[:2]:  # Limit to 2 publications
-                    pub_title = pub.get('title', 'Untitled')
-                    expert_info.append(f"  * {pub_title}")
-            
-            # Combine all information about this expert with proper line breaks
-            context_parts.append("\n".join(expert_info))
-        
-        return "\n\n".join(context_parts)
+    
 
     
 
@@ -742,15 +682,65 @@ class GeminiLLMManager:
                 'confidence': 0.0,
                 'clarification': None
             }
+        
+    def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
+        """
+        Format expert information into a numbered list with bulleted expertise areas.
+        
+        Args:
+            experts: List of expert dictionaries
+            
+        Returns:
+            Formatted context string with numbered experts and bulleted lists
+        """
+        if not experts:
+            return "No expert information available."
+        
+        context_parts = ["Here is information about relevant APHRC experts:"]
+        
+        for idx, expert in enumerate(experts):
+            full_name = f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip()
+            
+            # Create numbered expert entry with name in bold
+            expert_info = [f"{idx+1}. **{full_name}**"]
+            
+            # Add expertise areas as bullet points
+            expertise = expert.get('expertise', [])
+            if expertise and isinstance(expertise, list):
+                for area in expertise:
+                    expert_info.append(f"* {area}")
+            elif expertise:
+                expert_info.append(f"* {expertise}")
+            
+            # Add research interests as bullet points if available
+            research_interests = expert.get('research_interests', [])
+            if research_interests and isinstance(research_interests, list):
+                for interest in research_interests:
+                    expert_info.append(f"* {interest}")
+            
+            # Add publications as bullet points if available
+            publications = expert.get('publications', [])
+            if publications:
+                pub_lines = []
+                for pub in publications[:2]:  # Limit to 2 publications
+                    pub_title = pub.get('title', 'Untitled')
+                    pub_lines.append(f"* {pub_title}")
+                if pub_lines:
+                    expert_info.extend(pub_lines)
+            
+            # Combine all information about this expert with proper line breaks
+            context_parts.append("\n".join(expert_info))
+        
+        return "\n\n".join(context_parts)
     def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
-        Format publication information into a readable context for the LLM with detailed logging.
+        Format publication information into a numbered list with bulleted details.
         
         Args:
             publications: List of publication dictionaries
             
         Returns:
-            Formatted context string
+            Formatted context string with numbered publications and bulleted lists
         """
         logger.info(f"Starting format_publication_context with {len(publications)} publications")
         
@@ -773,13 +763,14 @@ class GeminiLLMManager:
                 title = pub.get('title', 'Untitled')
                 logger.debug(f"Publication {idx+1} title: {title[:50]}...")
                 
-                pub_info = [f"Publication {idx+1}: {title}"]
+                # Create numbered publication with title in bold
+                pub_info = [f"{idx+1}. **{title}**"]
                 
-                # Add year
+                # Add year as bullet point
                 pub_year = pub.get('publication_year', '')
                 if pub_year:
                     logger.debug(f"Adding year: {pub_year}")
-                    pub_info.append(f"Published: {pub_year}")
+                    pub_info.append(f"* Published: {pub_year}")
                 
                 # Add authors with careful handling
                 try:
@@ -795,13 +786,13 @@ class GeminiLLMManager:
                                     author_text = f"{', '.join(str(a) for a in authors[:3])} et al."
                                 else:
                                     author_text = f"{', '.join(str(a) for a in authors)}"
-                                pub_info.append(f"Authors: {author_text}")
+                                pub_info.append(f"* Authors: {author_text}")
                             except Exception as author_error:
                                 logger.warning(f"Error formatting authors: {author_error}")
-                                pub_info.append(f"Authors: {len(authors)} contributors")
+                                pub_info.append(f"* Authors: {len(authors)} contributors")
                         else:
                             logger.debug(f"Authors not a list: {authors}")
-                            pub_info.append(f"Authors: {authors}")
+                            pub_info.append(f"* Authors: {authors}")
                 except Exception as authors_error:
                     logger.error(f"Error processing authors: {authors_error}", exc_info=True)
                 
@@ -810,27 +801,27 @@ class GeminiLLMManager:
                     aphrc_experts = pub.get('aphrc_experts', [])
                     if aphrc_experts:
                         if isinstance(aphrc_experts, list):
-                            pub_info.append(f"APHRC Experts: {', '.join(str(e) for e in aphrc_experts[:3])}")
+                            pub_info.append(f"* APHRC Experts: {', '.join(str(e) for e in aphrc_experts[:3])}")
                         else:
-                            pub_info.append(f"APHRC Experts: {aphrc_experts}")
+                            pub_info.append(f"* APHRC Experts: {aphrc_experts}")
                 except Exception as experts_error:
                     logger.error(f"Error processing APHRC experts: {experts_error}", exc_info=True)
                 
-                # Add abstract snippet
+                # Add abstract snippet as bullet point
                 try:
                     abstract = pub.get('abstract', '')
                     if abstract:
                         # Truncate long abstracts
                         if len(abstract) > 300:
                             abstract = abstract[:297] + "..."
-                        pub_info.append(f"Abstract: {abstract}")
+                        pub_info.append(f"* Abstract: {abstract}")
                 except Exception as abstract_error:
                     logger.error(f"Error processing abstract: {abstract_error}", exc_info=True)
                 
                 # Add DOI if available
                 doi = pub.get('doi', '')
                 if doi:
-                    pub_info.append(f"DOI: {doi}")
+                    pub_info.append(f"* DOI: {doi}")
                 
                 # Combine all information about this publication
                 logger.debug(f"Completed processing publication {idx+1}, {len(pub_info)} info parts")
