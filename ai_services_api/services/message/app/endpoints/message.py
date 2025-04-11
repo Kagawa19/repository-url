@@ -415,6 +415,93 @@ African Population and Health Research Center (APHRC)"""
         if conn:
             conn.close()
         logger.debug("Database connections closed")
+
+from fastapi import Body
+from typing import Dict
+
+# Add this to your router - Set User ID endpoint for message service
+@router.post("/message/set-user-id")
+async def set_message_user_id(
+    request: Request,
+    user_id: str = Body(...),
+):
+    """
+    Set the user ID for the message service.
+    This allows testing with different user IDs without changing headers.
+    
+    Returns:
+        Dict with status and the set user ID
+    """
+    logger.info(f"Setting message service user ID to: {user_id}")
+    
+    # Store the user ID in the request state for this session
+    request.state.user_id = user_id
+    
+    return {
+        "status": "success",
+        "message": f"Message service user ID set to: {user_id}",
+        "user_id": user_id
+    }
+
+# Create a flexible user ID dependency for the message service
+async def flexible_message_user_id(request: Request) -> str:
+    """
+    Get user ID with flexibility for message endpoints:
+    1. First check if a user ID is set in request state (from /message/set-user-id endpoint)
+    2. Fall back to X-User-ID header if not in request state
+    3. Raise exception if neither is available
+    
+    This preserves the original get_user_id behavior for existing endpoints.
+    """
+    logger.debug("Flexible message user ID extraction")
+    
+    # First check if we have a user ID in the request state
+    if hasattr(request.state, "user_id"):
+        user_id = request.state.user_id
+        logger.info(f"Using message user ID from request state: {user_id}")
+        return user_id
+    
+    # Otherwise fall back to the header
+    user_id = request.headers.get("X-User-ID")
+    if not user_id:
+        logger.error("Missing required X-User-ID header in request")
+        raise HTTPException(status_code=400, detail="X-User-ID header is required")
+    
+    logger.info(f"Message user ID extracted from header: {user_id}")
+    return user_id
+
+# Add a flexible version of the draft message endpoint
+@router.get("/draft/{receiver_id}/{content}/flexible")
+async def flexible_create_message_draft(
+    receiver_id: str,
+    content: str,
+    request: Request,
+    user_id: str = Depends(flexible_message_user_id),  # Use the flexible dependency here
+    redis_client: Redis = Depends(get_redis)
+):
+    """
+    Create a message draft with flexible user ID handling.
+    This endpoint uses the user ID from either the state or the header.
+    """
+    logger.info(f"Received flexible draft message request - User: {user_id}, Receiver: {receiver_id}")
+    return await process_message_draft(user_id, receiver_id, content, redis_client)
+
+# Also add a flexible version of the test endpoint
+@router.get("/test/draft/{receiver_id}/{content}/flexible")
+async def flexible_test_create_message_draft(
+    receiver_id: str,
+    content: str,
+    request: Request,
+    user_id: str = Depends(flexible_message_user_id),  # Use the flexible dependency
+    redis_client: Redis = Depends(get_redis)
+):
+    """
+    Test endpoint for creating a message draft with flexible user ID handling.
+    This endpoint uses the user ID from either the state or the header.
+    """
+    logger.info(f"Received flexible test draft message request - User: {user_id}, Receiver: {receiver_id}")
+    return await process_message_draft(user_id, receiver_id, content, redis_client)
+
 @router.get("/test/draft/{receiver_id}/{content}")
 async def test_create_message_draft(
     receiver_id: str,

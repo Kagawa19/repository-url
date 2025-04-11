@@ -480,6 +480,187 @@ async def get_rate_limit_status(user_id: str = Depends(get_user_id)):
         logger.error(f"Error getting rate limit status: {e}")
         raise HTTPException(status_code=500, detail="Error checking rate limit status")
 
+from fastapi import Body
+from typing import Dict
+
+# Add this to your router - flexible user ID for chatbot
+@router.post("/chat/set-user-id")
+async def set_chat_user_id(
+    request: Request,
+    user_id: str = Body(...),
+):
+    """
+    Set the user ID for the current chat session.
+    This allows testing with different user IDs without changing headers.
+    
+    Returns:
+        Dict with status and the set user ID
+    """
+    logger.info(f"Setting chat user ID to: {user_id}")
+    
+    # Store the user ID in the request state for this session
+    request.state.user_id = user_id
+    
+    # You could also store this in Redis for persistence across requests
+    # This would require a session cookie to identify the browser session
+    
+    return {
+        "status": "success",
+        "message": f"Chat user ID set to: {user_id}",
+        "user_id": user_id
+    }
+
+# Now create a flexible user ID dependency specifically for chat module
+async def flexible_chat_user_id(request: Request) -> str:
+    """
+    Get user ID with flexibility for chat endpoints:
+    1. First check if a user ID is set in request state (from /chat/set-user-id endpoint)
+    2. Fall back to X-User-ID header if not in request state
+    3. Raise exception if neither is available
+    
+    This preserves the original get_user_id behavior for existing endpoints.
+    """
+    logger.debug("Flexible chat user ID extraction")
+    
+    # First check if we have a user ID in the request state
+    if hasattr(request.state, "user_id"):
+        user_id = request.state.user_id
+        logger.info(f"Using chat user ID from request state: {user_id}")
+        return user_id
+    
+    # Otherwise fall back to the header
+    user_id = request.headers.get("X-User-ID")
+    if not user_id:
+        logger.error("Missing required X-User-ID header in request")
+        raise HTTPException(status_code=400, detail="X-User-ID header is required")
+    
+    logger.info(f"Chat user ID extracted from header: {user_id}")
+    return user_id
+
+# Example: Create a flexible version of the chat endpoint
+@router.post("/chat/flexible", response_model=ChatResponse, responses={
+    400: {"model": ErrorResponse, "description": "Invalid request"},
+    429: {"model": ErrorResponse, "description": "Rate limit exceeded"},
+    500: {"model": ErrorResponse, "description": "Internal server error"},
+    503: {"model": ErrorResponse, "description": "Service temporarily unavailable"},
+    504: {"model": ErrorResponse, "description": "Request timeout"}
+})
+async def flexible_chat_endpoint(
+    request_data: ChatRequest,
+    request: Request,
+    user_id: str = Depends(flexible_chat_user_id),  # Use the flexible dependency here
+    redis_client: Redis = Depends(get_redis)
+    ):
+    """
+    Process chat messages with flexible user ID handling.
+    
+    This endpoint accepts a chat message and uses the user ID from either:
+    1. The value set via /chat/set-user-id
+    2. The X-User-ID header
+    
+    This makes testing with different user IDs easier.
+    """
+    # Extract message from request body
+    query = request_data.message
+    
+    # Log request information
+    logger.info(f"Flexible chat request received - User: {user_id}, Query length: {len(query)}")
+    
+    # The rest of the implementation is identical to the original chat_endpoint
+    # Check rate limit with enhanced error handling
+    if not await rate_limiter.check_rate_limit(user_id):
+        remaining_time = await rate_limiter.get_window_remaining(user_id)
+        retry_after = max(1, min(60, remaining_time))  # Cap retry between 1-60 seconds
+        
+        # Log rate limit event
+        logger.warning(f"Rate limit exceeded for user {user_id}, retry after {retry_after}s")
+        
+        # Check if there's a global circuit breaker active
+        redis_circuit_key = "global:api_circuit_breaker"
+        circuit_active = await redis_client.get(redis_circuit_key)
+        
+        if circuit_active:
+            # Service-wide circuit breaker is active
+            circuit_ttl = await redis_client.ttl(redis_circuit_key)
+            error_detail = {
+                "error": "Service temporarily unavailable",
+                "retry_after": circuit_ttl,
+                "message": "Our service is experiencing high demand. Please try again shortly."
+            }
+            logger.warning(f"Circuit breaker active, returning 503 response with {circuit_ttl}s retry")
+            return JSONResponse(
+                status_code=503,
+                content=error_detail,
+                headers={"Retry-After": str(circuit_ttl)}
+            )
+        else:
+            # Standard rate limit for this user
+            error_detail = {
+                "error": "Rate limit exceeded",
+                "retry_after": retry_after,
+                "limit": await rate_limiter.get_user_limit(user_id),
+                "message": "Please reduce your request frequency"
+            }
+            return JSONResponse(
+                status_code=429,
+                content=error_detail,
+                headers={"Retry-After": str(retry_after)}
+            )
+    
+    try:
+        # Process the request
+        start_time = time.time()
+        response = await process_chat_request(query, user_id, redis_client)
+        processing_time = time.time() - start_time
+        
+        # Log successful processing
+        logger.info(f"Chat request processed successfully - Time: {processing_time:.2f}s, User: {user_id}")
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error in chat endpoint: {e}", exc_info=True)
+        
+        # Check for Google API rate limit errors
+        if any(x in str(e).lower() for x in ["429", "quota", "rate limit", "resource exhausted"]):
+            logger.warning(f"Google API rate limit detected: {str(e)}")
+            
+            # Record the rate limit error to trigger global circuit breaker if needed
+            await rate_limiter._record_api_rate_limit_error(redis_client)
+            
+            # Return appropriate error response
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "Service temporarily unavailable",
+                    "message": "Our service is experiencing high demand. Please try again in a moment.",
+                    "retry_after": 30
+                },
+                headers={"Retry-After": "30"}
+            )
+            
+        # Check for timeout errors
+        elif any(x in str(e).lower() for x in ["timeout", "deadline exceeded"]):
+            logger.warning(f"Request timeout: {str(e)}")
+            return JSONResponse(
+                status_code=504,
+                content={
+                    "error": "Request timeout",
+                    "message": "Your request took too long to process. Please try a shorter query."
+                }
+            )
+            
+        # Generic error handling
+        else:
+            logger.error(f"Unhandled error: {str(e)}")
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": "Internal server error",
+                    "message": "An unexpected error occurred. Please try again."
+                }
+            )
+
 # Startup and shutdown events
 async def startup_event():
     """Initialize database and Redis connections on startup."""
