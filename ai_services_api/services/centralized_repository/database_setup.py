@@ -19,6 +19,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+import os
+from urllib.parse import urlparse
+
 def get_db_connection_params():
     """Get database connection parameters from environment variables."""
     database_url = os.getenv('DATABASE_URL')
@@ -31,15 +34,15 @@ def get_db_connection_params():
             'user': parsed_url.username,
             'password': parsed_url.password
         }
-    
-    in_docker = os.getenv('DOCKER_ENV', 'false').lower() == 'true'
+
     return {
-        'host': '167.86.85.127' if in_docker else 'localhost',
-        'port': '5432',
+        'host': os.getenv('POSTGRES_HOST', 'postgres'),
+        'port': os.getenv('POSTGRES_PORT', '5432'),
         'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
         'user': os.getenv('POSTGRES_USER', 'postgres'),
         'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres')
     }
+
 
 @contextmanager
 def get_db_connection(dbname=None):
