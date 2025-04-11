@@ -582,6 +582,116 @@ class ExpertRedisIndexManager:
             logger.error(f"Catastrophic error during Redis indexing: {final_err}")
             return False
     # 1. Updated _store_resource_data method in ExpertRedisIndexManager
+
+    def get_publications_by_expert_id(self, expert_id: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Retrieve publications associated with a specific expert from Redis.
+        
+        Args:
+            expert_id: The expert's ID
+            limit: Maximum number of publications to return
+            
+        Returns:
+            List of publication dictionaries
+        """
+        try:
+            logger.info(f"Retrieving publications for expert {expert_id}")
+            
+            # First try to find direct matches in the metadata
+            publications = []
+            publication_keys = []
+            
+            # Scan for resources with matching expert_id
+            cursor = 0
+            while True:
+                cursor, keys = self.redis_text.scan(cursor, match="meta:resource:*", count=100)
+                for key in keys:
+                    try:
+                        # Check if this resource is linked to the expert
+                        meta = self.redis_text.hgetall(key)
+                        if meta.get('expert_id') == str(expert_id):
+                            publication_keys.append(key)
+                    except Exception as e:
+                        logger.error(f"Error processing key {key}: {e}")
+                
+                if cursor == 0:
+                    break
+            
+            # If we don't have enough direct matches, try to find more via author name
+            if len(publication_keys) < limit:
+                # Get expert name for matching
+                expert_meta = self.redis_text.hgetall(f"meta:expert:{expert_id}")
+                if expert_meta:
+                    expert_name = f"{expert_meta.get('first_name', '')} {expert_meta.get('last_name', '')}".strip().lower()
+                    
+                    if expert_name:
+                        # Scan for resources with matching author
+                        cursor = 0
+                        while len(publication_keys) < limit and cursor != 0 or not publication_keys:
+                            cursor, keys = self.redis_text.scan(cursor, match="meta:resource:*", count=100)
+                            for key in keys:
+                                if key in publication_keys:
+                                    continue  # Skip already found publications
+                                    
+                                try:
+                                    meta = self.redis_text.hgetall(key)
+                                    authors_json = meta.get('authors', '[]')
+                                    
+                                    try:
+                                        authors = json.loads(authors_json)
+                                        if isinstance(authors, list):
+                                            # Check if expert name appears in author list
+                                            for author in authors:
+                                                if expert_name in str(author).lower():
+                                                    publication_keys.append(key)
+                                                    break
+                                    except json.JSONDecodeError:
+                                        # Handle non-JSON authors field
+                                        if expert_name in authors_json.lower():
+                                            publication_keys.append(key)
+                                except Exception as e:
+                                    logger.error(f"Error processing key {key} for author match: {e}")
+                            
+                            if cursor == 0:
+                                break
+            
+            # Limit the number of publications and retrieve full metadata
+            publication_keys = publication_keys[:limit]
+            logger.info(f"Found {len(publication_keys)} publication keys for expert {expert_id}")
+            
+            # Retrieve full metadata for each publication
+            for key in publication_keys:
+                try:
+                    meta = self.redis_text.hgetall(key)
+                    if meta:
+                        # Parse JSON fields
+                        publication = {
+                            'id': meta.get('id', ''),
+                            'title': meta.get('title', ''),
+                            'doi': meta.get('doi', ''),
+                            'abstract': meta.get('abstract', ''),
+                            'publication_year': meta.get('publication_year', '')
+                        }
+                        
+                        # Parse authors
+                        try:
+                            authors_json = meta.get('authors', '[]')
+                            publication['authors'] = json.loads(authors_json) if authors_json else []
+                        except json.JSONDecodeError:
+                            publication['authors'] = [authors_json] if authors_json else []
+                        
+                        # Add confidence score (defaults to 1.0 for direct matches)
+                        publication['confidence'] = 1.0
+                        
+                        publications.append(publication)
+                except Exception as e:
+                    logger.error(f"Error retrieving publication metadata for {key}: {e}")
+            
+            return publications
+            
+        except Exception as e:
+            logger.error(f"Error retrieving publications for expert {expert_id}: {e}")
+            return []
     def fetch_resources(self) -> List[Dict[str, Any]]:
         """Fetch all resource data from database."""
         max_retries = 3

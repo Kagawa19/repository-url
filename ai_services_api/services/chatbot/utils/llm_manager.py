@@ -412,7 +412,7 @@ class GeminiLLMManager:
                     }
                     
                     # Parse JSON fields
-                    for field in ['expertise', 'research_interests', 'publications']:
+                    for field in ['expertise', 'research_interests']:
                         try:
                             if raw_data.get(field):
                                 expert[field] = json.loads(raw_data.get(field, '[]'))
@@ -449,10 +449,11 @@ class GeminiLLMManager:
             for expert in top_experts:
                 expert.pop('similarity', None)
                 
-            # Get publications for each expert
-            for expert in top_experts:
-                publications = await self._get_expert_publications(expert['id'])
-                expert['publications'] = publications
+            # Get publications for each expert and enrich them
+            try:
+                top_experts = await self._enrich_experts_with_publications(top_experts, limit_per_expert=2)
+            except Exception as pub_error:
+                logger.error(f"Error enriching experts with publications: {pub_error}")
             
             logger.info(f"Found {len(top_experts)} relevant experts")
             return top_experts, None
@@ -460,6 +461,55 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error in get_relevant_experts: {e}")
             return [], "We encountered an error finding experts. Please try again with a simpler query."
+        
+    async def _enrich_experts_with_publications(self, experts: List[Dict[str, Any]], limit_per_expert: int = 2) -> List[Dict[str, Any]]:
+        """
+        Enrich expert data with their associated publications.
+        
+        Args:
+            experts: List of expert dictionaries
+            limit_per_expert: Maximum number of publications per expert
+            
+        Returns:
+            List of expert dictionaries enriched with publication information
+        """
+        if not experts:
+            return experts
+        
+        try:
+            # Process each expert
+            for expert in experts:
+                expert_id = expert.get('id')
+                if not expert_id:
+                    continue
+                    
+                # Skip if already has publications
+                if expert.get('publications') and len(expert.get('publications', [])) >= limit_per_expert:
+                    continue
+                    
+                # Get publications for this expert
+                publications = await self._get_expert_publications(expert_id, limit=limit_per_expert)
+                
+                # Add or merge with existing publications
+                if 'publications' not in expert or not expert['publications']:
+                    expert['publications'] = publications
+                else:
+                    # Avoid duplicates when merging
+                    existing_ids = {pub.get('id') for pub in expert['publications'] if pub.get('id')}
+                    for pub in publications:
+                        if pub.get('id') and pub['id'] not in existing_ids:
+                            expert['publications'].append(pub)
+                            existing_ids.add(pub['id'])
+                    
+                    # Sort by confidence and limit
+                    expert['publications'].sort(key=lambda p: p.get('confidence', 0), reverse=True)
+                    expert['publications'] = expert['publications'][:limit_per_expert]
+                    
+            return experts
+            
+        except Exception as e:
+            logger.error(f"Error enriching experts with publications: {e}")
+            return experts
 
     def _calculate_text_similarity(self, query: str, expert: Dict) -> float:
         """
@@ -487,52 +537,64 @@ class GeminiLLMManager:
 
     
 
-    async def _get_expert_for_publications(self, publication_ids: List[str]) -> Dict[str, List[Dict]]:
-        """
-        Get experts associated with a list of publications.
-        
-        Args:
-            publication_ids: List of publication IDs
-            
-        Returns:
-            Dictionary mapping publication IDs to lists of expert dictionaries
-        """
-        result = {}
-        for pub_id in publication_ids:
-            result[pub_id] = []
-        
+    async def _get_expert_publications(self, expert_id: str, limit: int = 3) -> List[Dict[str, Any]]:
+        """Get publications associated with an expert from both database and Redis."""
         try:
-            # Create batched SQL query placeholders
-            placeholders = ', '.join(f"${i+1}" for i in range(len(publication_ids)))
+            publications = []
             
-            async with DatabaseConnector.get_connection() as conn:
-                query = f"""
-                    SELECT e.id, e.first_name, e.last_name, l.resource_id, l.confidence_score
-                    FROM expert_resource_links l
-                    JOIN experts_expert e ON l.expert_id = e.id
-                    WHERE l.resource_id IN ({placeholders})
-                    AND l.confidence_score >= 0.7
-                    ORDER BY l.confidence_score DESC
-                """
-                
-                rows = await conn.fetch(query, *publication_ids)
-                
-                # Group by publication ID
-                for row in rows:
-                    pub_id = str(row['resource_id'])
-                    if pub_id in result:
-                        result[pub_id].append({
-                            'id': row['id'],
-                            'first_name': row['first_name'],
-                            'last_name': row['last_name'],
-                            'confidence': row['confidence_score']
-                        })
+            # 1. First try Redis for faster retrieval
+            if self.redis_manager:
+                try:
+                    redis_publications = self.redis_manager.get_publications_by_expert_id(expert_id, limit)
+                    if redis_publications:
+                        publications.extend(redis_publications)
+                        logger.info(f"Retrieved {len(redis_publications)} publications for expert {expert_id} from Redis")
+                except Exception as redis_error:
+                    logger.error(f"Error retrieving publications from Redis: {redis_error}")
             
-            return result
-                
+            # 2. If we don't have enough publications, try database
+            if len(publications) < limit:
+                try:
+                    # Create placeholders for SQL query
+                    async with DatabaseConnector.get_connection() as conn:
+                        query = f"""
+                            SELECT r.id, r.title, r.publication_year, r.doi, l.confidence_score
+                            FROM expert_resource_links l
+                            JOIN resources_resource r ON l.resource_id = r.id
+                            WHERE l.expert_id = $1
+                            AND l.confidence_score >= 0.7
+                            ORDER BY l.confidence_score DESC, r.publication_year DESC
+                            LIMIT $2
+                        """
+                        
+                        rows = await conn.fetch(query, expert_id, limit - len(publications))
+                        
+                        # Format results
+                        db_publications = []
+                        for row in rows:
+                            db_publications.append({
+                                'id': row['id'],
+                                'title': row['title'],
+                                'publication_year': row['publication_year'],
+                                'doi': row['doi'],
+                                'confidence': row['confidence_score']
+                            })
+                        
+                        # Add database publications
+                        publications.extend(db_publications)
+                        logger.info(f"Retrieved {len(db_publications)} publications for expert {expert_id} from database")
+                except Exception as db_error:
+                    logger.error(f"Error fetching publications from database: {db_error}")
+            
+            # 3. Sort by confidence score
+            publications.sort(key=lambda x: x.get('confidence', 0), reverse=True)
+            
+            # 4. Apply final limit
+            return publications[:limit]
+                    
         except Exception as e:
-            logger.error(f"Error fetching experts for publications: {e}")
-            return result
+            logger.error(f"Error fetching publications for expert {expert_id}: {e}")
+            return []
     async def generate_async_response(self, message: str) -> AsyncGenerator[str, None]:
         """
         Generate streaming response with metadata.
@@ -718,15 +780,27 @@ class GeminiLLMManager:
                 for interest in research_interests:
                     expert_info.append(f"* {interest}")
             
+            # Add position and department as bullet points if available
+            position = expert.get('position', '')
+            if position:
+                expert_info.append(f"* Position: {position}")
+                
+            department = expert.get('department', '')
+            if department:
+                expert_info.append(f"* Department: {department}")
+            
+            # Add contact info as a bullet point if available
+            email = expert.get('email', '')
+            if email:
+                expert_info.append(f"* Contact: {email}")
+            
             # Add publications as bullet points if available
             publications = expert.get('publications', [])
             if publications:
-                pub_lines = []
+                expert_info.append("* Notable publications:")
                 for pub in publications[:2]:  # Limit to 2 publications
                     pub_title = pub.get('title', 'Untitled')
-                    pub_lines.append(f"* {pub_title}")
-                if pub_lines:
-                    expert_info.extend(pub_lines)
+                    expert_info.append(f"  * {pub_title}")
             
             # Combine all information about this expert with proper line breaks
             context_parts.append("\n".join(expert_info))
@@ -1360,13 +1434,13 @@ class GeminiLLMManager:
         """
         if not publications:
             return publications
-            
+                
         try:
             # Extract publication IDs
             pub_ids = [str(pub.get('id', '')) for pub in publications if pub.get('id')]
             if not pub_ids:
                 return publications
-                
+                    
             # Get expert information for these publications
             pub_expert_map = await self._get_expert_for_publications(pub_ids)
             
@@ -1379,27 +1453,45 @@ class GeminiLLMManager:
                     
                     # Format expert names consistently
                     expert_names = []
+                    expert_details = []
+                    
                     for expert in experts:
                         name = f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip()
                         if name:
                             expert_names.append(name)
+                            
+                            # Add detailed entry
+                            expert_details.append({
+                                'name': name,
+                                'id': expert.get('id'),
+                                'confidence': expert.get('confidence', 0.0),
+                                # Include additional expert details if available
+                                'position': expert.get('position', ''),
+                                'department': expert.get('department', ''),
+                                'expertise': expert.get('expertise', [])
+                            })
                     
                     if expert_names:
                         # Add to publication metadata
                         pub['aphrc_experts'] = expert_names
                         
-                        # Also add expert details for better context
-                        pub['expert_details'] = [
-                            {
-                                'name': f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip(),
-                                'id': expert.get('id'),
-                                'confidence': expert.get('confidence', 0.0)
-                            }
-                            for expert in experts
-                        ]
+                        # Add enhanced expert details for better context
+                        pub['expert_details'] = expert_details
+                        
+                        # Add a confidence score for the publication based on expert links
+                        if 'confidence' not in pub:
+                            # Use the highest expert confidence as publication confidence
+                            pub['confidence'] = max([exp.get('confidence', 0.0) for exp in experts])
+                
+                # Ensure we have a confidence score for sorting
+                if 'confidence' not in pub:
+                    pub['confidence'] = 0.5  # Default mid-range confidence
+                
+            # Sort by confidence for better results
+            publications.sort(key=lambda p: p.get('confidence', 0), reverse=True)
             
             return publications
-            
+                
         except Exception as e:
             logger.error(f"Error enriching publications with expert information: {e}")
             # Return original publications if enrichment fails
