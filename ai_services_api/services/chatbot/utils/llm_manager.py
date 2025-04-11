@@ -1695,288 +1695,144 @@ class GeminiLLMManager:
             logger.error(f"Error updating expert-resource links: {e}")
             return False
 
-    
+    async def get_publications(self, query: str = None, expert_id: str = None, limit: int = 3) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        try:
+            if not self.redis_manager:
+                return [], "Database unavailable"
+                
+            publications = []
+            
+            # Expert-specific search
+            if expert_id:
+                # Get APHRC publications first
+                links_key = f"links:expert:{expert_id}:resources"
+                if self.redis_manager.redis_text.exists(links_key):
+                    resource_ids = self.redis_manager.redis_text.zrevrangebyscore(
+                        links_key, 1.0, 0.7, 0, limit)  # High confidence first
+                    
+                    for pub_id in resource_ids:
+                        # Check APHRC version first
+                        meta_key = f"meta:resource:aphrc:{pub_id}"
+                        if self.redis_manager.redis_text.exists(meta_key):
+                            pub = self.redis_manager.redis_text.hgetall(meta_key)
+                            publications.append(pub)
+                        else:
+                            # Fall back to global if exists
+                            meta_key = f"meta:resource:global:{pub_id}"
+                            if self.redis_manager.redis_text.exists(meta_key):
+                                pub = self.redis_manager.redis_text.hgetall(meta_key)
+                                publications.append(pub)
+                                
+                        if len(publications) >= limit:
+                            break
+                            
+            # General search
+            else:
+                # Search APHRC publications first
+                cursor = 0
+                while len(publications) < limit and (cursor != 0 or not publications):
+                    cursor, keys = self.redis_manager.redis_text.scan(
+                        cursor, match='meta:resource:aphrc:*', count=limit*2)
+                    
+                    for key in keys:
+                        pub = self.redis_manager.redis_text.hgetall(key)
+                        if matches_query(pub, query):  # Your search logic
+                            publications.append(pub)
+                            if len(publications) >= limit:
+                                break
+                                
+                # Fall back to global if needed
+                if len(publications) < limit:
+                    cursor = 0
+                    while len(publications) < limit and (cursor != 0 or not publications):
+                        cursor, keys = self.redis_manager.redis_text.scan(
+                            cursor, match='meta:resource:global:*', count=limit*2)
+                        
+                        for key in keys:
+                            pub = self.redis_manager.redis_text.hgetall(key)
+                            if matches_query(pub, query):
+                                publications.append(pub)
+                                if len(publications) >= limit:
+                                    break
+                                    
+            return publications[:limit], None
+            
+        except Exception as e:
+            logger.error(f"Error in get_publications: {e}")
+            return [], str(e)
 
     async def get_experts(self, query: str, limit: int = 3) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """
-        Enhanced expert retrieval prioritizing experts indexed during create_expert_redis_index.
-        
-        Improvements:
-        - Prioritizes experts stored during targeted indexing
-        - Maintains existing semantic search capabilities
-        - Preserves fallback mechanisms
-        - Improves retrieval efficiency
+        Retrieves only APHRC experts (since global experts don't exist in experts_expert table).
+        Maintains same interface but optimized for APHRC-only search.
         """
-        logger.info(f"Retrieving experts with query: {query}")
-        
         try:
             if not self.redis_manager:
-                logger.warning("Redis manager not available, cannot retrieve experts")
-                return [], "Our expert database is currently unavailable. Please try again later."
-            
-            # Detect gender-specific queries
-            gender_query = False
-            if any(term in query.lower() for term in ["female", "women", "woman"]):
-                gender_query = True
-                logger.info("Detected gender-specific query for female experts")
-            
-            # Clean query for processing
-            cleaned_query = re.sub(r'[^\w\s]', ' ', query.lower()).strip()
-            logger.info(f"Cleaned query: '{cleaned_query}'")
-            
-            # 1. Direct Targeted Indexing Lookup
-            targeted_matches = []
-            
-            # Scan through expert metadata keys from targeted indexing
+                return [], "Expert database unavailable"
+                
+            # Only search APHRC experts
             cursor = 0
-            keys_found = False  # Track if any keys were found
-            
-            while cursor != 0 or not keys_found:
+            expert_keys = []
+            while cursor != 0 or not expert_keys:
                 cursor, keys = self.redis_manager.redis_text.scan(
-                    cursor, 
-                    match='meta:expert:*', 
-                    count=100
+                    cursor,
+                    match='meta:expert:aphrc:*',
+                    count=limit*5  # Get slightly more than needed
                 )
-                
-                keys_found = keys_found or bool(keys)
-                logger.debug(f"Redis scan returned {len(keys)} expert keys with cursor {cursor}")
-                
-                for key in keys:
-                    try:
-                        # Get expert metadata
-                        raw_data = self.redis_manager.redis_text.hgetall(key)
-                        if not raw_data:
-                            continue
-                        
-                        # Extract expert details with targeted indexing focus
-                        first_name = raw_data.get('first_name', '').lower()
-                        last_name = raw_data.get('last_name', '').lower()
-                        full_name = f"{first_name} {last_name}".strip()
-                        
-                        # For gender-specific queries
-                        if gender_query:
-                            # Try to determine gender from metadata
-                            gender = raw_data.get('gender', '').lower()
-                            
-                            # If gender is specified and not female, skip
-                            if gender and gender not in ['female', 'woman', 'women', 'f']:
-                                continue
-                            
-                            # If no gender in metadata, we could use a name-based inference
-                            # but for now include all experts if no gender filter
-                            
-                            # Add to matches for gender query with reasonable confidence
-                            match_score = 0.75
-                            expert = {
-                                'id': key.split(':')[-1],
-                                'first_name': first_name.title(),
-                                'last_name': last_name.title(),
-                                'expertise': self._safe_json_load(raw_data.get('expertise', '[]')),
-                                'research_interests': self._safe_json_load(raw_data.get('research_interests', '[]')),
-                                'position': raw_data.get('position', ''),
-                                'department': raw_data.get('department', ''),
-                                'email': raw_data.get('email', ''),
-                                'confidence': match_score
-                            }
-                            
-                            targeted_matches.append(expert)
-                            continue
-                        
-                        # Non-gender specific matching
-                        match_score = 0.0
-                        # Exact match in name
-                        if cleaned_query in full_name:
-                            match_score = 1.0
-                            logger.debug(f"Exact name match for expert '{full_name}'")
-                        # Partial match in name
-                        elif any(part in full_name for part in cleaned_query.split()):
-                            match_score = 0.8
-                            logger.debug(f"Partial name match for expert '{full_name}'")
-                        
-                        # Check expertise and research interests for additional matching
-                        expertise = self._safe_json_load(raw_data.get('expertise', '[]'))
-                        research_interests = self._safe_json_load(raw_data.get('research_interests', '[]'))
-                        
-                        # Check if query terms match expertise or research interests
-                        expertise_match = any(
-                            cleaned_query in str(exp).lower() 
-                            for exp in expertise + research_interests
-                        )
-                        
-                        if expertise_match:
-                            match_score = max(match_score, 0.7)
-                            logger.debug(f"Expertise match for expert '{full_name}'")
-                        
-                        # If we have a reasonable match
-                        if match_score > 0.5:
-                            expert = {
-                                'id': key.split(':')[-1],
-                                'first_name': first_name.title(),
-                                'last_name': last_name.title(),
-                                'expertise': expertise,
-                                'research_interests': research_interests,
-                                'position': raw_data.get('position', ''),
-                                'department': raw_data.get('department', ''),
-                                'email': raw_data.get('email', ''),
-                                'confidence': match_score
-                            }
-                            
-                            targeted_matches.append(expert)
-                            logger.debug(f"Added expert '{full_name}' with score {match_score}")
-                            
-                            # Stop if we've found enough matches
-                            if len(targeted_matches) >= limit:
-                                break
-                    except Exception as expert_error:
-                        logger.warning(f"Error processing expert key {key}: {expert_error}")
-                
-                if cursor == 0 or len(targeted_matches) >= limit:
-                    break
+                expert_keys.extend(keys)
             
-            # Sort targeted matches by confidence
-            targeted_matches.sort(key=lambda x: x.get('confidence', 0), reverse=True)
+            experts = []
+            query_embedding = None
             
-            logger.info(f"Found {len(targeted_matches)} experts through targeted indexing")
+            # Calculate query embedding if model available
+            if self.embedding_model:
+                try:
+                    query_embedding = self.embedding_model.encode(query)
+                except Exception as e:
+                    logger.warning(f"Embedding generation failed: {e}")
             
-            # If we found matches in targeted indexing, return them
-            if targeted_matches:
-                # Log the specific experts found
-                for expert in targeted_matches[:limit]:
-                    name = f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip()
-                    logger.info(f"Returning expert: {name} with confidence {expert.get('confidence', 0)}")
-                return targeted_matches[:limit], None
-            
-            # 2. If no targeted matches and we have a gender query, do a scan for all experts
-            if gender_query and not targeted_matches:
-                logger.info("No targeted matches for gender query, scanning all experts")
-                all_experts = []
-                cursor = 0
-                while cursor != 0 or not all_experts:
-                    cursor, keys = self.redis_manager.redis_text.scan(
-                        cursor, 
-                        match='meta:expert:*', 
-                        count=100
-                    )
+            # Process potential matches
+            for key in expert_keys[:limit*3]:  # Limit processing for performance
+                try:
+                    expert_data = self.redis_manager.redis_text.hgetall(key)
                     
-                    for key in keys:
-                        try:
-                            raw_data = self.redis_manager.redis_text.hgetall(key)
-                            if not raw_data:
-                                continue
-                            
-                            first_name = raw_data.get('first_name', '').title()
-                            last_name = raw_data.get('last_name', '').title()
-                            
-                            expert = {
-                                'id': key.split(':')[-1],
-                                'first_name': first_name,
-                                'last_name': last_name,
-                                'expertise': self._safe_json_load(raw_data.get('expertise', '[]')),
-                                'research_interests': self._safe_json_load(raw_data.get('research_interests', '[]')),
-                                'position': raw_data.get('position', ''),
-                                'department': raw_data.get('department', ''),
-                                'email': raw_data.get('email', ''),
-                                'confidence': 0.6  # Default confidence for gender-only queries
-                            }
-                            
-                            all_experts.append(expert)
-                            
-                            if len(all_experts) >= limit:
-                                break
-                        except Exception as e:
-                            logger.warning(f"Error processing expert key {key}: {e}")
+                    # Basic expert info
+                    expert = {
+                        'id': expert_data['id'],
+                        'first_name': expert_data.get('first_name', ''),
+                        'last_name': expert_data.get('last_name', ''),
+                        'email': expert_data.get('email', ''),
+                        'position': expert_data.get('position', ''),
+                        'is_aphrc': True  # All experts from this table are APHRC
+                    }
                     
-                    if cursor == 0 or len(all_experts) >= limit:
-                        break
-                
-                if all_experts:
-                    logger.info(f"Found {len(all_experts)} experts for gender query")
-                    return all_experts[:limit], None
+                    # Calculate similarity score if embedding available
+                    if query_embedding is not None:
+                        emb_key = f"emb:expert:aphrc:{expert_data['id']}"
+                        if self.redis_manager.redis_binary.exists(emb_key):
+                            expert_embedding = np.frombuffer(
+                                self.redis_manager.redis_binary.get(emb_key),
+                                dtype=np.float32
+                            )
+                            similarity = np.dot(query_embedding, expert_embedding)
+                            expert['confidence'] = float(similarity)
+                    
+                    experts.append(expert)
+                    
+                except Exception as e:
+                    logger.warning(f"Skipping corrupt expert data in key {key}: {e}")
             
-            # 3. If still no results, check if we have a fallback method
-            # Try to import the fallback method if it exists
-            if hasattr(self, '_fallback_expert_semantic_search'):
-                logger.info("No experts found through targeted indexing, falling back to semantic search")
-                return await self._fallback_expert_semantic_search(cleaned_query, limit)
+            # Sort by confidence if available, otherwise by name
+            if all('confidence' in e for e in experts):
+                experts.sort(key=lambda x: x['confidence'], reverse=True)
             else:
-                logger.warning("No fallback semantic search method available")
-                # If no results and no fallback, return empty with a message
-                return [], "No matching experts found in our database."
+                experts.sort(key=lambda x: (x['last_name'], x['first_name']))
+            
+            return experts[:limit], None
             
         except Exception as e:
-            logger.error(f"Unhandled error in get_experts: {e}")
-            return [], f"An unexpected error occurred while searching for experts: {str(e)}"
-
-    async def get_publications(self, query: str = None, expert_id: str = None, limit: int = 3) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        """
-        Enhanced publication retrieval prioritizing publications linked during expert indexing.
-        
-        Improvements:
-        - Prioritizes publications from expert-resource links
-        - Maintains semantic search capabilities
-        - Preserves existing fallback mechanisms
-        """
-        try:
-            if not self.redis_manager:
-                logger.warning("Redis manager not available, cannot retrieve publications")
-                return [], "Our publication database is currently unavailable. Please try again later."
-            
-            logger.info(f"Retrieving publications for query: {query}, expert_id: {expert_id}")
-            
-            # 1. Expert-Specific Publication Retrieval
-            if expert_id:
-                # First, look for publications through expert-resource links from targeted indexing
-                publications = []
-                links_key = f"links:expert:{expert_id}:resources"
-                
-                if self.redis_manager.redis_text.exists(links_key):
-                    # Get resource IDs sorted by confidence from expert indexing
-                    resource_items = self.redis_manager.redis_text.zrevrange(
-                        links_key, 0, limit-1, withscores=True
-                    )
-                    
-                    for resource_id, confidence in resource_items:
-                        try:
-                            # Retrieve publication metadata
-                            meta_key = f"meta:resource:{resource_id}"
-                            if self.redis_manager.redis_text.exists(meta_key):
-                                meta = self.redis_manager.redis_text.hgetall(meta_key)
-                                
-                                if meta:
-                                    publication = {
-                                        'id': meta.get('id', ''),
-                                        'title': meta.get('title', ''),
-                                        'doi': meta.get('doi', ''),
-                                        'abstract': meta.get('abstract', ''),
-                                        'publication_year': meta.get('publication_year', ''),
-                                        'confidence': float(confidence)
-                                    }
-                                    
-                                    # Parse authors safely
-                                    try:
-                                        authors_json = meta.get('authors', '[]')
-                                        publication['authors'] = json.loads(authors_json) if authors_json else []
-                                    except json.JSONDecodeError:
-                                        publication['authors'] = [authors_json] if authors_json else []
-                                    
-                                    publications.append(publication)
-                        except Exception as pub_error:
-                            logger.error(f"Error retrieving publication {resource_id}: {pub_error}")
-                    
-                    # If we found publications through expert links, return them
-                    if publications:
-                        publications.sort(key=lambda x: x.get('confidence', 0), reverse=True)
-                        return publications[:limit], None
-            
-            # 2. Semantic Search for Publications
-            # (Existing semantic search implementation remains unchanged)
-            # Fallback to existing robust publication search
-            return await self._fallback_publication_semantic_search(query, expert_id, limit)
-        
-        except Exception as e:
-            logger.error(f"Unhandled error in get_publications: {e}")
-            return [], f"An unexpected error occurred while searching for publications: {str(e)}"
-
+            logger.error(f"Error retrieving experts: {e}")
+            return [], "An error occurred while searching experts"
     async def _enrich_experts_with_publications(self, experts: List[Dict[str, Any]], limit_per_expert: int = 2) -> List[Dict[str, Any]]:
         """
         Enhanced method to enrich experts with publications from targeted indexing.
@@ -2125,7 +1981,6 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error enriching publications with experts: {e}")
             return publications
-    
 
     def _safe_json_load(self, json_str: str) -> Any:
         """Safely load JSON string to Python object."""

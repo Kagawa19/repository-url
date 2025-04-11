@@ -182,188 +182,55 @@ class EnhancedMatcher:
             
         return len(intersection) / len(union)
 
-    def match_experts_to_resources(self, experts: List[Any], resources: List[Any]) -> Dict[int, List[Tuple[int, float]]]:
+    def match_experts_to_resources(self, experts: List[Any], resources: List[Any]) -> Dict[int, List[Tuple[int, float, bool]]]:
         """
-        Match experts to resources based on name similarity and expertise.
-        Returns a dict mapping expert_id to list of (resource_id, confidence_score) tuples.
+        Match experts to resources with confidence score and source flag.
+        Returns: {expert_id: [(resource_id, confidence, is_aphrc_publication)]}
         """
-        try:
-            matches = {}
-            
-            # Build expert name lookup with full data
-            expert_lookup = {}
-            for expert in experts:
-                if isinstance(expert, tuple):
-                    # Get id and name fields from tuple
-                    expert_id = expert[0]  # ID is always first
-                    first_name = expert[1] if len(expert) > 1 else ''
-                    last_name = expert[2] if len(expert) > 2 else ''
-                    
-                    # Create both full name and parts
-                    full_name = self._normalize_name(f"{first_name} {last_name}")
-                    
-                    # Store the expert data for later use
-                    expert_lookup[expert_id] = {
-                        'id': expert_id,
-                        'first_name': first_name,
-                        'last_name': last_name,
-                        'full_name': full_name,
-                        'expertise': self._get_expert_expertise(expert),
-                        'raw_data': expert
-                    }
-                else:
-                    # Handle dictionary input
-                    expert_id = expert.get('id')
-                    if not expert_id:
-                        continue
-                        
-                    first_name = expert.get('first_name', '')
-                    last_name = expert.get('last_name', '')
-                    full_name = self._normalize_name(f"{first_name} {last_name}")
-                    
-                    # Extract any expertise
-                    expertise = set()
-                    if 'knowledge_expertise' in expert:
-                        try:
-                            exp_data = expert['knowledge_expertise']
-                            if isinstance(exp_data, str):
-                                exp_data = json.loads(exp_data)
-                            
-                            if isinstance(exp_data, dict):
-                                for values in exp_data.values():
-                                    if isinstance(values, list):
-                                        for item in values:
-                                            expertise.add(str(item).lower())
-                                    elif values:
-                                        expertise.add(str(values).lower())
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                    
-                    # Store for later
-                    expert_lookup[expert_id] = {
-                        'id': expert_id,
-                        'first_name': first_name,
-                        'last_name': last_name,
-                        'full_name': full_name,
-                        'expertise': expertise,
-                        'raw_data': expert
-                    }
-            
-            # Process each resource
-            for resource in resources:
+        # Cache APHRC experts and their normalized names
+        self.aphrc_expert_ids = {expert[0] for expert in experts}  # expert[0] = expert_id
+        self.name_cache = {
+            self._normalize_name(f"{expert[1]} {expert[2]}"): expert[0] 
+            for expert in experts
+        }
+
+        matches = {}
+
+        for resource in resources:
+            resource_id = resource[0]
+            authors = resource[1]
+
+            # Parse authors (handle JSON strings or lists)
+            if isinstance(authors, str):
                 try:
-                    if isinstance(resource, tuple):
-                        # Handle database tuple result - expect (id, authors, [optional fields])
-                        resource_id = resource[0]
-                        authors = resource[1]
-                        
-                        # Extract keywords from other fields if available
-                        resource_keywords = self._get_resource_keywords(resource)
-                        
-                        # Handle different author data formats
-                        if isinstance(authors, str):
-                            if not authors.strip():  # Handle empty strings
-                                author_list = []
-                            else:
-                                try:
-                                    author_list = json.loads(authors)
-                                except json.JSONDecodeError:
-                                    # If JSON parsing fails, try treating as single author
-                                    author_list = [authors]
-                        elif isinstance(authors, list):
-                            author_list = authors
-                        elif authors is None:
-                            author_list = []
-                        else:
-                            # Try converting to string if other type
-                            author_list = [str(authors)]
-                    else:
-                        # Handle dictionary input
-                        resource_id = resource.get('id')
-                        if not resource_id:
-                            continue
-                            
-                        author_list = resource.get('authors', [])
-                        if isinstance(author_list, str):
-                            try:
-                                author_list = json.loads(author_list)
-                            except json.JSONDecodeError:
-                                author_list = [author_list]
-                        
-                        # Extract keywords from other fields
-                        resource_keywords = set()
-                        for key in ['title', 'abstract', 'summary', 'description']:
-                            if key in resource and resource[key]:
-                                words = re.findall(r'\b\w{4,}\b', str(resource[key]).lower())
-                                resource_keywords.update(words)
-                                
-                        # Add domains if available
-                        if 'domains' in resource and resource['domains']:
-                            domains = resource['domains']
-                            if isinstance(domains, list):
-                                for domain in domains:
-                                    resource_keywords.add(str(domain).lower())
-                    
-                    # Skip empty author lists
-                    if not author_list:
-                        continue
-                        
-                    # Process each author
-                    for author in author_list:
-                        if not author:  # Skip empty author names
-                            continue
-                            
-                        normalized_author = self._normalize_name(author)
-                        
-                        # Check all experts for potential matches
-                        for expert_id, expert_data in expert_lookup.items():
-                            # Calculate name similarity
-                            name_similarity = self._calculate_name_similarity(
-                                normalized_author, expert_data['full_name'])
-                            
-                            # If name is similar enough, calculate expertise similarity
-                            if name_similarity >= self.name_similarity_threshold:
-                                # Exact match gets a high base score
-                                if name_similarity > 0.99:
-                                    confidence = 0.9
-                                else:
-                                    confidence = 0.7 * name_similarity
-                                
-                                # Add expertise similarity if we have expertise data
-                                expertise_similarity = self._calculate_expertise_similarity(
-                                    expert_data['expertise'], resource_keywords)
-                                    
-                                if expertise_similarity > self.expertise_similarity_threshold:
-                                    confidence += 0.3 * expertise_similarity
-                                
-                                # Ensure confidence is between 0 and 1
-                                confidence = min(1.0, max(0.0, confidence))
-                                
-                                # Add to matches if confidence is high enough
-                                if confidence >= 0.65:  # Higher threshold for better precision
-                                    if expert_id not in matches:
-                                        matches[expert_id] = []
-                                    
-                                    # Store resource_id with confidence score
-                                    matches[expert_id].append((resource_id, confidence))
-                                    
-                                    self.logger.debug(
-                                        f"Matched expert {expert_id} to resource {resource_id} " +
-                                        f"(name sim: {name_similarity:.2f}, " +
-                                        f"expertise sim: {expertise_similarity:.2f}, " +
-                                        f"confidence: {confidence:.2f})"
-                                    )
-                                
-                except (KeyError, TypeError) as e:
-                    self.logger.warning(f"Skipping malformed resource {resource_id if 'resource_id' in locals() else 'unknown'}: {e}")
-                    continue
-            
-            self.logger.info(f"Found {len(matches)} expert-resource matches with enhanced matching")
-            return matches
-            
-        except Exception as e:
-            self.logger.error(f"Error matching experts to resources: {e}")
-            raise
+                    author_list = json.loads(authors)
+                except json.JSONDecodeError:
+                    author_list = [authors]
+            else:
+                author_list = authors
+
+            # Identify APHRC and global authors
+            aphrc_authors, global_authors = self._identify_aphrc_authors(author_list)
+
+            # Match APHRC authors
+            for author in aphrc_authors:
+                normalized = self._normalize_name(author)
+                expert_id = self.name_cache.get(normalized)
+                if expert_id is not None:
+                    matches.setdefault(expert_id, []).append((resource_id, 0.9, True))
+
+            # Match global authors based on expertise similarity
+            if global_authors:
+                resource_keywords = self._get_resource_keywords(resource)
+                for expert_id, expert_data in expert_lookup.items():
+                    similarity = self._calculate_expertise_similarity(
+                        expert_data['expertise'], resource_keywords)
+                    if similarity > 0.3:
+                        matches.setdefault(expert_id, []).append(
+                            (resource_id, 0.6 * similarity, False)
+                        )
+
+        return matches
 
     def link_matched_experts_to_db(self) -> None:
         """Link matched experts to resources in database with confidence scores"""
@@ -408,6 +275,31 @@ class EnhancedMatcher:
         except Exception as e:
             self.logger.error(f"Error linking experts to resources: {e}")
             raise
+    def _identify_aphrc_authors(self, author_list: List[str]) -> Tuple[List[str], List[str]]:
+        """
+        Split authors into APHRC vs global based on name matching
+        Returns: (aphrc_authors, global_authors)
+        """
+        aphrc_authors = []
+        global_authors = []
+        
+        for author in author_list:
+            is_aphrc = False
+            normalized_author = self._normalize_name(author)
+            
+            # Check against cached APHRC experts
+            for expert_name, expert_id in self.name_cache.items():
+                if self._calculate_name_similarity(normalized_author, expert_name) >= 0.9:
+                    aphrc_authors.append(author)
+                    is_aphrc = True
+                    break
+                    
+            if not is_aphrc:
+                global_authors.append(author)
+                
+        return aphrc_authors, global_authors
+
+    
 
 # Keeping the original matcher for backward compatibility
 class Matcher:
@@ -418,6 +310,7 @@ class Matcher:
         self.logger = Logger(__name__)
         # Create enhanced matcher instance for use when requested
         self.enhanced_matcher = EnhancedMatcher()
+        self.aphrc_expert_ids = set() 
 
     def _normalize_name(self, name: str) -> str:
         """Normalize author name for comparison"""
@@ -526,6 +419,8 @@ class Matcher:
         except Exception as e:
             self.logger.error(f"Error matching experts to resources: {e}")
             raise
+
+    
 
     def link_matched_experts_to_db(self, use_enhanced: bool = False) -> None:
         """

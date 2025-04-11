@@ -315,44 +315,51 @@ class ExpertRedisIndexManager:
             return "Error Processing Expert Profile"
 
     def _store_expert_data(self, expert: Dict[str, Any], text_content: str, 
-                        embedding: np.ndarray) -> None:
-        """Store expert data in Redis including resource links."""
-        base_key = f"expert:{expert['id']}"
+                     embedding: np.ndarray) -> None:
+        """
+        Stores expert data with APHRC classification.
+        All experts from experts_expert table are considered APHRC experts.
+        """
+        # All experts are APHRC (from experts_expert table)
+        base_key = f"expert:aphrc:{expert['id']}"
         
         pipeline = self.redis_text.pipeline()
         try:
             # Store text content
             pipeline.set(f"text:{base_key}", text_content)
             
-            # Store embedding as binary
+            # Store embedding
             self.redis_binary.set(
-                f"emb:{base_key}", 
+                f"emb:{base_key}",
                 embedding.astype(np.float32).tobytes()
             )
             
-            # Store metadata
+            # Enhanced metadata with explicit APHRC marking
             metadata = {
                 'id': str(expert['id']),
-                'name': f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip(),
                 'first_name': str(expert.get('first_name', '')),
                 'last_name': str(expert.get('last_name', '')),
-                'expertise': json.dumps(expert.get('knowledge_expertise', {}))
+                'expertise': json.dumps(expert.get('knowledge_expertise', {})),
+                'is_aphrc': 'true',  # Explicit marker
+                'email': str(expert.get('email', '')),
+                'position': str(expert.get('position', '')),
+                # ... other existing fields ...
             }
             pipeline.hset(f"meta:{base_key}", mapping=metadata)
             
-            # Store resource links if they exist
+            # Store resource links (both APHRC and global publications)
             if expert.get('linked_resources'):
                 links_key = f"links:expert:{expert['id']}:resources"
-                pipeline.delete(links_key)  # Clear existing links
+                pipeline.delete(links_key)  # Clear existing
                 
-                # Add all resources with confidence scores
                 for link in expert['linked_resources']:
                     if link.get('resource_id') and link.get('confidence'):
                         pipeline.zadd(
                             links_key,
                             {str(link['resource_id']): float(link['confidence'])}
                         )
-                        # Also store reverse link
+                        
+                        # Reverse link (resource knows its APHRC experts)
                         res_key = f"links:resource:{link['resource_id']}:experts"
                         pipeline.zadd(
                             res_key,
@@ -363,7 +370,8 @@ class ExpertRedisIndexManager:
             
         except Exception as e:
             pipeline.reset()
-            raise e
+            logger.error(f"Error storing expert {expert.get('id')}: {e}")
+            raise
     def get_expert_metadata(self, expert_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve expert metadata from Redis."""
         try:
@@ -866,109 +874,85 @@ class ExpertRedisIndexManager:
                 if conn:
                     conn.close()
 
+
     def _store_resource_data(self, resource: Dict[str, Any], text_content: str, 
-                        embedding: np.ndarray) -> None:
-        """Store resource data in Redis with full resources_resource structure."""
-        base_key = f"resource:{resource['id']}"
+                       embedding: np.ndarray) -> None:
+        """
+        Stores publication with APHRC/global classification based on authors
+        """
+        # Determine if APHRC publication
+        author_list = resource.get('authors', [])
+        if isinstance(author_list, str):
+            try:
+                author_list = json.loads(author_list)
+            except json.JSONDecodeError:
+                author_list = [author_list]
         
+        is_aphrc = any(
+            self._calculate_name_similarity(
+                self._normalize_name(author),
+                expert_name
+            ) >= 0.9
+            for author in author_list
+            for expert_name in self.name_cache
+        )
+        
+        domain = 'aphrc' if is_aphrc else 'global'
+        base_key = f"resource:{domain}:{resource['id']}"
+
         pipeline = self.redis_text.pipeline()
         try:
-            # Store text content
+            # Store with domain classification
             pipeline.set(f"text:{base_key}", text_content)
+            self.redis_binary.set(f"emb:{base_key}", embedding.astype(np.float32).tobytes())
             
-            # Store embedding as binary
-            self.redis_binary.set(
-                f"emb:{base_key}", 
-                embedding.astype(np.float32).tobytes()
-            )
-            
-            # Store comprehensive metadata 
             metadata = {
-                'id': str(resource['id']),
-                'doi': str(resource.get('doi', '')),
-                'title': str(resource.get('title', '')),
-                'abstract': str(resource.get('abstract', '')),
-                'summary': str(resource.get('summary', '')),
-                'domains': json.dumps(resource.get('domains', [])),
-                'topics': json.dumps(resource.get('topics', {})),
-                'description': str(resource.get('description', '')),
-                'expert_id': str(resource.get('expert_id', '')),
-                'type': str(resource.get('type', 'publication')),
-                'subtitles': json.dumps(resource.get('subtitles', {})),
-                'publishers': json.dumps(resource.get('publishers', {})),
-                'collection': str(resource.get('collection', '')),
-                'date_issue': str(resource.get('date_issue', '')),
-                'citation': str(resource.get('citation', '')),
-                'language': str(resource.get('language', '')),
-                'identifiers': json.dumps(resource.get('identifiers', {})),
-                'created_at': str(resource.get('created_at', '')),
-                'updated_at': str(resource.get('updated_at', '')),
-                'source': str(resource.get('source', 'unknown')),
-                'authors': json.dumps(resource.get('authors', [])),
-                'publication_year': str(resource.get('publication_year', ''))
-            }
-            
+                    'id': str(resource['id']),
+                    'doi': str(resource.get('doi', '')),
+                    'title': str(resource.get('title', '')),
+                    'abstract': str(resource.get('abstract', '')),
+                    'summary': str(resource.get('summary', '')),
+                    'domains': json.dumps(resource.get('domains', [])),
+                    'topics': json.dumps(resource.get('topics', {})),
+                    'description': str(resource.get('description', '')),
+                    'expert_id': str(resource.get('expert_id', '')),
+                    'type': str(resource.get('type', 'publication')),
+                    'subtitles': json.dumps(resource.get('subtitles', {})),
+                    'publishers': json.dumps(resource.get('publishers', {})),
+                    'collection': str(resource.get('collection', '')),
+                    'date_issue': str(resource.get('date_issue', '')),
+                    'citation': str(resource.get('citation', '')),
+                    'language': str(resource.get('language', '')),
+                    'identifiers': json.dumps(resource.get('identifiers', {})),
+                    'created_at': str(resource.get('created_at', '')),
+                    'updated_at': str(resource.get('updated_at', '')),
+                    'source': str(resource.get('source', 'unknown')),
+                    'authors': json.dumps(resource.get('authors', [])),
+                    'publication_year': str(resource.get('publication_year', ''))
+                }
+                
             pipeline.hset(f"meta:{base_key}", mapping=metadata)
+            
+            # Store expert links only for APHRC authors
+            if is_aphrc:
+                for author in author_list:
+                    normalized = self._normalize_name(author)
+                    if normalized in self.name_cache:
+                        expert_id = self.name_cache[normalized]
+                        links_key = f"links:expert:{expert_id}:resources"
+                        pipeline.zadd(links_key, {str(resource['id']): 0.9})  # High confidence
+                        
+                        # Reverse link
+                        res_key = f"links:resource:{resource['id']}:experts"
+                        pipeline.zadd(res_key, {str(expert_id): 0.9})
             
             pipeline.execute()
             
         except Exception as e:
             pipeline.reset()
-            raise e
+            raise
 
-    def index_expert_resource_links(self):
-        """Index the relationships between experts and resources in Redis."""
-        try:
-            # Connect to database to get expert-resource links
-            conn = self.db.get_connection()
-            with conn.cursor() as cur:
-                # Get links with confidence scores
-                cur.execute("""
-                    SELECT expert_id, resource_id, confidence_score 
-                    FROM expert_resource_links
-                    WHERE confidence_score >= 0.7
-                    ORDER BY expert_id, confidence_score DESC
-                """)
-                
-                links = cur.fetchall()
-                logger.info(f"Retrieved {len(links)} expert-resource links to index")
-                
-                # Store links in Redis
-                pipeline = self.redis_text.pipeline()
-                
-                # Group by expert_id for efficiency
-                expert_resources = {}
-                for expert_id, resource_id, confidence in links:
-                    if expert_id not in expert_resources:
-                        expert_resources[expert_id] = []
-                    expert_resources[expert_id].append((resource_id, float(confidence)))
-                
-                # Store in Redis using sets and sorted sets
-                for expert_id, resources in expert_resources.items():
-                    # Create a sorted set key for each expert
-                    key = f"links:expert:{expert_id}:resources"
-                    
-                    # Clear existing set
-                    pipeline.delete(key)
-                    
-                    # Add all resources with confidence as score
-                    for resource_id, confidence in resources:
-                        pipeline.zadd(key, {str(resource_id): confidence})
-                    
-                    # Add inverse lookups for resources to experts
-                    for resource_id, confidence in resources:
-                        res_key = f"links:resource:{resource_id}:experts"
-                        pipeline.zadd(res_key, {str(expert_id): confidence})
-                
-                # Execute pipeline
-                pipeline.execute()
-                logger.info(f"Successfully indexed {len(expert_resources)} expert-resource relationships")
-                
-                return True
-        
-        except Exception as e:
-            logger.error(f"Error indexing expert-resource links: {e}")
-            return False
+
 
     def _create_resource_text_content(self, resource: Dict[str, Any]) -> str:
         """Create comprehensive text content for resource embedding."""
