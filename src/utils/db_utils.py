@@ -28,7 +28,7 @@ class DatabaseConnector:
         
         in_docker = os.getenv('DOCKER_ENV', 'false').lower() == 'true'
         return {
-            'host': os.getenv('POSTGRES_HOST', '167.86.85.127'),
+            'host': os.getenv('POSTGRES_HOST', 'postgres'),
             'port': os.getenv('POSTGRES_PORT', '5432'),
             'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
             'user': os.getenv('POSTGRES_USER', 'postgres'),
