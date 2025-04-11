@@ -503,18 +503,12 @@ class ExpertRedisIndexManager:
             # Step 3: Index publications/resources
             publications_success = self.create_publications_redis_index()
             
-            # Step 4: Index expert-resource relationships
-            links_success = self.index_expert_resource_links()
-            
             # Determine final indexing status
-            if experts_success and publications_success and links_success:
-                logger.info("Successfully indexed experts, publications, and their relationships in Redis")
-                return True
-            elif experts_success and publications_success:
-                logger.warning("Successfully indexed experts and publications, but failed to index their relationships")
+            if experts_success and publications_success:
+                logger.info("Successfully indexed experts and publications in Redis")
                 return True
             else:
-                logger.error("Failed to completely index experts, publications, and relationships")
+                logger.error("Failed to completely index experts and publications")
                 return False
             
         except Exception as final_err:
@@ -911,7 +905,6 @@ class ExpertRedisIndexManager:
         
         domain = 'aphrc' if is_aphrc else 'global'
         base_key = f"resource:{domain}:{resource['id']}"
-
         pipeline = self.redis_text.pipeline()
         try:
             # Store with domain classification
@@ -963,7 +956,7 @@ class ExpertRedisIndexManager:
         except Exception as e:
             pipeline.reset()
             raise
-    
+        
 
 
 
