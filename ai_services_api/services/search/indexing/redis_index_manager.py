@@ -878,10 +878,20 @@ class ExpertRedisIndexManager:
 
 
     def _store_resource_data(self, resource: Dict[str, Any], text_content: str, 
-                       embedding: np.ndarray) -> None:
+                    embedding: np.ndarray) -> None:
         """
         Stores publication with APHRC/global classification based on authors
         """
+        # Fetch experts to create a temporary name cache for APHRC experts
+        experts = self.fetch_experts()
+        
+        # Create a temporary name cache
+        temp_name_cache = {
+            self._normalize_name(f"{expert.get('first_name', '')} {expert.get('last_name', '')}").strip(): expert.get('id')
+            for expert in experts 
+            if expert.get('first_name') or expert.get('last_name')
+        }
+
         # Determine if APHRC publication
         author_list = resource.get('authors', [])
         if isinstance(author_list, str):
@@ -890,13 +900,13 @@ class ExpertRedisIndexManager:
             except json.JSONDecodeError:
                 author_list = [author_list]
         
+        def _normalize_name(name: str) -> str:
+            """Local normalization method"""
+            return ' '.join(name.lower().split())
+        
         is_aphrc = any(
-            self._calculate_name_similarity(
-                self._normalize_name(author),
-                expert_name
-            ) >= 0.9
+            _normalize_name(author) in temp_name_cache
             for author in author_list
-            for expert_name in self.name_cache
         )
         
         domain = 'aphrc' if is_aphrc else 'global'
@@ -938,9 +948,9 @@ class ExpertRedisIndexManager:
             # Store expert links only for APHRC authors
             if is_aphrc:
                 for author in author_list:
-                    normalized = self._normalize_name(author)
-                    if normalized in self.name_cache:
-                        expert_id = self.name_cache[normalized]
+                    normalized = _normalize_name(author)
+                    if normalized in temp_name_cache:
+                        expert_id = temp_name_cache[normalized]
                         links_key = f"links:expert:{expert_id}:resources"
                         pipeline.zadd(links_key, {str(resource['id']): 0.9})  # High confidence
                         
@@ -953,7 +963,6 @@ class ExpertRedisIndexManager:
         except Exception as e:
             pipeline.reset()
             raise
-
     
 
 
