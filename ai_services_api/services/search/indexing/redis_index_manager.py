@@ -871,6 +871,28 @@ class ExpertRedisIndexManager:
 
 
 
+    def _normalize_name(self, name: str) -> str:
+        """Normalize author name for comparison"""
+        if not name or not isinstance(name, str):
+            return ""
+        
+        # Convert to lowercase and remove extra spaces
+        normalized = ' '.join(name.lower().split())
+        
+        # Remove common suffixes and prefixes
+        prefixes = ['dr.', 'dr ', 'prof.', 'prof ', 'professor ', 'mr.', 'mr ', 'mrs.', 'mrs ', 'ms.', 'ms ']
+        suffixes = [' phd', ' md', ' jr', ' sr', ' jr.', ' sr.', ' ii', ' iii', ' iv']
+        
+        for prefix in prefixes:
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):].strip()
+                
+        for suffix in suffixes:
+            if normalized.endswith(suffix):
+                normalized = normalized[:-len(suffix)].strip()
+        
+        return normalized
+
     def _store_resource_data(self, resource: Dict[str, Any], text_content: str, 
                     embedding: np.ndarray) -> None:
         """
@@ -894,12 +916,8 @@ class ExpertRedisIndexManager:
             except json.JSONDecodeError:
                 author_list = [author_list]
         
-        def _normalize_name(name: str) -> str:
-            """Local normalization method"""
-            return ' '.join(name.lower().split())
-        
         is_aphrc = any(
-            _normalize_name(author) in temp_name_cache
+            self._normalize_name(author) in temp_name_cache
             for author in author_list
         )
         
@@ -941,7 +959,7 @@ class ExpertRedisIndexManager:
             # Store expert links only for APHRC authors
             if is_aphrc:
                 for author in author_list:
-                    normalized = _normalize_name(author)
+                    normalized = self._normalize_name(author)
                     if normalized in temp_name_cache:
                         expert_id = temp_name_cache[normalized]
                         links_key = f"links:expert:{expert_id}:resources"
@@ -956,7 +974,6 @@ class ExpertRedisIndexManager:
         except Exception as e:
             pipeline.reset()
             raise
-        
 
 
 
