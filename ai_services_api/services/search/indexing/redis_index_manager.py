@@ -438,10 +438,9 @@ class ExpertRedisIndexManager:
             return False
 
     
-        
     def create_redis_index(self) -> bool:
         """
-        Create Redis indexes for both experts and publications with comprehensive error handling and logging.
+        Create Redis indexes for experts, publications, and their relationships.
         
         Returns:
             bool: True if indexing was successful, False otherwise
@@ -453,6 +452,7 @@ class ExpertRedisIndexManager:
             overall_success = True
             experts_success = False
             publications_success = False
+            links_success = False
             
             # Step 1: Process experts
             try:
@@ -563,21 +563,39 @@ class ExpertRedisIndexManager:
             except Exception as resources_fetch_err:
                 logger.error(f"Failed to fetch or process publications: {resources_fetch_err}")
                 overall_success = False
+                
+            # Step 3: Index expert-resource relationships
+            try:
+                # Only attempt to index links if both experts and resources were indexed
+                if experts_success and publications_success:
+                    links_success = self.index_expert_resource_links()
+                    if links_success:
+                        logger.info("Successfully indexed expert-resource relationships")
+                    else:
+                        logger.warning("Failed to index expert-resource relationships")
+                else:
+                    logger.warning("Skipping expert-resource link indexing due to failed expert or resource indexing")
+            except Exception as links_err:
+                logger.error(f"Error indexing expert-resource links: {links_err}")
+                links_success = False
             
             # Determine final indexing status
-            if experts_success and publications_success:
-                logger.info("Successfully indexed both experts and publications in Redis")
+            if experts_success and publications_success and links_success:
+                logger.info("Successfully indexed experts, publications, and their relationships in Redis")
+                return True
+            elif experts_success and publications_success:
+                logger.warning("Successfully indexed experts and publications, but failed to index their relationships")
                 return True
             elif experts_success:
-                logger.warning("Successfully indexed experts, but failed to index publications")
+                logger.warning("Successfully indexed experts, but failed to index publications and relationships")
                 return False
             elif publications_success:
-                logger.warning("Successfully indexed publications, but failed to index experts")
+                logger.warning("Successfully indexed publications, but failed to index experts and relationships")
                 return False
             else:
-                logger.error("Failed to index both experts and publications")
+                logger.error("Failed to index experts, publications, and relationships")
                 return False
-        
+            
         except Exception as final_err:
             logger.error(f"Catastrophic error during Redis indexing: {final_err}")
             return False
@@ -596,98 +614,193 @@ class ExpertRedisIndexManager:
         """
         try:
             logger.info(f"Retrieving publications for expert {expert_id}")
-            
-            # First try to find direct matches in the metadata
             publications = []
-            publication_keys = []
             
-            # Scan for resources with matching expert_id
-            cursor = 0
-            while True:
-                cursor, keys = self.redis_text.scan(cursor, match="meta:resource:*", count=100)
-                for key in keys:
-                    try:
-                        # Check if this resource is linked to the expert
-                        meta = self.redis_text.hgetall(key)
-                        if meta.get('expert_id') == str(expert_id):
-                            publication_keys.append(key)
-                    except Exception as e:
-                        logger.error(f"Error processing key {key}: {e}")
-                
-                if cursor == 0:
-                    break
-            
-            # If we don't have enough direct matches, try to find more via author name
-            if len(publication_keys) < limit:
-                # Get expert name for matching
-                expert_meta = self.redis_text.hgetall(f"meta:expert:{expert_id}")
-                if expert_meta:
-                    expert_name = f"{expert_meta.get('first_name', '')} {expert_meta.get('last_name', '')}".strip().lower()
+            # 1. First check the dedicated expert-resource links
+            try:
+                # Check if we have a sorted set for this expert
+                links_key = f"links:expert:{expert_id}:resources"
+                if self.redis_text.exists(links_key):
+                    # Get resource IDs sorted by confidence (highest first)
+                    resource_items = self.redis_text.zrevrange(
+                        links_key, 0, limit-1, withscores=True
+                    )
                     
-                    if expert_name:
-                        # Scan for resources with matching author
-                        cursor = 0
-                        while len(publication_keys) < limit and cursor != 0 or not publication_keys:
-                            cursor, keys = self.redis_text.scan(cursor, match="meta:resource:*", count=100)
-                            for key in keys:
-                                if key in publication_keys:
-                                    continue  # Skip already found publications
-                                    
+                    # If we have results from links, process them
+                    if resource_items:
+                        logger.info(f"Found {len(resource_items)} linked resources for expert {expert_id}")
+                        
+                        for resource_id, confidence in resource_items:
+                            # Get resource metadata
+                            meta_key = f"meta:resource:{resource_id}"
+                            if not self.redis_text.exists(meta_key):
+                                continue
+                                
+                            meta = self.redis_text.hgetall(meta_key)
+                            if meta:
+                                # Parse JSON fields
+                                publication = {
+                                    'id': meta.get('id', ''),
+                                    'title': meta.get('title', ''),
+                                    'doi': meta.get('doi', ''),
+                                    'abstract': meta.get('abstract', ''),
+                                    'publication_year': meta.get('publication_year', ''),
+                                    'confidence': float(confidence)
+                                }
+                                
+                                # Parse authors
                                 try:
-                                    meta = self.redis_text.hgetall(key)
                                     authors_json = meta.get('authors', '[]')
-                                    
-                                    try:
-                                        authors = json.loads(authors_json)
-                                        if isinstance(authors, list):
-                                            # Check if expert name appears in author list
-                                            for author in authors:
-                                                if expert_name in str(author).lower():
-                                                    publication_keys.append(key)
-                                                    break
-                                    except json.JSONDecodeError:
-                                        # Handle non-JSON authors field
-                                        if expert_name in authors_json.lower():
-                                            publication_keys.append(key)
-                                except Exception as e:
-                                    logger.error(f"Error processing key {key} for author match: {e}")
-                            
-                            if cursor == 0:
-                                break
+                                    publication['authors'] = json.loads(authors_json) if authors_json else []
+                                except json.JSONDecodeError:
+                                    publication['authors'] = [authors_json] if authors_json else []
+                                
+                                publications.append(publication)
+                        
+                        # If we found enough publications through links, return them
+                        if len(publications) >= limit:
+                            return publications[:limit]
+            except Exception as links_error:
+                logger.error(f"Error retrieving linked resources for expert {expert_id}: {links_error}")
             
-            # Limit the number of publications and retrieve full metadata
-            publication_keys = publication_keys[:limit]
-            logger.info(f"Found {len(publication_keys)} publication keys for expert {expert_id}")
-            
-            # Retrieve full metadata for each publication
-            for key in publication_keys:
+            # 2. If we don't have enough publications from links, look for direct matches
+            if len(publications) < limit:
                 try:
-                    meta = self.redis_text.hgetall(key)
-                    if meta:
-                        # Parse JSON fields
-                        publication = {
-                            'id': meta.get('id', ''),
-                            'title': meta.get('title', ''),
-                            'doi': meta.get('doi', ''),
-                            'abstract': meta.get('abstract', ''),
-                            'publication_year': meta.get('publication_year', '')
-                        }
+                    # Scan for resources with matching expert_id
+                    remaining = limit - len(publications)
+                    cursor = 0
+                    direct_matches = []
+                    
+                    while len(direct_matches) < remaining and (cursor != 0 or not direct_matches):
+                        cursor, keys = self.redis_text.scan(cursor, match="meta:resource:*", count=100)
+                        for key in keys:
+                            # Skip if we already found this resource
+                            resource_id = key.split(':')[-1]
+                            if any(p.get('id') == resource_id for p in publications):
+                                continue
+                                
+                            try:
+                                # Check if this resource is linked to the expert
+                                meta = self.redis_text.hgetall(key)
+                                if meta.get('expert_id') == str(expert_id):
+                                    # Parse JSON fields
+                                    publication = {
+                                        'id': meta.get('id', ''),
+                                        'title': meta.get('title', ''),
+                                        'doi': meta.get('doi', ''),
+                                        'abstract': meta.get('abstract', ''),
+                                        'publication_year': meta.get('publication_year', ''),
+                                        'confidence': 0.95  # High confidence for direct expert_id match
+                                    }
+                                    
+                                    # Parse authors
+                                    try:
+                                        authors_json = meta.get('authors', '[]')
+                                        publication['authors'] = json.loads(authors_json) if authors_json else []
+                                    except json.JSONDecodeError:
+                                        publication['authors'] = [authors_json] if authors_json else []
+                                    
+                                    direct_matches.append(publication)
+                                    
+                                    # Stop if we have enough matches
+                                    if len(direct_matches) >= remaining:
+                                        break
+                            except Exception as e:
+                                logger.error(f"Error processing key {key}: {e}")
                         
-                        # Parse authors
-                        try:
-                            authors_json = meta.get('authors', '[]')
-                            publication['authors'] = json.loads(authors_json) if authors_json else []
-                        except json.JSONDecodeError:
-                            publication['authors'] = [authors_json] if authors_json else []
-                        
-                        # Add confidence score (defaults to 1.0 for direct matches)
-                        publication['confidence'] = 1.0
-                        
-                        publications.append(publication)
-                except Exception as e:
-                    logger.error(f"Error retrieving publication metadata for {key}: {e}")
+                        if cursor == 0 or len(direct_matches) >= remaining:
+                            break
+                    
+                    # Add direct matches to publications
+                    publications.extend(direct_matches)
+                    
+                    # If we have enough publications now, return them
+                    if len(publications) >= limit:
+                        return publications[:limit]
+                except Exception as direct_error:
+                    logger.error(f"Error finding direct matches for expert {expert_id}: {direct_error}")
             
-            return publications
+            # 3. If we still don't have enough, try author name matching
+            if len(publications) < limit:
+                try:
+                    # Get expert name for matching
+                    expert_meta = self.redis_text.hgetall(f"meta:expert:{expert_id}")
+                    if expert_meta:
+                        expert_name = f"{expert_meta.get('first_name', '')} {expert_meta.get('last_name', '')}".strip().lower()
+                        
+                        if expert_name:
+                            # Scan for resources with matching author
+                            remaining = limit - len(publications)
+                            cursor = 0
+                            author_matches = []
+                            
+                            while len(author_matches) < remaining and (cursor != 0 or not author_matches):
+                                cursor, keys = self.redis_text.scan(cursor, match="meta:resource:*", count=100)
+                                for key in keys:
+                                    # Skip if we already found this resource
+                                    resource_id = key.split(':')[-1]
+                                    if any(p.get('id') == resource_id for p in publications):
+                                        continue
+                                        
+                                    try:
+                                        meta = self.redis_text.hgetall(key)
+                                        authors_json = meta.get('authors', '[]')
+                                        
+                                        try:
+                                            authors = json.loads(authors_json)
+                                            if isinstance(authors, list):
+                                                # Check if expert name appears in author list
+                                                for author in authors:
+                                                    if expert_name in str(author).lower():
+                                                        # Parse JSON fields
+                                                        publication = {
+                                                            'id': meta.get('id', ''),
+                                                            'title': meta.get('title', ''),
+                                                            'doi': meta.get('doi', ''),
+                                                            'abstract': meta.get('abstract', ''),
+                                                            'publication_year': meta.get('publication_year', ''),
+                                                            'confidence': 0.8  # Good confidence for author name match
+                                                        }
+                                                        
+                                                        publication['authors'] = authors
+                                                        author_matches.append(publication)
+                                                        break
+                                        except json.JSONDecodeError:
+                                            # Handle non-JSON authors field
+                                            if expert_name in authors_json.lower():
+                                                # Parse JSON fields
+                                                publication = {
+                                                    'id': meta.get('id', ''),
+                                                    'title': meta.get('title', ''),
+                                                    'doi': meta.get('doi', ''),
+                                                    'abstract': meta.get('abstract', ''),
+                                                    'publication_year': meta.get('publication_year', ''),
+                                                    'confidence': 0.8  # Good confidence for author name match
+                                                }
+                                                
+                                                publication['authors'] = [authors_json] if authors_json else []
+                                                author_matches.append(publication)
+                                        
+                                        # Stop if we have enough matches
+                                        if len(author_matches) >= remaining:
+                                            break
+                                    except Exception as e:
+                                        logger.error(f"Error processing key {key} for author match: {e}")
+                                
+                                if cursor == 0 or len(author_matches) >= remaining:
+                                    break
+                            
+                            # Add author matches to publications
+                            publications.extend(author_matches)
+                except Exception as author_error:
+                    logger.error(f"Error finding author matches for expert {expert_id}: {author_error}")
+            
+            # Sort by confidence score
+            publications.sort(key=lambda x: x.get('confidence', 0), reverse=True)
+            
+            # Limit to requested number
+            logger.info(f"Found {len(publications)} publication keys for expert {expert_id}")
+            return publications[:limit]
             
         except Exception as e:
             logger.error(f"Error retrieving publications for expert {expert_id}: {e}")
@@ -833,6 +946,60 @@ class ExpertRedisIndexManager:
         except Exception as e:
             pipeline.reset()
             raise e
+
+    def index_expert_resource_links(self):
+        """Index the relationships between experts and resources in Redis."""
+        try:
+            # Connect to database to get expert-resource links
+            conn = self.db.get_connection()
+            with conn.cursor() as cur:
+                # Get links with confidence scores
+                cur.execute("""
+                    SELECT expert_id, resource_id, confidence_score 
+                    FROM expert_resource_links
+                    WHERE confidence_score >= 0.7
+                    ORDER BY expert_id, confidence_score DESC
+                """)
+                
+                links = cur.fetchall()
+                logger.info(f"Retrieved {len(links)} expert-resource links to index")
+                
+                # Store links in Redis
+                pipeline = self.redis_text.pipeline()
+                
+                # Group by expert_id for efficiency
+                expert_resources = {}
+                for expert_id, resource_id, confidence in links:
+                    if expert_id not in expert_resources:
+                        expert_resources[expert_id] = []
+                    expert_resources[expert_id].append((resource_id, float(confidence)))
+                
+                # Store in Redis using sets and sorted sets
+                for expert_id, resources in expert_resources.items():
+                    # Create a sorted set key for each expert
+                    key = f"links:expert:{expert_id}:resources"
+                    
+                    # Clear existing set
+                    pipeline.delete(key)
+                    
+                    # Add all resources with confidence as score
+                    for resource_id, confidence in resources:
+                        pipeline.zadd(key, {str(resource_id): confidence})
+                    
+                    # Add inverse lookups for resources to experts
+                    for resource_id, confidence in resources:
+                        res_key = f"links:resource:{resource_id}:experts"
+                        pipeline.zadd(res_key, {str(expert_id): confidence})
+                
+                # Execute pipeline
+                pipeline.execute()
+                logger.info(f"Successfully indexed {len(expert_resources)} expert-resource relationships")
+                
+                return True
+        
+        except Exception as e:
+            logger.error(f"Error indexing expert-resource links: {e}")
+            return False
 
     def _create_resource_text_content(self, resource: Dict[str, Any]) -> str:
         """Create comprehensive text content for resource embedding."""

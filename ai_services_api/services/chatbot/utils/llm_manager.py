@@ -216,39 +216,65 @@ class GeminiLLMManager:
             raise
 
     async def _get_expert_publications(self, expert_id: str, limit: int = 3) -> List[Dict[str, Any]]:
-        """Get publications associated with an expert."""
+        """Get publications associated with an expert from both Redis links and database."""
         try:
-            # Create placeholders for SQL query
-            async with DatabaseConnector.get_connection() as conn:
-                query = f"""
-                    SELECT r.id, r.title, r.publication_year, r.doi, l.confidence_score
-                    FROM expert_resource_links l
-                    JOIN resources_resource r ON l.resource_id = r.id
-                    WHERE l.expert_id = $1
-                    AND l.confidence_score >= 0.7
-                    ORDER BY l.confidence_score DESC, r.publication_year DESC
-                    LIMIT $2
-                """
-                
-                rows = await conn.fetch(query, expert_id, limit)
-                
-                # Format results
-                publications = []
-                for row in rows:
-                    publications.append({
-                        'id': row['id'],
-                        'title': row['title'],
-                        'publication_year': row['publication_year'],
-                        'doi': row['doi'],
-                        'confidence': row['confidence_score']
-                    })
-                
-                return publications
-                
+            publications = []
+            
+            # 1. First try Redis for faster retrieval
+            if self.redis_manager:
+                try:
+                    redis_publications = self.redis_manager.get_publications_by_expert_id(expert_id, limit)
+                    if redis_publications:
+                        publications.extend(redis_publications)
+                        logger.info(f"Retrieved {len(redis_publications)} publications for expert {expert_id} from Redis")
+                except Exception as redis_error:
+                    logger.error(f"Error retrieving publications from Redis: {redis_error}")
+            
+            # 2. If we don't have enough publications, try database
+            if len(publications) < limit:
+                try:
+                    # Create placeholders for SQL query
+                    async with DatabaseConnector.get_connection() as conn:
+                        query = f"""
+                            SELECT r.id, r.title, r.publication_year, r.doi, l.confidence_score
+                            FROM expert_resource_links l
+                            JOIN resources_resource r ON l.resource_id = r.id
+                            WHERE l.expert_id = $1
+                            AND l.confidence_score >= 0.7
+                            ORDER BY l.confidence_score DESC, r.publication_year DESC
+                            LIMIT $2
+                        """
+                        
+                        rows = await conn.fetch(query, expert_id, limit - len(publications))
+                        
+                        # Format results
+                        db_publications = []
+                        for row in rows:
+                            # Check if this publication is already in the results
+                            if not any(p.get('id') == row['id'] for p in publications):
+                                db_publications.append({
+                                    'id': row['id'],
+                                    'title': row['title'],
+                                    'publication_year': row['publication_year'],
+                                    'doi': row['doi'],
+                                    'confidence': row['confidence_score']
+                                })
+                        
+                        # Add database publications
+                        publications.extend(db_publications)
+                        logger.info(f"Retrieved {len(db_publications)} publications for expert {expert_id} from database")
+                except Exception as db_error:
+                    logger.error(f"Error fetching publications from database: {db_error}")
+            
+            # 3. Sort by confidence score
+            publications.sort(key=lambda x: x.get('confidence', 0), reverse=True)
+            
+            # 4. Apply final limit
+            return publications[:limit]
+                    
         except Exception as e:
             logger.error(f"Error fetching publications for expert {expert_id}: {e}")
             return []
-
     # 2. Update _get_all_expert_keys method in GeminiLLMManager
 
     async def _get_all_expert_keys(self):
@@ -1422,6 +1448,60 @@ class GeminiLLMManager:
         if len(self.context_window) > self.max_context_items:
             self.context_window.pop(0)
 
+    def update_expert_resource_links(self):
+        """Update the expert-resource relationships in Redis without full reindexing."""
+        try:
+            # Connect to database to get expert-resource links
+            conn = self.db.get_connection()
+            with conn.cursor() as cur:
+                # Get links with confidence scores
+                cur.execute("""
+                    SELECT expert_id, resource_id, confidence_score 
+                    FROM expert_resource_links
+                    WHERE confidence_score >= 0.7
+                    ORDER BY expert_id, confidence_score DESC
+                """)
+                
+                links = cur.fetchall()
+                logger.info(f"Retrieved {len(links)} expert-resource links to update")
+                
+                # Store links in Redis
+                pipeline = self.redis_text.pipeline()
+                
+                # Group by expert_id for efficiency
+                expert_resources = {}
+                for expert_id, resource_id, confidence in links:
+                    if expert_id not in expert_resources:
+                        expert_resources[expert_id] = []
+                    expert_resources[expert_id].append((resource_id, float(confidence)))
+                
+                # Store in Redis using sets and sorted sets
+                for expert_id, resources in expert_resources.items():
+                    # Create a sorted set key for each expert
+                    key = f"links:expert:{expert_id}:resources"
+                    
+                    # Clear existing set
+                    pipeline.delete(key)
+                    
+                    # Add all resources with confidence as score
+                    for resource_id, confidence in resources:
+                        pipeline.zadd(key, {str(resource_id): confidence})
+                    
+                    # Add inverse lookups for resources to experts
+                    for resource_id, confidence in resources:
+                        res_key = f"links:resource:{resource_id}:experts"
+                        pipeline.zadd(res_key, {str(expert_id): confidence})
+                
+                # Execute pipeline
+                pipeline.execute()
+                logger.info(f"Successfully updated {len(expert_resources)} expert-resource relationships")
+                
+                return True
+        
+        except Exception as e:
+            logger.error(f"Error updating expert-resource links: {e}")
+            return False
+
     async def _enrich_publications_with_experts(self, publications: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Enrich publication data with information about associated experts.
@@ -1442,7 +1522,7 @@ class GeminiLLMManager:
                 return publications
                     
             # Get expert information for these publications
-            pub_expert_map = await self._get_expert_for_publications(pub_ids)
+            pub_expert_map = await self._get_expert_publications(pub_ids)
             
             # Enrich each publication with expert information
             for pub in publications:
