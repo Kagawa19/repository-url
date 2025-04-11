@@ -220,22 +220,28 @@ class GeminiLLMManager:
         Enhanced intent detection using multiple fallback strategies.
         Now includes embedding model fallback and better error handling.
         """
+        logger.info(f"Detecting intent for message: {message}")
+        
         try:
             # First try with embeddings if available
             if self.embedding_model:
                 try:
-                    return await self._detect_intent_with_embeddings(message)
+                    intent_result = await self._detect_intent_with_embeddings(message)
+                    logger.info(f"Embedding intent detection result: {intent_result['intent']} with confidence {intent_result['confidence']}")
+                    return intent_result
                 except Exception as e:
                     logger.warning(f"Embedding intent detection failed: {e}")
                         
             # Fallback to keyword matching
             keyword_result = self._detect_intent_with_keywords(message)
             if keyword_result['confidence'] > 0.7:
+                logger.info(f"Keyword intent detection result: {keyword_result['intent']} with confidence {keyword_result['confidence']}")
                 return keyword_result
                     
             # Final fallback to Gemini API with rate limit protection
             try:
                 if not await self.circuit_breaker.check():
+                    logger.warning("Circuit breaker open, using default GENERAL intent")
                     return {
                         'intent': QueryIntent.GENERAL,
                         'confidence': 0.0,
@@ -289,6 +295,7 @@ class GeminiLLMManager:
                     if 'expert_name' in result and result['expert_name']:
                         intent_result['expert_name'] = result['expert_name']
                     
+                    logger.info(f"Gemini intent detection result: {intent_result['intent']} with confidence {intent_result['confidence']}")
                     return intent_result
                 else:
                     # Handle case where JSON could not be extracted properly
@@ -1700,27 +1707,39 @@ class GeminiLLMManager:
         - Preserves fallback mechanisms
         - Improves retrieval efficiency
         """
+        logger.info(f"Retrieving experts with query: {query}")
+        
         try:
             if not self.redis_manager:
                 logger.warning("Redis manager not available, cannot retrieve experts")
                 return [], "Our expert database is currently unavailable. Please try again later."
             
-            logger.info(f"Retrieving experts relevant to: {query}")
+            # Detect gender-specific queries
+            gender_query = False
+            if any(term in query.lower() for term in ["female", "women", "woman"]):
+                gender_query = True
+                logger.info("Detected gender-specific query for female experts")
             
             # Clean query for processing
             cleaned_query = re.sub(r'[^\w\s]', ' ', query.lower()).strip()
+            logger.info(f"Cleaned query: '{cleaned_query}'")
             
             # 1. Direct Targeted Indexing Lookup
             targeted_matches = []
             
             # Scan through expert metadata keys from targeted indexing
             cursor = 0
-            while cursor != 0 or not targeted_matches:
+            keys_found = False  # Track if any keys were found
+            
+            while cursor != 0 or not keys_found:
                 cursor, keys = self.redis_manager.redis_text.scan(
                     cursor, 
                     match='meta:expert:*', 
                     count=100
                 )
+                
+                keys_found = keys_found or bool(keys)
+                logger.debug(f"Redis scan returned {len(keys)} expert keys with cursor {cursor}")
                 
                 for key in keys:
                     try:
@@ -1734,17 +1753,51 @@ class GeminiLLMManager:
                         last_name = raw_data.get('last_name', '').lower()
                         full_name = f"{first_name} {last_name}".strip()
                         
-                        # Enhanced matching for targeted indexing
+                        # For gender-specific queries
+                        if gender_query:
+                            # Try to determine gender from metadata
+                            gender = raw_data.get('gender', '').lower()
+                            
+                            # If gender is specified and not female, skip
+                            if gender and gender not in ['female', 'woman', 'women', 'f']:
+                                continue
+                            
+                            # If no gender in metadata, we could use a name-based inference
+                            # but for now include all experts if no gender filter
+                            
+                            # Add to matches for gender query with reasonable confidence
+                            match_score = 0.75
+                            expert = {
+                                'id': key.split(':')[-1],
+                                'first_name': first_name.title(),
+                                'last_name': last_name.title(),
+                                'expertise': self._safe_json_load(raw_data.get('expertise', '[]')),
+                                'research_interests': self._safe_json_load(raw_data.get('research_interests', '[]')),
+                                'position': raw_data.get('position', ''),
+                                'department': raw_data.get('department', ''),
+                                'email': raw_data.get('email', ''),
+                                'confidence': match_score
+                            }
+                            
+                            targeted_matches.append(expert)
+                            continue
+                        
+                        # Non-gender specific matching
                         match_score = 0.0
+                        # Exact match in name
                         if cleaned_query in full_name:
                             match_score = 1.0
+                            logger.debug(f"Exact name match for expert '{full_name}'")
+                        # Partial match in name
                         elif any(part in full_name for part in cleaned_query.split()):
                             match_score = 0.8
+                            logger.debug(f"Partial name match for expert '{full_name}'")
                         
                         # Check expertise and research interests for additional matching
                         expertise = self._safe_json_load(raw_data.get('expertise', '[]'))
                         research_interests = self._safe_json_load(raw_data.get('research_interests', '[]'))
                         
+                        # Check if query terms match expertise or research interests
                         expertise_match = any(
                             cleaned_query in str(exp).lower() 
                             for exp in expertise + research_interests
@@ -1752,6 +1805,7 @@ class GeminiLLMManager:
                         
                         if expertise_match:
                             match_score = max(match_score, 0.7)
+                            logger.debug(f"Expertise match for expert '{full_name}'")
                         
                         # If we have a reasonable match
                         if match_score > 0.5:
@@ -1768,6 +1822,7 @@ class GeminiLLMManager:
                             }
                             
                             targeted_matches.append(expert)
+                            logger.debug(f"Added expert '{full_name}' with score {match_score}")
                             
                             # Stop if we've found enough matches
                             if len(targeted_matches) >= limit:
@@ -1781,16 +1836,73 @@ class GeminiLLMManager:
             # Sort targeted matches by confidence
             targeted_matches.sort(key=lambda x: x.get('confidence', 0), reverse=True)
             
+            logger.info(f"Found {len(targeted_matches)} experts through targeted indexing")
+            
             # If we found matches in targeted indexing, return them
             if targeted_matches:
-                logger.info(f"Found {len(targeted_matches)} experts through targeted indexing")
+                # Log the specific experts found
+                for expert in targeted_matches[:limit]:
+                    name = f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip()
+                    logger.info(f"Returning expert: {name} with confidence {expert.get('confidence', 0)}")
                 return targeted_matches[:limit], None
             
-            # 2. Fallback to existing semantic search methods
-            # (Existing semantic search implementation remains unchanged)
-            # This ensures we maintain the previous robust search capabilities
-            return await self._fallback_expert_semantic_search(cleaned_query, limit)
-        
+            # 2. If no targeted matches and we have a gender query, do a scan for all experts
+            if gender_query and not targeted_matches:
+                logger.info("No targeted matches for gender query, scanning all experts")
+                all_experts = []
+                cursor = 0
+                while cursor != 0 or not all_experts:
+                    cursor, keys = self.redis_manager.redis_text.scan(
+                        cursor, 
+                        match='meta:expert:*', 
+                        count=100
+                    )
+                    
+                    for key in keys:
+                        try:
+                            raw_data = self.redis_manager.redis_text.hgetall(key)
+                            if not raw_data:
+                                continue
+                            
+                            first_name = raw_data.get('first_name', '').title()
+                            last_name = raw_data.get('last_name', '').title()
+                            
+                            expert = {
+                                'id': key.split(':')[-1],
+                                'first_name': first_name,
+                                'last_name': last_name,
+                                'expertise': self._safe_json_load(raw_data.get('expertise', '[]')),
+                                'research_interests': self._safe_json_load(raw_data.get('research_interests', '[]')),
+                                'position': raw_data.get('position', ''),
+                                'department': raw_data.get('department', ''),
+                                'email': raw_data.get('email', ''),
+                                'confidence': 0.6  # Default confidence for gender-only queries
+                            }
+                            
+                            all_experts.append(expert)
+                            
+                            if len(all_experts) >= limit:
+                                break
+                        except Exception as e:
+                            logger.warning(f"Error processing expert key {key}: {e}")
+                    
+                    if cursor == 0 or len(all_experts) >= limit:
+                        break
+                
+                if all_experts:
+                    logger.info(f"Found {len(all_experts)} experts for gender query")
+                    return all_experts[:limit], None
+            
+            # 3. If still no results, check if we have a fallback method
+            # Try to import the fallback method if it exists
+            if hasattr(self, '_fallback_expert_semantic_search'):
+                logger.info("No experts found through targeted indexing, falling back to semantic search")
+                return await self._fallback_expert_semantic_search(cleaned_query, limit)
+            else:
+                logger.warning("No fallback semantic search method available")
+                # If no results and no fallback, return empty with a message
+                return [], "No matching experts found in our database."
+            
         except Exception as e:
             logger.error(f"Unhandled error in get_experts: {e}")
             return [], f"An unexpected error occurred while searching for experts: {str(e)}"
