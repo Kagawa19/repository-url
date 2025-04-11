@@ -178,7 +178,7 @@ class ExpertRedisIndexManager:
             return "Error Processing Resource"
 
     def fetch_experts(self) -> List[Dict[str, Any]]:
-        """Fetch all expert data from database with only required columns."""
+        """Fetch all expert data from database including their resource links."""
         max_retries = 3
         retry_delay = 2
         
@@ -188,19 +188,44 @@ class ExpertRedisIndexManager:
             try:
                 conn = self.db.get_connection()
                 with conn.cursor() as cur:
-                    # Check if table exists
+                    # Check if tables exist
                     cur.execute("""
                         SELECT EXISTS (
                             SELECT FROM information_schema.tables 
                             WHERE table_name = 'experts_expert'
-                        );
+                        ) AS expert_table_exists,
+                        EXISTS (
+                            SELECT FROM information_schema.tables
+                            WHERE table_name = 'expert_resource_links'
+                        ) AS links_table_exists;
                     """)
-                    if not cur.fetchone()[0]:
+                    exists = cur.fetchone()
+                    if not exists[0]:  # experts_expert table doesn't exist
                         logger.warning("experts_expert table does not exist yet")
                         return []
                     
-                    # Updated query to use only required columns
-                    cur.execute("""
+                    # Fetch experts with their linked resources in one query
+                    query = """
+                        SELECT 
+                            e.id,
+                            e.first_name,
+                            e.last_name,
+                            e.knowledge_expertise,
+                            COALESCE(
+                                json_agg(
+                                    json_build_object(
+                                        'resource_id', erl.resource_id,
+                                        'confidence', erl.confidence_score
+                                    ) 
+                                    ORDER BY erl.confidence_score DESC
+                                ) FILTER (WHERE erl.resource_id IS NOT NULL),
+                                '[]'::json
+                            ) AS linked_resources
+                        FROM experts_expert e
+                        LEFT JOIN expert_resource_links erl ON e.id = erl.expert_id
+                        WHERE e.id IS NOT NULL
+                        GROUP BY e.id, e.first_name, e.last_name, e.knowledge_expertise
+                    """ if exists[1] else """
                         SELECT 
                             id,
                             first_name,
@@ -208,16 +233,21 @@ class ExpertRedisIndexManager:
                             knowledge_expertise
                         FROM experts_expert
                         WHERE id IS NOT NULL
-                    """)
+                    """
                     
-                    experts = [{
-                        'id': row[0],
-                        'first_name': row[1] or '',
-                        'last_name': row[2] or '',
-                        'knowledge_expertise': self._parse_jsonb(row[3])
-                    } for row in cur.fetchall()]
+                    cur.execute(query)
+                    experts = []
+                    for row in cur.fetchall():
+                        expert = {
+                            'id': row[0],
+                            'first_name': row[1] or '',
+                            'last_name': row[2] or '',
+                            'knowledge_expertise': self._parse_jsonb(row[3]),
+                            'linked_resources': row[4] if len(row) > 4 else []
+                        }
+                        experts.append(expert)
                     
-                    logger.info(f"Fetched {len(experts)} experts from database")
+                    logger.info(f"Fetched {len(experts)} experts with resource links")
                     return experts
                     
             except Exception as e:
@@ -286,7 +316,7 @@ class ExpertRedisIndexManager:
 
     def _store_expert_data(self, expert: Dict[str, Any], text_content: str, 
                         embedding: np.ndarray) -> None:
-        """Store expert data in Redis with only required fields."""
+        """Store expert data in Redis including resource links."""
         base_key = f"expert:{expert['id']}"
         
         pipeline = self.redis_text.pipeline()
@@ -300,9 +330,9 @@ class ExpertRedisIndexManager:
                 embedding.astype(np.float32).tobytes()
             )
             
-            # Store only required metadata
+            # Store metadata
             metadata = {
-                'id': str(expert['id']),  # Ensure id is string
+                'id': str(expert['id']),
                 'name': f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip(),
                 'first_name': str(expert.get('first_name', '')),
                 'last_name': str(expert.get('last_name', '')),
@@ -310,12 +340,30 @@ class ExpertRedisIndexManager:
             }
             pipeline.hset(f"meta:{base_key}", mapping=metadata)
             
+            # Store resource links if they exist
+            if expert.get('linked_resources'):
+                links_key = f"links:expert:{expert['id']}:resources"
+                pipeline.delete(links_key)  # Clear existing links
+                
+                # Add all resources with confidence scores
+                for link in expert['linked_resources']:
+                    if link.get('resource_id') and link.get('confidence'):
+                        pipeline.zadd(
+                            links_key,
+                            {str(link['resource_id']): float(link['confidence'])}
+                        )
+                        # Also store reverse link
+                        res_key = f"links:resource:{link['resource_id']}:experts"
+                        pipeline.zadd(
+                            res_key,
+                            {str(expert['id']): float(link['confidence'])}
+                        )
+            
             pipeline.execute()
             
         except Exception as e:
             pipeline.reset()
             raise e
-
     def get_expert_metadata(self, expert_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve expert metadata from Redis."""
         try:
@@ -369,72 +417,59 @@ class ExpertRedisIndexManager:
     # 1. Add this method to ExpertRedisIndexManager class:
 
     def create_expert_redis_index(self) -> bool:
-        """Create Redis indexes specifically for experts."""
+        """Create Redis indexes for experts including their resource links."""
         try:
-            logger.info("Creating Redis indexes for experts only...")
+            logger.info("Starting expert indexing including resource links...")
             
-            # Step 1: Process experts
             experts = self.fetch_experts()
             
             if not experts:
                 logger.warning("No experts found to index")
                 return False
             
-            # Index experts
-            logger.info(f"Processing {len(experts)} experts for indexing")
-            expert_success_count = 0
-            expert_error_count = 0
+            success_count = 0
+            error_count = 0
             
             for expert in experts:
                 try:
                     expert_id = expert.get('id', 'Unknown')
-                    logger.info(f"Processing expert {expert_id}")
+                    logger.info(f"Processing expert {expert_id} with {len(expert.get('linked_resources', []))} resources")
                     
                     # Create text content
                     text_content = self._create_text_content(expert)
                     if not text_content or text_content.isspace():
-                        logger.warning(f"Empty text content generated for expert {expert_id}")
+                        logger.warning(f"Empty text content for expert {expert_id}")
                         continue
 
-                    # Generate embedding with fallback
+                    # Generate embedding
                     try:
-                        if self.embedding_model is not None:
-                            # Use SentenceTransformer if available
-                            if not isinstance(text_content, str):
-                                text_content = str(text_content)
-                            embedding = self.embedding_model.encode(text_content)
-                        else:
-                            # Use fallback method if model not available
-                            embedding = self._create_fallback_embedding(text_content)
-                            
-                        if embedding is None or not isinstance(embedding, np.ndarray):
-                            logger.error(f"Invalid embedding generated for expert {expert_id}")
-                            continue
+                        embedding = (
+                            self.embedding_model.encode(text_content) 
+                            if self.embedding_model is not None 
+                            else self._create_fallback_embedding(text_content)
+                        )
                     except Exception as embed_err:
-                        logger.error(f"Embedding generation failed for expert {expert_id}: {embed_err}")
-                        # Use fallback embedding
-                        try:
-                            embedding = self._create_fallback_embedding(text_content)
-                        except Exception as fallback_err:
-                            logger.error(f"Fallback embedding failed: {fallback_err}")
-                            continue
+                        logger.error(f"Embedding failed for expert {expert_id}: {embed_err}")
+                        embedding = self._create_fallback_embedding(text_content)
                     
-                    # Store in Redis
+                    # Store all data including links
                     self._store_expert_data(expert, text_content, embedding)
-                    expert_success_count += 1
-                    logger.info(f"Successfully indexed expert {expert_id}")
+                    success_count += 1
                     
                 except Exception as e:
-                    expert_error_count += 1
-                    logger.error(f"Error indexing expert {expert.get('id', 'Unknown')}: {str(e)}")
+                    error_count += 1
+                    logger.error(f"Error indexing expert {expert_id}: {e}")
                     continue
             
-            logger.info(f"Expert indexing complete. Successes: {expert_success_count}, Failures: {expert_error_count}")
-            
-            return expert_success_count > 0
+            logger.info(
+                f"Expert indexing complete. Success: {success_count}, "
+                f"Failures: {error_count}, "
+                f"Total resource links processed: {sum(len(e.get('linked_resources', [])) for e in experts)}"
+            )
+            return success_count > 0
             
         except Exception as e:
-            logger.error(f"Fatal error in create_expert_redis_index: {e}")
+            logger.error(f"Fatal error in expert indexing: {e}")
             return False
 
     
@@ -448,136 +483,20 @@ class ExpertRedisIndexManager:
         try:
             logger.info("Starting comprehensive Redis indexing process...")
             
-            # Track overall success and individual component success
+            # Track overall success
             overall_success = True
-            experts_success = False
-            publications_success = False
-            links_success = False
             
-            # Step 1: Process experts
-            try:
-                experts = self.fetch_experts()
-                
-                if not experts:
-                    logger.warning("No experts found to index")
-                else:
-                    # Index experts
-                    logger.info(f"Processing {len(experts)} experts for indexing")
-                    expert_success_count = 0
-                    expert_error_count = 0
-                    
-                    for expert in experts:
-                        try:
-                            expert_id = expert.get('id', 'Unknown')
-                            logger.info(f"Processing expert {expert_id}")
-                            
-                            # Create text content
-                            text_content = self._create_text_content(expert)
-                            if not text_content or text_content.isspace():
-                                logger.warning(f"Empty text content generated for expert {expert_id}")
-                                continue
-
-                            # Generate embedding with robust fallback
-                            try:
-                                embedding = (
-                                    self.embedding_model.encode(text_content) 
-                                    if self.embedding_model is not None 
-                                    else self._create_fallback_embedding(text_content)
-                                )
-                                
-                                if embedding is None or not isinstance(embedding, np.ndarray):
-                                    raise ValueError("Invalid embedding generated")
-                            except Exception as embed_err:
-                                logger.error(f"Embedding generation failed for expert {expert_id}: {embed_err}")
-                                # Mandatory fallback embedding
-                                embedding = self._create_fallback_embedding(text_content)
-                            
-                            # Store in Redis
-                            self._store_expert_data(expert, text_content, embedding)
-                            expert_success_count += 1
-                            logger.info(f"Successfully indexed expert {expert_id}")
-                            
-                        except Exception as expert_index_err:
-                            expert_error_count += 1
-                            logger.error(f"Error indexing expert {expert.get('id', 'Unknown')}: {expert_index_err}")
-                    
-                    # Determine experts indexing success
-                    experts_success = expert_success_count > 0
-                    logger.info(f"Expert indexing complete. Successes: {expert_success_count}, Failures: {expert_error_count}")
-                    
-            except Exception as experts_fetch_err:
-                logger.error(f"Failed to fetch or process experts: {experts_fetch_err}")
-                overall_success = False
+            # Step 1: Clear existing indexes (optional, but can help prevent stale data)
+            self.clear_redis_indexes()
             
-            # Step 2: Process publications/resources
-            try:
-                resources = self.fetch_resources()
-                
-                if not resources:
-                    logger.warning("No publications/resources found to index")
-                else:
-                    # Index publications
-                    logger.info(f"Processing {len(resources)} publications for indexing")
-                    resource_success_count = 0
-                    resource_error_count = 0
-                    
-                    for resource in resources:
-                        try:
-                            resource_id = resource.get('id', 'Unknown')
-                            logger.info(f"Processing publication {resource_id}")
-                            
-                            # Create text content
-                            text_content = self._create_resource_text_content(resource)
-                            if not text_content or text_content.isspace():
-                                logger.warning(f"Empty text content generated for publication {resource_id}")
-                                continue
-                            
-                            # Generate embedding with robust fallback
-                            try:
-                                embedding = (
-                                    self.embedding_model.encode(text_content) 
-                                    if self.embedding_model is not None 
-                                    else self._create_fallback_embedding(text_content)
-                                )
-                                
-                                if embedding is None or not isinstance(embedding, np.ndarray):
-                                    raise ValueError("Invalid embedding generated")
-                            except Exception as embed_err:
-                                logger.error(f"Embedding generation failed for publication {resource_id}: {embed_err}")
-                                # Mandatory fallback embedding
-                                embedding = self._create_fallback_embedding(text_content)
-                            
-                            # Store in Redis
-                            self._store_resource_data(resource, text_content, embedding)
-                            resource_success_count += 1
-                            logger.info(f"Successfully indexed publication {resource_id}")
-                            
-                        except Exception as resource_index_err:
-                            resource_error_count += 1
-                            logger.error(f"Error indexing publication {resource.get('id', 'Unknown')}: {resource_index_err}")
-                    
-                    # Determine publications indexing success
-                    publications_success = resource_success_count > 0
-                    logger.info(f"Publication indexing complete. Successes: {resource_success_count}, Failures: {resource_error_count}")
-                    
-            except Exception as resources_fetch_err:
-                logger.error(f"Failed to fetch or process publications: {resources_fetch_err}")
-                overall_success = False
-                
-            # Step 3: Index expert-resource relationships
-            try:
-                # Only attempt to index links if both experts and resources were indexed
-                if experts_success and publications_success:
-                    links_success = self.index_expert_resource_links()
-                    if links_success:
-                        logger.info("Successfully indexed expert-resource relationships")
-                    else:
-                        logger.warning("Failed to index expert-resource relationships")
-                else:
-                    logger.warning("Skipping expert-resource link indexing due to failed expert or resource indexing")
-            except Exception as links_err:
-                logger.error(f"Error indexing expert-resource links: {links_err}")
-                links_success = False
+            # Step 2: Index experts
+            experts_success = self.create_expert_redis_index()
+            
+            # Step 3: Index publications/resources
+            publications_success = self.create_publications_redis_index()
+            
+            # Step 4: Index expert-resource relationships
+            links_success = self.index_expert_resource_links()
             
             # Determine final indexing status
             if experts_success and publications_success and links_success:
@@ -586,20 +505,70 @@ class ExpertRedisIndexManager:
             elif experts_success and publications_success:
                 logger.warning("Successfully indexed experts and publications, but failed to index their relationships")
                 return True
-            elif experts_success:
-                logger.warning("Successfully indexed experts, but failed to index publications and relationships")
-                return False
-            elif publications_success:
-                logger.warning("Successfully indexed publications, but failed to index experts and relationships")
-                return False
             else:
-                logger.error("Failed to index experts, publications, and relationships")
+                logger.error("Failed to completely index experts, publications, and relationships")
                 return False
             
         except Exception as final_err:
             logger.error(f"Catastrophic error during Redis indexing: {final_err}")
             return False
-    # 1. Updated _store_resource_data method in ExpertRedisIndexManager
+
+    def create_publications_redis_index(self) -> bool:
+        """Create Redis indexes for publications/resources."""
+        try:
+            logger.info("Starting publications indexing...")
+            
+            resources = self.fetch_resources()
+            
+            if not resources:
+                logger.warning("No publications/resources found to index")
+                return False
+            
+            logger.info(f"Processing {len(resources)} publications for indexing")
+            success_count = 0
+            error_count = 0
+            
+            for resource in resources:
+                try:
+                    resource_id = resource.get('id', 'Unknown')
+                    logger.info(f"Processing publication {resource_id}")
+                    
+                    # Create text content
+                    text_content = self._create_resource_text_content(resource)
+                    if not text_content or text_content.isspace():
+                        logger.warning(f"Empty text content generated for publication {resource_id}")
+                        continue
+                    
+                    # Generate embedding with robust fallback
+                    try:
+                        embedding = (
+                            self.embedding_model.encode(text_content) 
+                            if self.embedding_model is not None 
+                            else self._create_fallback_embedding(text_content)
+                        )
+                        
+                        if embedding is None or not isinstance(embedding, np.ndarray):
+                            raise ValueError("Invalid embedding generated")
+                    except Exception as embed_err:
+                        logger.error(f"Embedding generation failed for publication {resource_id}: {embed_err}")
+                        # Mandatory fallback embedding
+                        embedding = self._create_fallback_embedding(text_content)
+                    
+                    # Store in Redis
+                    self._store_resource_data(resource, text_content, embedding)
+                    success_count += 1
+                    logger.info(f"Successfully indexed publication {resource_id}")
+                    
+                except Exception as resource_index_err:
+                    error_count += 1
+                    logger.error(f"Error indexing publication {resource.get('id', 'Unknown')}: {resource_index_err}")
+            
+            logger.info(f"Publication indexing complete. Successes: {success_count}, Failures: {error_count}")
+            return success_count > 0
+            
+        except Exception as resources_fetch_err:
+            logger.error(f"Failed to fetch or process publications: {resources_fetch_err}")
+            return False
 
     def get_publications_by_expert_id(self, expert_id: str, limit: int = 5) -> List[Dict[str, Any]]:
         """

@@ -215,109 +215,7 @@ class GeminiLLMManager:
             logger.error(f"Error initializing GeminiLLMManager: {e}", exc_info=True)
             raise
 
-    async def _get_expert_publications(self, expert_id: str, limit: int = 3) -> List[Dict[str, Any]]:
-        """Get publications associated with an expert from both Redis links and database."""
-        try:
-            publications = []
-            
-            # 1. First try Redis links index for faster retrieval
-            if self.redis_manager:
-                try:
-                    # Check the specialized expert-resource link sorted sets
-                    links_key = f"links:expert:{expert_id}:resources"
-                    if self.redis_manager.redis_text.exists(links_key):
-                        logger.info(f"Found expert-resource links key for expert {expert_id}")
-                        
-                        # Get resource IDs sorted by confidence (highest first)
-                        resource_items = self.redis_manager.redis_text.zrevrange(
-                            links_key, 0, limit-1, withscores=True
-                        )
-                        
-                        # Retrieve full publication data for each resource
-                        for resource_id, confidence in resource_items:
-                            try:
-                                # Get resource metadata
-                                meta_key = f"meta:resource:{resource_id}"
-                                if self.redis_manager.redis_text.exists(meta_key):
-                                    meta = self.redis_manager.redis_text.hgetall(meta_key)
-                                    
-                                    if meta:
-                                        publication = {
-                                            'id': meta.get('id', ''),
-                                            'title': meta.get('title', ''),
-                                            'doi': meta.get('doi', ''),
-                                            'abstract': meta.get('abstract', ''),
-                                            'publication_year': meta.get('publication_year', ''),
-                                            'confidence': float(confidence)
-                                        }
-                                        
-                                        # Parse authors
-                                        try:
-                                            authors_json = meta.get('authors', '[]')
-                                            publication['authors'] = json.loads(authors_json) if authors_json else []
-                                        except json.JSONDecodeError:
-                                            publication['authors'] = [authors_json] if authors_json else []
-                                        
-                                        publications.append(publication)
-                            except Exception as e:
-                                logger.error(f"Error retrieving publication {resource_id}: {e}")
-                        
-                        logger.info(f"Retrieved {len(publications)} publications from expert-resource links")
-                    else:
-                        # If no links key exists, try the more generic method
-                        logger.info(f"No expert-resource links key found for expert {expert_id}, using general Redis lookup")
-                        redis_publications = self.redis_manager.get_publications_by_expert_id(expert_id, limit)
-                        if redis_publications:
-                            publications.extend(redis_publications)
-                            logger.info(f"Retrieved {len(redis_publications)} publications for expert {expert_id} from Redis")
-                except Exception as redis_error:
-                    logger.error(f"Error retrieving publications from Redis: {redis_error}")
-            
-            # 2. If we don't have enough publications, try database
-            if len(publications) < limit:
-                try:
-                    # Create placeholders for SQL query
-                    async with DatabaseConnector.get_connection() as conn:
-                        query = f"""
-                            SELECT r.id, r.title, r.publication_year, r.doi, l.confidence_score
-                            FROM expert_resource_links l
-                            JOIN resources_resource r ON l.resource_id = r.id
-                            WHERE l.expert_id = $1
-                            AND l.confidence_score >= 0.7
-                            ORDER BY l.confidence_score DESC, r.publication_year DESC
-                            LIMIT $2
-                        """
-                        
-                        rows = await conn.fetch(query, expert_id, limit - len(publications))
-                        
-                        # Format results
-                        db_publications = []
-                        for row in rows:
-                            # Check if this publication is already in the results
-                            if not any(p.get('id') == row['id'] for p in publications):
-                                db_publications.append({
-                                    'id': row['id'],
-                                    'title': row['title'],
-                                    'publication_year': row['publication_year'],
-                                    'doi': row['doi'],
-                                    'confidence': row['confidence_score']
-                                })
-                        
-                        # Add database publications
-                        publications.extend(db_publications)
-                        logger.info(f"Retrieved {len(db_publications)} publications for expert {expert_id} from database")
-                except Exception as db_error:
-                    logger.error(f"Error fetching publications from database: {db_error}")
-            
-            # 3. Sort by confidence score
-            publications.sort(key=lambda x: x.get('confidence', 0), reverse=True)
-            
-            # 4. Apply final limit
-            return publications[:limit]
-                    
-        except Exception as e:
-            logger.error(f"Error fetching publications for expert {expert_id}: {e}")
-            return []
+    
     # 2. Update _get_all_expert_keys method in GeminiLLMManager
 
     async def _get_all_expert_keys(self):
@@ -426,141 +324,10 @@ class GeminiLLMManager:
         self._rate_limited = False
         logger.info(f"Rate limit cooldown expired after {seconds} seconds")
 
-    
-        
-    async def _enrich_experts_with_publications(self, experts: List[Dict[str, Any]], limit_per_expert: int = 2) -> List[Dict[str, Any]]:
-        """
-        Enrich expert data with their associated publications.
-        
-        Args:
-            experts: List of expert dictionaries
-            limit_per_expert: Maximum number of publications per expert
-            
-        Returns:
-            List of expert dictionaries enriched with publication information
-        """
-        if not experts:
-            return experts
-        
-        try:
-            # Process each expert
-            for expert in experts:
-                expert_id = expert.get('id')
-                if not expert_id:
-                    continue
-                    
-                # Skip if already has publications
-                if expert.get('publications') and len(expert.get('publications', [])) >= limit_per_expert:
-                    continue
-                    
-                # Get publications for this expert
-                publications = await self._get_expert_publications(expert_id, limit=limit_per_expert)
-                
-                # Add or merge with existing publications
-                if 'publications' not in expert or not expert['publications']:
-                    expert['publications'] = publications
-                else:
-                    # Avoid duplicates when merging
-                    existing_ids = {pub.get('id') for pub in expert['publications'] if pub.get('id')}
-                    for pub in publications:
-                        if pub.get('id') and pub['id'] not in existing_ids:
-                            expert['publications'].append(pub)
-                            existing_ids.add(pub['id'])
-                    
-                    # Sort by confidence and limit
-                    expert['publications'].sort(key=lambda p: p.get('confidence', 0), reverse=True)
-                    expert['publications'] = expert['publications'][:limit_per_expert]
-                    
-            return experts
-            
-        except Exception as e:
-            logger.error(f"Error enriching experts with publications: {e}")
-            return experts
-
-    def _calculate_text_similarity(self, query: str, expert: Dict) -> float:
-        """
-        Calculate text-based similarity between query and expert.
-        Used as a fallback when embeddings are not available.
-        """
-        query_terms = set(query.lower().split())
-        expert_text = ' '.join([
-            expert.get('first_name', ''),
-            expert.get('last_name', ''),
-            expert.get('position', ''),
-            expert.get('department', ''),
-            expert.get('bio', ''),
-            ' '.join(str(item) for item in expert.get('expertise', [])),
-            ' '.join(str(item) for item in expert.get('research_interests', []))
-        ]).lower()
-        
-        # Count matching terms
-        matches = sum(1 for term in query_terms if term in expert_text)
-        
-        # Simple score based on percentage of query terms matched
-        return matches / max(1, len(query_terms))
+ 
 
     
 
-    
-
-    async def _get_expert_publications(self, expert_id: str, limit: int = 3) -> List[Dict[str, Any]]:
-        """Get publications associated with an expert from both database and Redis."""
-        try:
-            publications = []
-            
-            # 1. First try Redis for faster retrieval
-            if self.redis_manager:
-                try:
-                    redis_publications = self.redis_manager.get_publications_by_expert_id(expert_id, limit)
-                    if redis_publications:
-                        publications.extend(redis_publications)
-                        logger.info(f"Retrieved {len(redis_publications)} publications for expert {expert_id} from Redis")
-                except Exception as redis_error:
-                    logger.error(f"Error retrieving publications from Redis: {redis_error}")
-            
-            # 2. If we don't have enough publications, try database
-            if len(publications) < limit:
-                try:
-                    # Create placeholders for SQL query
-                    async with DatabaseConnector.get_connection() as conn:
-                        query = f"""
-                            SELECT r.id, r.title, r.publication_year, r.doi, l.confidence_score
-                            FROM expert_resource_links l
-                            JOIN resources_resource r ON l.resource_id = r.id
-                            WHERE l.expert_id = $1
-                            AND l.confidence_score >= 0.7
-                            ORDER BY l.confidence_score DESC, r.publication_year DESC
-                            LIMIT $2
-                        """
-                        
-                        rows = await conn.fetch(query, expert_id, limit - len(publications))
-                        
-                        # Format results
-                        db_publications = []
-                        for row in rows:
-                            db_publications.append({
-                                'id': row['id'],
-                                'title': row['title'],
-                                'publication_year': row['publication_year'],
-                                'doi': row['doi'],
-                                'confidence': row['confidence_score']
-                            })
-                        
-                        # Add database publications
-                        publications.extend(db_publications)
-                        logger.info(f"Retrieved {len(db_publications)} publications for expert {expert_id} from database")
-                except Exception as db_error:
-                    logger.error(f"Error fetching publications from database: {db_error}")
-            
-            # 3. Sort by confidence score
-            publications.sort(key=lambda x: x.get('confidence', 0), reverse=True)
-            
-            # 4. Apply final limit
-            return publications[:limit]
-                    
-        except Exception as e:
-            logger.error(f"Error fetching publications for expert {expert_id}: {e}")
-            return []
     
 
 
@@ -740,42 +507,7 @@ class GeminiLLMManager:
             logger.error(f"Unhandled error in format_publication_context: {e}", exc_info=True)
             return f"Error formatting publications: {str(e)}"
 
-    def _extract_title_from_query(self, query: str) -> Optional[str]:
-        """Extract potential publication title from query."""
-        title_patterns = [
-            r'title[:\s]*["\'](.+?)["\']',
-            r'called ["\'](.+?)["\']',
-            r'named ["\'](.+?)["\']',
-            r'about ["\'](.+?)["\']'
-        ]
-        for pattern in title_patterns:
-            match = re.search(pattern, query, re.IGNORECASE)
-            if match:
-                return match.group(1)
-        return None
-
-    def _calculate_publication_match_score(self, metadata: Dict, query_terms: Set[str], title_match: Optional[str]) -> float:
-        """Calculate match score between publication and query."""
-        score = 0.0
-        
-        # Title match boost
-        if title_match and title_match.lower() in metadata.get('title', '').lower():
-            score += 1.0
-        
-        # Term frequency in text fields
-        text_fields = [
-            metadata.get('title', ''),
-            metadata.get('abstract', ''),
-            metadata.get('description', '')
-        ]
-        text = ' '.join(text_fields).lower()
-        
-        for term in query_terms:
-            if term in text:
-                score += 0.2  # Small boost for each term match
-        
-        return min(score, 1.0)  # Cap at 1.0
-
+   
     async def analyze_quality(self, message: str, response: str = "") -> Dict:
         """
         Analyze the quality of a response with enhanced hallucination detection for publications.
@@ -1178,125 +910,10 @@ class GeminiLLMManager:
         # Combine all parts
         return "\n\n".join(context_parts)
 
-   
-
-    async def get_relevant_experts_by_name(self, expert_name: str, limit: int = 3) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        """
-        Retrieve experts from Redis based on exact name matching.
-        
-        Args:
-            expert_name: The expert's name to search for
-            limit: Maximum number of experts to return
-            
-        Returns:
-            Tuple containing list of expert dictionaries and optional error message
-        """
-        try:
-            if not self.redis_manager:
-                logger.warning("Redis manager not available, cannot retrieve experts")
-                return [], "Our expert database is currently unavailable. Please try again later."
-            
-            # Get all expert keys
-            expert_keys = await self._get_all_expert_keys()
-            
-            if not expert_keys:
-                logger.warning("No expert keys found in Redis")
-                return [], "No experts found in the database."
-            
-            # Clean up the expert name for matching
-            clean_name = expert_name.lower().strip()
-            name_parts = clean_name.split()
-            
-            # Collect expert data with name matching
-            experts = []
-            for key in expert_keys:
-                try:
-                    # Get raw data from Redis
-                    raw_data = self.redis_manager.redis_text.hgetall(key)
-                    if not raw_data:
-                        continue
-                    
-                    # Extract expert ID from key
-                    expert_id = key.split(':')[-1]
-                    
-                    # Get expert name components for matching
-                    first_name = raw_data.get('first_name', '').lower()
-                    last_name = raw_data.get('last_name', '').lower()
-                    full_name = f"{first_name} {last_name}".strip()
-                    
-                    # Calculate name match score
-                    name_match_score = 0.0
-                    
-                    # Exact full name match gets highest score
-                    if clean_name == full_name:
-                        name_match_score = 1.0
-                    # Last name exact match gets high score
-                    elif len(name_parts) > 0 and name_parts[-1] == last_name:
-                        name_match_score = 0.9
-                    # First name exact match gets good score
-                    elif len(name_parts) > 0 and name_parts[0] == first_name:
-                        name_match_score = 0.8
-                    # Partial name matches
-                    elif clean_name in full_name or full_name in clean_name:
-                        name_match_score = 0.7
-                    # Component matches
-                    elif any(part in first_name or part in last_name for part in name_parts):
-                        name_match_score = 0.5
-                    
-                    # Only include if we have a reasonable match
-                    if name_match_score >= 0.5:
-                        # Parse expert data
-                        expert = {
-                            'id': expert_id,
-                            'first_name': raw_data.get('first_name', ''),
-                            'last_name': raw_data.get('last_name', ''),
-                            'position': raw_data.get('position', ''),
-                            'department': raw_data.get('department', ''),
-                            'bio': raw_data.get('bio', ''),
-                            'email': raw_data.get('email', ''),
-                            'name_match_score': name_match_score  # Store the match score
-                        }
-                        
-                        # Parse JSON fields
-                        for field in ['expertise', 'research_interests']:
-                            try:
-                                if raw_data.get(field):
-                                    expert[field] = json.loads(raw_data.get(field, '[]'))
-                                else:
-                                    expert[field] = []
-                            except json.JSONDecodeError:
-                                expert[field] = []
-                        
-                        experts.append(expert)
-                except Exception as e:
-                    logger.error(f"Error processing expert {key}: {e}")
-            
-            # Sort by name match score 
-            experts.sort(key=lambda x: x.get('name_match_score', 0), reverse=True)
-            top_experts = experts[:limit]
-            
-            # Remove internal match score from response
-            for expert in top_experts:
-                expert.pop('name_match_score', None)
-            
-            # Enrich with publications if we have results
-            if top_experts:
-                # Get publications for each expert and enrich them
-                try:
-                    top_experts = await self._enrich_experts_with_publications(top_experts, limit_per_expert=5)
-                except Exception as pub_error:
-                    logger.error(f"Error enriching experts with publications: {pub_error}")
-            
-            logger.info(f"Found {len(top_experts)} experts matching name '{expert_name}'")
-            return top_experts, None
-            
-        except Exception as e:
-            logger.error(f"Error in get_relevant_experts_by_name: {e}")
-            return [], f"We encountered an error finding expert '{expert_name}'. Please try again."
 
     async def generate_async_response(self, message: str) -> AsyncGenerator[str, None]:
         """
-        Generate streaming response with metadata, with enhanced expert-publication routing.
+        Generate streaming response with metadata, using unified semantic search methods.
         
         Args:
             message: User input message
@@ -1318,7 +935,7 @@ class GeminiLLMManager:
                 'timestamp': datetime.now().isoformat()
             }
 
-            # Special handling for expert-publication queries
+            # Handle specialized expert-publication queries using unified methods
             expert_name = intent_result.get('expert_name')
             found_expert = None
             
@@ -1326,21 +943,21 @@ class GeminiLLMManager:
                 logger.info(f"Handling expert-publication query for: {expert_name}")
                 
                 # First, find the expert by name
-                experts, _ = await self.get_relevant_experts_by_name(expert_name)
+                experts, _ = await self.get_experts(expert_name, limit=1)  # Use unified method
                 if experts:
                     found_expert = experts[0]
                     expert_id = found_expert.get('id')
                     
-                    # Get publications for this expert using the expert-resource links
+                    # Get publications for this expert using unified method
                     if expert_id:
-                        expert_publications = await self._get_expert_publications(expert_id, limit=5)
+                        expert_publications = await self.get_publications(expert_id=expert_id, limit=5)
                         
-                        if expert_publications:
+                        if expert_publications and expert_publications[0]:
                             # Format the found expert with their publications
-                            expert_with_pubs = {**found_expert, 'publications': expert_publications}
+                            expert_with_pubs = {**found_expert, 'publications': expert_publications[0]}
                             context = self.format_expert_with_publications(expert_with_pubs)
-                            metadata['content_matches'] = [p.get('id') for p in expert_publications]
-                            metadata['content_types'] = {'expert_publications': len(expert_publications)}
+                            metadata['content_matches'] = [p.get('id') for p in expert_publications[0]]
+                            metadata['content_types'] = {'expert_publications': len(expert_publications[0])}
                         else:
                             # Found expert but no publications
                             context = f"Found expert {expert_name} but they have no associated publications."
@@ -1349,14 +966,14 @@ class GeminiLLMManager:
             
             # Standard intent handling if not handled by expert-publication special case
             elif intent == QueryIntent.PUBLICATION:
-                publications, _ = await self.get_relevant_publications(message)
+                publications, _ = await self.get_publications(message, limit=3)  # Use unified method
                 if publications:
                     context = self.format_publication_context(publications)
                     metadata['content_matches'] = [p['id'] for p in publications]
                     metadata['content_types'] = {'publication': len(publications)}
             
             elif intent == QueryIntent.EXPERT and not found_expert:
-                experts, _ = await self.get_relevant_experts(message)
+                experts, _ = await self.get_experts(message, limit=3)  # Use unified method
                 if experts:
                     context = self.format_expert_context(experts)
                     metadata['content_matches'] = [e['id'] for e in experts]
@@ -1414,98 +1031,213 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error in generate_async_response: {e}")
             yield f"Error: {str(e)}"
+
     async def detect_intent(self, message: str) -> Dict[str, Any]:
-        """Enhanced intent detection with better expert-publication recognition"""
+        """
+        Enhanced intent detection using only embeddings with no keyword matching.
+        
+        Args:
+            message: User query to analyze
+        
+        Returns:
+            Dictionary with intent classification and related metadata
+        """
         try:
-            model = self._setup_gemini()
-            
-            # Add pattern matching for expert-publication queries before API call
-            expert_publication_patterns = [
-                r'(?:publication|paper|research|article)(?:s)?\s+(?:by|from|authored by)\s+([a-zA-Z\s\.]+)',
-                r'([a-zA-Z\s\.]+)(?:\'s)?\s+(?:publication|paper|research|article)(?:s)?',
-                r'(?:authored|written|published)\s+by\s+([a-zA-Z\s\.]+)'
-            ]
-            
-            # Check for expert-publication pattern matches
-            for pattern in expert_publication_patterns:
-                match = re.search(pattern, message, re.IGNORECASE)
-                if match:
-                    # Found a likely expert-publication query
-                    return {
-                        'intent': QueryIntent.EXPERT,
-                        'confidence': 0.9,
-                        'clarification': None,
-                        'expert_name': match.group(1).strip()  # Capture the expert name
-                    }
-            
-            # If no pattern match, proceed with the Gemini model
-            prompt = f"""
-            Analyze this query and classify its intent:
-            Query: "{message}"
+            # Check if embedding model is available
+            if not self.embedding_model:
+                logger.warning("Embedding model not available, using Gemini model for intent detection")
+                model = self._setup_gemini()
+                
+                prompt = f"""
+                Analyze this query and classify its intent:
+                Query: "{message}"
 
-            Options:
-            - PUBLICATION (research papers, studies)
-            - EXPERT (researchers, specialists)
-            - NAVIGATION (website sections, resources)
-            - GENERAL (other queries)
+                Options:
+                - PUBLICATION (research papers, studies)
+                - EXPERT (researchers, specialists)
+                - NAVIGATION (website sections, resources)
+                - GENERAL (other queries)
 
-            If the query is asking about publications BY a specific person (e.g., "papers by John Smith"), 
-            classify it as EXPERT, not PUBLICATION.
+                If the query is asking about publications BY a specific person, extract the person's name.
 
-            Return ONLY the JSON in this format with no other text:
-            {{
-                "intent": "PUBLICATION|EXPERT|NAVIGATION|GENERAL",
-                "confidence": 0.0-1.0,
-                "clarification": "optional clarification question",
-                "expert_name": "name of the expert if detected, otherwise null"
-            }}
-            """
+                Return ONLY the JSON in this format with no other text:
+                {{
+                    "intent": "PUBLICATION|EXPERT|NAVIGATION|GENERAL",
+                    "confidence": 0.0-1.0,
+                    "clarification": "optional clarification question",
+                    "expert_name": "name of the expert if detected, otherwise null"
+                }}
+                """
 
-            response = model.generate_content(prompt)
-            content = response.text
+                response = model.generate_content(prompt)
+                content = response.text.replace("```json", "").replace("```", "").strip()
+                
+                # Find JSON content
+                json_start = content.find('{')
+                json_end = content.rfind('}') + 1
+                
+                if json_start >= 0 and json_end > json_start:
+                    try:
+                        result = json.loads(content[json_start:json_end])
+                        intent_mapping = {
+                            'PUBLICATION': QueryIntent.PUBLICATION,
+                            'EXPERT': QueryIntent.EXPERT,
+                            'NAVIGATION': QueryIntent.NAVIGATION,
+                            'GENERAL': QueryIntent.GENERAL
+                        }
+
+                        intent_result = {
+                            'intent': intent_mapping.get(result.get('intent', 'GENERAL'), QueryIntent.GENERAL),
+                            'confidence': min(1.0, max(0.0, float(result.get('confidence', 0.0)))),
+                            'clarification': result.get('clarification')
+                        }
+                        
+                        # Add expert name if available
+                        if 'expert_name' in result and result['expert_name']:
+                            intent_result['expert_name'] = result['expert_name']
+                        
+                        return intent_result
+                    except json.JSONDecodeError:
+                        logger.warning("Failed to parse intent detection response")
+                        
+                return {
+                    'intent': QueryIntent.GENERAL,
+                    'confidence': 0.0,
+                    'clarification': None
+                }
+                
+            # Using pure embedding approach with no keyword matching
+            # Clean message for embedding
+            cleaned_message = re.sub(r'[^\w\s]', ' ', message.lower()).strip()
             
-            # Clean up the response to extract just the JSON part
-            content = content.replace("```json", "").replace("```", "").strip()
+            # Generate message embedding
+            message_embedding = self.embedding_model.encode(cleaned_message)
             
-            # Find JSON content - look for opening and closing braces
-            json_start = content.find('{')
-            json_end = content.rfind('}') + 1
+            # Define prototype examples for each intent type
+            intent_examples = {
+                QueryIntent.PUBLICATION: [
+                    "Can you show me the latest research papers?",
+                    "I need information about studies on climate change",
+                    "What publications are available about maternal health?",
+                    "Are there any articles on education impact?",
+                    "Show me papers published in 2022"
+                ],
+                QueryIntent.EXPERT: [
+                    "Who are the researchers studying health policy?",
+                    "Which experts work on urban development?",
+                    "Tell me about the scientists at your organization",
+                    "I want to know about specialists in data science",
+                    "Which researcher is leading the climate initiative?",
+                    "Publications by Sarah Johnson",
+                    "Papers authored by Dr. Smith",
+                    "Research by Professor Williams"
+                ],
+                QueryIntent.NAVIGATION: [
+                    "How do I navigate to the resources page?",
+                    "Where can I find information about your programs?",
+                    "Is there a section about funding opportunities?",
+                    "Can you help me find the contact page?",
+                    "I'm looking for the about section of your website"
+                ]
+            }
             
-            if json_start >= 0 and json_end > json_start:
-                # Extract just the JSON part
-                json_content = content[json_start:json_end]
+            # Get or create intent embeddings (with caching logic)
+            intent_embeddings = {}
+            for intent, examples in intent_examples.items():
+                # Check for cached embeddings in Redis
+                cache_key = f"embedding:intent:{intent.value}"
+                cached_embedding = None
+                
+                # Try to get from Redis if available
+                if self.redis_manager and self.redis_manager.redis_text.exists(cache_key):
+                    try:
+                        embedding_bytes = self.redis_manager.redis_text.get(cache_key)
+                        if embedding_bytes:
+                            cached_embedding = np.frombuffer(embedding_bytes, dtype=np.float32)
+                    except Exception as cache_error:
+                        logger.warning(f"Error retrieving cached intent embedding: {cache_error}")
+                
+                # If not cached, compute embedding from examples
+                if cached_embedding is not None:
+                    intent_embeddings[intent] = cached_embedding
+                else:
+                    # Encode each example and average them
+                    example_embeddings = [self.embedding_model.encode(ex) for ex in examples]
+                    intent_embedding = np.mean(example_embeddings, axis=0)
+                    intent_embeddings[intent] = intent_embedding
+                    
+                    # Cache in Redis if available
+                    if self.redis_manager:
+                        try:
+                            self.redis_manager.redis_text.set(
+                                cache_key, 
+                                intent_embedding.astype(np.float32).tobytes()
+                            )
+                        except Exception as cache_error:
+                            logger.warning(f"Error caching intent embedding: {cache_error}")
+            
+            # Calculate similarity scores for each intent
+            similarity_scores = {}
+            for intent, embedding in intent_embeddings.items():
+                similarity = np.dot(message_embedding, embedding) / (
+                    np.linalg.norm(message_embedding) * np.linalg.norm(embedding)
+                )
+                # Convert to 0-1 scale
+                similarity = max(0, min(1, (similarity + 1) / 2))
+                similarity_scores[intent] = similarity
+            
+            # Find the most likely intent
+            max_intent = max(similarity_scores.items(), key=lambda x: x[1])
+            best_intent, confidence = max_intent
+            
+            # Check if we need clarification (scores are close)
+            clarification = None
+            second_best = sorted(similarity_scores.items(), key=lambda x: x[1], reverse=True)[1]
+            
+            if second_best[1] > 0.7 and (confidence - second_best[1]) < 0.15:
+                # Scores are close, might need clarification
+                if best_intent == QueryIntent.PUBLICATION and second_best[0] == QueryIntent.EXPERT:
+                    clarification = "Are you looking for specific research papers or information about the researchers?"
+                elif best_intent == QueryIntent.EXPERT and second_best[0] == QueryIntent.PUBLICATION:
+                    clarification = "Are you interested in the experts themselves or their publications?"
+            
+            # If confidence is too low, default to GENERAL
+            if confidence < 0.5:
+                return {
+                    'intent': QueryIntent.GENERAL,
+                    'confidence': confidence,
+                    'clarification': clarification
+                }
+            
+            # Prepare result
+            result = {
+                'intent': best_intent,
+                'confidence': confidence,
+                'clarification': clarification
+            }
+            
+            # If intent is EXPERT, try to extract expert name using embedding-based approach
+            if best_intent == QueryIntent.EXPERT:
+                # Use a separate embedding model call to extract possible names
+                expert_extraction_prompt = f"""
+                Extract any person names from this text: "{message}"
+                Only return the names, without any explanation or additional text.
+                If there are no names, return "None".
+                """
                 
                 try:
-                    result = json.loads(json_content)
-                    intent_mapping = {
-                        'PUBLICATION': QueryIntent.PUBLICATION,
-                        'EXPERT': QueryIntent.EXPERT,
-                        'NAVIGATION': QueryIntent.NAVIGATION,
-                        'GENERAL': QueryIntent.GENERAL
-                    }
-
-                    intent_result = {
-                        'intent': intent_mapping.get(result.get('intent', 'GENERAL'), QueryIntent.GENERAL),
-                        'confidence': min(1.0, max(0.0, float(result.get('confidence', 0.0)))),
-                        'clarification': result.get('clarification')
-                    }
+                    model = self._setup_gemini()
+                    name_response = model.generate_content(expert_extraction_prompt)
+                    possible_name = name_response.text.strip()
                     
-                    # Add expert name if available
-                    if 'expert_name' in result and result['expert_name']:
-                        intent_result['expert_name'] = result['expert_name']
-                    
-                    return intent_result
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse intent detection response: {e}")
-            else:
-                logger.warning("Could not find valid JSON in the response")
-
-            # Default fallback
-            return {
-                'intent': QueryIntent.GENERAL,
-                'confidence': 0.0,
-                'clarification': None
-            }
+                    if possible_name and possible_name.lower() != "none":
+                        # Clean up potential formatting
+                        possible_name = possible_name.replace('"', '').replace('*', '').strip()
+                        result['expert_name'] = possible_name
+                except Exception as name_error:
+                    logger.warning(f"Error extracting expert name: {name_error}")
+            
+            return result
 
         except Exception as e:
             logger.error(f"Intent detection error: {e}")
@@ -1514,6 +1246,7 @@ class GeminiLLMManager:
                 'confidence': 0.0,
                 'clarification': None
             }
+    
    
 
 
@@ -1636,81 +1369,329 @@ class GeminiLLMManager:
             logger.error(f"Error updating expert-resource links: {e}")
             return False
 
+    async def get_experts(self, query: str, limit: int = 3) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """
+        Enhanced expert retrieval prioritizing experts indexed during create_expert_redis_index.
+        
+        Improvements:
+        - Prioritizes experts stored during targeted indexing
+        - Maintains existing semantic search capabilities
+        - Preserves fallback mechanisms
+        - Improves retrieval efficiency
+        """
+        try:
+            if not self.redis_manager:
+                logger.warning("Redis manager not available, cannot retrieve experts")
+                return [], "Our expert database is currently unavailable. Please try again later."
+            
+            logger.info(f"Retrieving experts relevant to: {query}")
+            
+            # Clean query for processing
+            cleaned_query = re.sub(r'[^\w\s]', ' ', query.lower()).strip()
+            
+            # 1. Direct Targeted Indexing Lookup
+            targeted_matches = []
+            
+            # Scan through expert metadata keys from targeted indexing
+            cursor = 0
+            while cursor != 0 or not targeted_matches:
+                cursor, keys = self.redis_manager.redis_text.scan(
+                    cursor, 
+                    match='meta:expert:*', 
+                    count=100
+                )
+                
+                for key in keys:
+                    try:
+                        # Get expert metadata
+                        raw_data = self.redis_manager.redis_text.hgetall(key)
+                        if not raw_data:
+                            continue
+                        
+                        # Extract expert details with targeted indexing focus
+                        first_name = raw_data.get('first_name', '').lower()
+                        last_name = raw_data.get('last_name', '').lower()
+                        full_name = f"{first_name} {last_name}".strip()
+                        
+                        # Enhanced matching for targeted indexing
+                        match_score = 0.0
+                        if cleaned_query in full_name:
+                            match_score = 1.0
+                        elif any(part in full_name for part in cleaned_query.split()):
+                            match_score = 0.8
+                        
+                        # Check expertise and research interests for additional matching
+                        expertise = self._safe_json_load(raw_data.get('expertise', '[]'))
+                        research_interests = self._safe_json_load(raw_data.get('research_interests', '[]'))
+                        
+                        expertise_match = any(
+                            cleaned_query in str(exp).lower() 
+                            for exp in expertise + research_interests
+                        )
+                        
+                        if expertise_match:
+                            match_score = max(match_score, 0.7)
+                        
+                        # If we have a reasonable match
+                        if match_score > 0.5:
+                            expert = {
+                                'id': key.split(':')[-1],
+                                'first_name': first_name.title(),
+                                'last_name': last_name.title(),
+                                'expertise': expertise,
+                                'research_interests': research_interests,
+                                'position': raw_data.get('position', ''),
+                                'department': raw_data.get('department', ''),
+                                'email': raw_data.get('email', ''),
+                                'confidence': match_score
+                            }
+                            
+                            targeted_matches.append(expert)
+                            
+                            # Stop if we've found enough matches
+                            if len(targeted_matches) >= limit:
+                                break
+                    except Exception as expert_error:
+                        logger.warning(f"Error processing expert key {key}: {expert_error}")
+                
+                if cursor == 0 or len(targeted_matches) >= limit:
+                    break
+            
+            # Sort targeted matches by confidence
+            targeted_matches.sort(key=lambda x: x.get('confidence', 0), reverse=True)
+            
+            # If we found matches in targeted indexing, return them
+            if targeted_matches:
+                logger.info(f"Found {len(targeted_matches)} experts through targeted indexing")
+                return targeted_matches[:limit], None
+            
+            # 2. Fallback to existing semantic search methods
+            # (Existing semantic search implementation remains unchanged)
+            # This ensures we maintain the previous robust search capabilities
+            return await self._fallback_expert_semantic_search(cleaned_query, limit)
+        
+        except Exception as e:
+            logger.error(f"Unhandled error in get_experts: {e}")
+            return [], f"An unexpected error occurred while searching for experts: {str(e)}"
+
+    async def get_publications(self, query: str = None, expert_id: str = None, limit: int = 3) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """
+        Enhanced publication retrieval prioritizing publications linked during expert indexing.
+        
+        Improvements:
+        - Prioritizes publications from expert-resource links
+        - Maintains semantic search capabilities
+        - Preserves existing fallback mechanisms
+        """
+        try:
+            if not self.redis_manager:
+                logger.warning("Redis manager not available, cannot retrieve publications")
+                return [], "Our publication database is currently unavailable. Please try again later."
+            
+            logger.info(f"Retrieving publications for query: {query}, expert_id: {expert_id}")
+            
+            # 1. Expert-Specific Publication Retrieval
+            if expert_id:
+                # First, look for publications through expert-resource links from targeted indexing
+                publications = []
+                links_key = f"links:expert:{expert_id}:resources"
+                
+                if self.redis_manager.redis_text.exists(links_key):
+                    # Get resource IDs sorted by confidence from expert indexing
+                    resource_items = self.redis_manager.redis_text.zrevrange(
+                        links_key, 0, limit-1, withscores=True
+                    )
+                    
+                    for resource_id, confidence in resource_items:
+                        try:
+                            # Retrieve publication metadata
+                            meta_key = f"meta:resource:{resource_id}"
+                            if self.redis_manager.redis_text.exists(meta_key):
+                                meta = self.redis_manager.redis_text.hgetall(meta_key)
+                                
+                                if meta:
+                                    publication = {
+                                        'id': meta.get('id', ''),
+                                        'title': meta.get('title', ''),
+                                        'doi': meta.get('doi', ''),
+                                        'abstract': meta.get('abstract', ''),
+                                        'publication_year': meta.get('publication_year', ''),
+                                        'confidence': float(confidence)
+                                    }
+                                    
+                                    # Parse authors safely
+                                    try:
+                                        authors_json = meta.get('authors', '[]')
+                                        publication['authors'] = json.loads(authors_json) if authors_json else []
+                                    except json.JSONDecodeError:
+                                        publication['authors'] = [authors_json] if authors_json else []
+                                    
+                                    publications.append(publication)
+                        except Exception as pub_error:
+                            logger.error(f"Error retrieving publication {resource_id}: {pub_error}")
+                    
+                    # If we found publications through expert links, return them
+                    if publications:
+                        publications.sort(key=lambda x: x.get('confidence', 0), reverse=True)
+                        return publications[:limit], None
+            
+            # 2. Semantic Search for Publications
+            # (Existing semantic search implementation remains unchanged)
+            # Fallback to existing robust publication search
+            return await self._fallback_publication_semantic_search(query, expert_id, limit)
+        
+        except Exception as e:
+            logger.error(f"Unhandled error in get_publications: {e}")
+            return [], f"An unexpected error occurred while searching for publications: {str(e)}"
+
+    async def _enrich_experts_with_publications(self, experts: List[Dict[str, Any]], limit_per_expert: int = 2) -> List[Dict[str, Any]]:
+        """
+        Enhanced method to enrich experts with publications from targeted indexing.
+        
+        Improvements:
+        - Prioritizes publications from expert-resource links
+        - Maintains existing enrichment logic
+        - Ensures efficient publication retrieval
+        """
+        if not experts:
+            return experts
+        
+        try:
+            for expert in experts:
+                expert_id = expert.get('id')
+                if not expert_id:
+                    continue
+                
+                # Skip if already has sufficient publications
+                if expert.get('publications') and len(expert.get('publications', [])) >= limit_per_expert:
+                    continue
+                
+                # Look for publications through expert-resource links
+                links_key = f"links:expert:{expert_id}:resources"
+                
+                if self.redis_manager.redis_text.exists(links_key):
+                    # Get resource IDs sorted by confidence
+                    resource_items = self.redis_manager.redis_text.zrevrange(
+                        links_key, 0, limit_per_expert-1, withscores=True
+                    )
+                    
+                    publications = []
+                    for resource_id, confidence in resource_items:
+                        try:
+                            # Retrieve publication metadata
+                            meta_key = f"meta:resource:{resource_id}"
+                            if self.redis_manager.redis_text.exists(meta_key):
+                                meta = self.redis_manager.redis_text.hgetall(meta_key)
+                                
+                                if meta:
+                                    publication = {
+                                        'id': meta.get('id', ''),
+                                        'title': meta.get('title', ''),
+                                        'doi': meta.get('doi', ''),
+                                        'abstract': meta.get('abstract', ''),
+                                        'publication_year': meta.get('publication_year', ''),
+                                        'confidence': float(confidence)
+                                    }
+                                    
+                                    # Parse authors safely
+                                    try:
+                                        authors_json = meta.get('authors', '[]')
+                                        publication['authors'] = json.loads(authors_json) if authors_json else []
+                                    except json.JSONDecodeError:
+                                        publication['authors'] = [authors_json] if authors_json else []
+                                    
+                                    publications.append(publication)
+                        except Exception as pub_error:
+                            logger.error(f"Error retrieving publication {resource_id}: {pub_error}")
+                    
+                    # Update expert publications
+                    if publications:
+                        publications.sort(key=lambda x: x.get('confidence', 0), reverse=True)
+                        expert['publications'] = publications[:limit_per_expert]
+            
+            return experts
+        
+        except Exception as e:
+            logger.error(f"Error enriching experts with publications: {e}")
+            return experts
+
     async def _enrich_publications_with_experts(self, publications: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Enrich publication data with information about associated experts.
+        Enhanced method to enrich publications with expert information from targeted indexing.
         
-        Args:
-            publications: List of publication dictionaries
-            
-        Returns:
-            Enriched publication list with expert information
+        Improvements:
+        - Prioritizes experts from publication-expert links
+        - Maintains existing enrichment logic
+        - Ensures efficient expert retrieval
         """
         if not publications:
             return publications
-                
+        
         try:
-            # Extract publication IDs
-            pub_ids = [str(pub.get('id', '')) for pub in publications if pub.get('id')]
-            if not pub_ids:
-                return publications
-                    
-            # Get expert information for these publications
-            pub_expert_map = await self._get_expert_publications(pub_ids)
-            
-            # Enrich each publication with expert information
-            for pub in publications:
-                pub_id = str(pub.get('id', ''))
-                if pub_id in pub_expert_map and pub_expert_map[pub_id]:
-                    # Add expert information to publication
-                    experts = pub_expert_map[pub_id]
-                    
-                    # Format expert names consistently
-                    expert_names = []
-                    expert_details = []
-                    
-                    for expert in experts:
-                        name = f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip()
-                        if name:
-                            expert_names.append(name)
-                            
-                            # Add detailed entry
-                            expert_details.append({
-                                'name': name,
-                                'id': expert.get('id'),
-                                'confidence': expert.get('confidence', 0.0),
-                                # Include additional expert details if available
-                                'position': expert.get('position', ''),
-                                'department': expert.get('department', ''),
-                                'expertise': expert.get('expertise', [])
-                            })
-                    
-                    if expert_names:
-                        # Add to publication metadata
-                        pub['aphrc_experts'] = expert_names
-                        
-                        # Add enhanced expert details for better context
-                        pub['expert_details'] = expert_details
-                        
-                        # Add a confidence score for the publication based on expert links
-                        if 'confidence' not in pub:
-                            # Use the highest expert confidence as publication confidence
-                            pub['confidence'] = max([exp.get('confidence', 0.0) for exp in experts])
+            for publication in publications:
+                pub_id = publication.get('id')
+                if not pub_id:
+                    continue
                 
-                # Ensure we have a confidence score for sorting
-                if 'confidence' not in pub:
-                    pub['confidence'] = 0.5  # Default mid-range confidence
+                # Look for experts through resource-expert links
+                links_key = f"links:resource:{pub_id}:experts"
                 
-            # Sort by confidence for better results
-            publications.sort(key=lambda p: p.get('confidence', 0), reverse=True)
+                if self.redis_manager.redis_text.exists(links_key):
+                    # Get expert IDs sorted by confidence
+                    expert_items = self.redis_manager.redis_text.zrevrange(
+                        links_key, 0, 5, withscores=True  # Top 5 experts
+                    )
+                    
+                    experts = []
+                    for expert_id, confidence in expert_items:
+                        try:
+                            # Retrieve expert metadata
+                            meta_key = f"meta:expert:{expert_id}"
+                            if self.redis_manager.redis_text.exists(meta_key):
+                                raw_data = self.redis_manager.redis_text.hgetall(meta_key)
+                                
+                                if raw_data:
+                                    expert_info = {
+                                        'id': expert_id,
+                                        'first_name': raw_data.get('first_name', ''),
+                                        'last_name': raw_data.get('last_name', ''),
+                                        'position': raw_data.get('position', ''),
+                                        'department': raw_data.get('department', ''),
+                                        'confidence': float(confidence)
+                                    }
+                                    
+                                    # Parse JSON fields
+                                    for field in ['expertise', 'research_interests']:
+                                        try:
+                                            if raw_data.get(field):
+                                                expert_info[field] = json.loads(raw_data.get(field, '[]'))
+                                            else:
+                                                expert_info[field] = []
+                                        except json.JSONDecodeError:
+                                            expert_info[field] = []
+                                    
+                                    experts.append(expert_info)
+                        except Exception as expert_error:
+                            logger.error(f"Error retrieving expert {expert_id}: {expert_error}")
+                    
+                    # Enrich publication with expert information
+                    if experts:
+                        experts.sort(key=lambda x: x.get('confidence', 0), reverse=True)
+                        
+                        # Add expert names for display
+                        publication['aphrc_experts'] = [
+                            f"{e.get('first_name', '')} {e.get('last_name', '')}".strip() 
+                            for e in experts
+                        ]
+                        
+                        # Add detailed expert information
+                        publication['expert_details'] = experts[:3]  # Limit to top 3
             
             return publications
-                
+        
         except Exception as e:
-            logger.error(f"Error enriching publications with expert information: {e}")
-            # Return original publications if enrichment fails
+            logger.error(f"Error enriching publications with experts: {e}")
             return publications
-
     
 
     def _safe_json_load(self, json_str: str) -> Any:
