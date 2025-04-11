@@ -227,12 +227,12 @@ class GeminiLLMManager:
                     return await self._detect_intent_with_embeddings(message)
                 except Exception as e:
                     logger.warning(f"Embedding intent detection failed: {e}")
-                    
+                        
             # Fallback to keyword matching
             keyword_result = self._detect_intent_with_keywords(message)
             if keyword_result['confidence'] > 0.7:
                 return keyword_result
-                
+                    
             # Final fallback to Gemini API with rate limit protection
             try:
                 if not await self.circuit_breaker.check():
@@ -282,7 +282,7 @@ class GeminiLLMManager:
 
                     intent_result = {
                         'intent': intent_mapping.get(result.get('intent', 'GENERAL'), QueryIntent.GENERAL),
-                        'confidence': min(1.0, max(0.0, float(result.get('confidence', 0.0))),
+                        'confidence': min(1.0, max(0.0, float(result.get('confidence', 0.0)))),
                         'clarification': result.get('clarification')
                     }
                     
@@ -290,22 +290,34 @@ class GeminiLLMManager:
                         intent_result['expert_name'] = result['expert_name']
                     
                     return intent_result
+                else:
+                    # Handle case where JSON could not be extracted properly
+                    logger.warning(f"Could not extract valid JSON from response: {content}")
+                    return {
+                        'intent': QueryIntent.GENERAL,
+                        'confidence': 0.0,
+                        'clarification': None
+                    }
 
             except Exception as e:
                 logger.error(f"Gemini intent detection failed: {e}")
                 if "429" in str(e):
                     await self._handle_rate_limit()
+                # Ensure we have a return in this except block
+                return {
+                    'intent': QueryIntent.GENERAL,
+                    'confidence': 0.0,
+                    'clarification': None
+                }
 
         except Exception as e:
             logger.error(f"Intent detection error: {e}")
-
-        # Final fallback return
-        return {
-            'intent': QueryIntent.GENERAL,
-            'confidence': 0.0,
-            'clarification': None
-        }
-    
+            # Make sure the outer try block also has a return
+            return {
+                'intent': QueryIntent.GENERAL,
+                'confidence': 0.0,
+                'clarification': None
+            }
     async def generate_async_response(self, message: str) -> AsyncGenerator[str, None]:
         """
         Generate streaming response with metadata, using unified semantic search methods.
@@ -426,7 +438,6 @@ class GeminiLLMManager:
         self._last_rate_limit_time = time.time()
         logger.warning(f"Rate limit encountered, backing off for {self._rate_limit_backoff}s")
         self.metrics['rate_limited'] += 1
-
     async def _safe_generate(self, message: str) -> AsyncGenerator[str, None]:
         """Protected generation with rate limit handling"""
         await self._check_rate_limit()
@@ -435,7 +446,7 @@ class GeminiLLMManager:
             self.metrics['total_calls'] += 1
             
             response = model.generate_content(
-                [{"role": "user", "parts": [{"text": message}]},
+                [{"role": "user", "parts": [{"text": message}]}],  # Fixed list syntax with closing bracket
                 stream=True,
                 generation_config=genai.types.GenerationConfig(
                     temperature=0.7,
@@ -460,6 +471,362 @@ class GeminiLLMManager:
             if "429" in str(e) or "quota" in str(e).lower():
                 await self._handle_rate_limit()
             raise
+
+
+    async def _detect_intent_with_embeddings(self, message: str) -> Dict[str, Any]:
+        """
+        Detect intent using embedding models to compute similarity scores.
+        
+        Args:
+            message: The user's query message
+            
+        Returns:
+            Dictionary with intent type, confidence score, and optional clarification
+        """
+        try:
+            if not self.embedding_model:
+                raise ValueError("No embedding model available")
+                
+            # Prepare cleaned message
+            cleaned_message = re.sub(r'[^\w\s]', ' ', message.lower()).strip()
+            
+            # Define example queries for each intent type
+            intent_examples = {
+                QueryIntent.PUBLICATION: [
+                    "Show me publications about maternal health",
+                    "What papers have been published on climate change",
+                    "Research articles on education in Africa",
+                    "Find studies on urban development",
+                    "Recent publications by Dr. Smith"
+                ],
+                QueryIntent.EXPERT: [
+                    "Who are the experts in health policy",
+                    "Find researchers working on climate change",
+                    "Information about Dr. Johnson",
+                    "Which scientists study education outcomes",
+                    "Tell me about specialists in urban planning"
+                ],
+                QueryIntent.NAVIGATION: [
+                    "How do I find the contact page",
+                    "Where can I access research tools",
+                    "Show me the about section",
+                    "Where is the publications list",
+                    "How to navigate to resources"
+                ]
+            }
+            
+            # Get embeddings of the query
+            query_embedding = self.embedding_model.encode(cleaned_message)
+            
+            # Calculate similarity scores for each intent
+            intent_scores = {}
+            expert_name = None
+            
+            for intent, examples in intent_examples.items():
+                # Encode all examples for this intent
+                example_embeddings = self.embedding_model.encode(examples)
+                
+                # Calculate cosine similarity between query and examples
+                similarities = np.dot(example_embeddings, query_embedding) / (
+                    np.linalg.norm(example_embeddings, axis=1) * np.linalg.norm(query_embedding)
+                )
+                
+                # Use max similarity as the score for this intent
+                max_similarity = np.max(similarities)
+                intent_scores[intent] = float(max_similarity)  # Convert numpy float to Python float
+                
+                # If this is an expert intent with high similarity, try to extract expert name
+                if intent == QueryIntent.EXPERT and max_similarity > 0.7:
+                    # Use regex patterns to extract potential expert names
+                    name_patterns = [
+                        r'(by|from|about) ([A-Z][a-z]+ [A-Z][a-z]+)',
+                        r'([A-Z][a-z]+ [A-Z][a-z]+)\'s',
+                        r'(Dr\.|Professor) ([A-Z][a-z]+ [A-Z][a-z]+)'
+                    ]
+                    
+                    for pattern in name_patterns:
+                        match = re.search(pattern, message)
+                        if match:
+                            if len(match.groups()) > 1:
+                                expert_name = match.group(2)
+                            else:
+                                expert_name = match.group(1)
+                            break
+            
+            # Determine the intent with the highest score
+            max_score = 0.0
+            max_intent = QueryIntent.GENERAL
+            
+            for intent, score in intent_scores.items():
+                if score > max_score:
+                    max_score = score
+                    max_intent = intent
+            
+            # Apply threshold to determine final intent
+            confidence = max_score
+            
+            # If confidence is too low, default to GENERAL intent
+            if confidence < 0.6:
+                max_intent = QueryIntent.GENERAL
+                
+            # Prepare appropriate clarification if confidence is moderate
+            clarification = None
+            if 0.6 <= confidence < 0.75:
+                if max_intent == QueryIntent.PUBLICATION:
+                    clarification = "Which specific publication topic are you interested in?"
+                elif max_intent == QueryIntent.EXPERT:
+                    clarification = "Can you specify which expert or research area you're looking for?"
+                elif max_intent == QueryIntent.NAVIGATION:
+                    clarification = "Which specific section of our resources are you trying to find?"
+            
+            # Build result
+            result = {
+                'intent': max_intent,
+                'confidence': confidence,
+                'clarification': clarification
+            }
+            
+            # Add expert name if found
+            if expert_name:
+                result['expert_name'] = expert_name
+                
+            logger.info(f"Embedding intent detection result: {max_intent.value} with confidence {confidence:.2f}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in embedding intent detection: {e}", exc_info=True)
+            raise
+
+    async def _detect_intent_with_gemini(self, message: str) -> Dict[str, Any]:
+        """
+        Detect intent using Gemini API as a fallback.
+        
+        Args:
+            message: The user's query message
+            
+        Returns:
+            Dictionary with intent type, confidence score, and optional clarification
+        """
+        try:
+            if not await self.circuit_breaker.check():
+                logger.warning("Circuit breaker open, skipping Gemini intent detection")
+                return {
+                    'intent': QueryIntent.GENERAL,
+                    'confidence': 0.0,
+                    'clarification': None
+                }
+
+            # Get Gemini model
+            model = self._setup_gemini()
+            
+            # Create structured prompt for intent detection
+            prompt = f"""
+            Analyze this query and classify its intent:
+            Query: "{message}"
+
+            Options:
+            - PUBLICATION (research papers, studies)
+            - EXPERT (researchers, specialists)
+            - NAVIGATION (website sections, resources)
+            - GENERAL (other queries)
+
+            If asking about publications BY someone, extract the name.
+
+            Return ONLY JSON in this format:
+            {{
+                "intent": "PUBLICATION|EXPERT|NAVIGATION|GENERAL",
+                "confidence": 0.0-1.0,
+                "clarification": "optional question",
+                "expert_name": "name if detected"
+            }}
+            """
+
+            # Call Gemini API with rate limit protection
+            try:
+                await self._throttle_request()
+                response = await model.ainvoke(prompt)
+                content = response.text.replace("```json", "").replace("```", "").strip()
+                
+                # Extract JSON from response
+                json_start = content.find('{')
+                json_end = content.rfind('}') + 1
+                
+                if json_start >= 0 and json_end > json_start:
+                    result = json.loads(content[json_start:json_end])
+                    intent_mapping = {
+                        'PUBLICATION': QueryIntent.PUBLICATION,
+                        'EXPERT': QueryIntent.EXPERT,
+                        'NAVIGATION': QueryIntent.NAVIGATION,
+                        'GENERAL': QueryIntent.GENERAL
+                    }
+
+                    intent_result = {
+                        'intent': intent_mapping.get(result.get('intent', 'GENERAL'), QueryIntent.GENERAL),
+                        'confidence': min(1.0, max(0.0, float(result.get('confidence', 0.0)))),
+                        'clarification': result.get('clarification')
+                    }
+                    
+                    # Add expert name if detected
+                    if 'expert_name' in result and result['expert_name']:
+                        intent_result['expert_name'] = result['expert_name']
+                    
+                    logger.info(f"Gemini intent detection result: {intent_result}")
+                    return intent_result
+                    
+                else:
+                    logger.warning(f"Failed to extract JSON from Gemini response: {content}")
+                    return {
+                        'intent': QueryIntent.GENERAL,
+                        'confidence': 0.0,
+                        'clarification': None
+                    }
+                    
+            except Exception as api_error:
+                logger.error(f"Gemini API error in intent detection: {api_error}")
+                if "429" in str(api_error) or "quota" in str(api_error).lower():
+                    await self._handle_rate_limit()
+                return {
+                    'intent': QueryIntent.GENERAL,
+                    'confidence': 0.0,
+                    'clarification': None
+                }
+                
+        except Exception as e:
+            logger.error(f"Error in Gemini intent detection: {e}")
+            return {
+                'intent': QueryIntent.GENERAL,
+                'confidence': 0.0,
+                'clarification': None
+            }
+
+    def _detect_intent_with_keywords(self, message: str) -> Dict[str, Any]:
+        """
+        Detect intent using keyword pattern matching instead of embedding models.
+        
+        Args:
+            message: The user's query message
+            
+        Returns:
+            Dictionary with intent type, confidence score, and optional clarification
+        """
+        try:
+            # Clean and normalize the query
+            cleaned_query = message.lower().strip()
+            
+            # Define patterns for different intent types with confidence weights
+            patterns = {
+                QueryIntent.PUBLICATION: {
+                    'high_confidence': [
+                        r'publication', r'paper', r'research paper', r'article', r'journal', 
+                        r'study (on|about)', r'research (on|about)', r'published', r'doi'
+                    ],
+                    'medium_confidence': [
+                        r'study', r'research', r'findings', r'results', r'conclusion', 
+                        r'abstract', r'methodology', r'data', r'analysis'
+                    ]
+                },
+                QueryIntent.EXPERT: {
+                    'high_confidence': [
+                        r'expert', r'researcher', r'scientist', r'professor', r'dr\.', 
+                        r'specialist', r'author', r'lead', r'pi ', r'principal investigator'
+                    ],
+                    'medium_confidence': [
+                        r'who (is|are|was|were)', r'person', r'people', r'team', r'group', 
+                        r'department', r'faculty', r'staff', r'work(s|ed|ing) on'
+                    ]
+                },
+                QueryIntent.NAVIGATION: {
+                    'high_confidence': [
+                        r'website', r'page', r'section', r'find', r'where (is|are|can)', 
+                        r'how (do|can) i (find|get to|access)', r'link', r'url', r'navigate'
+                    ],
+                    'medium_confidence': [
+                        r'resources', r'tools', r'services', r'information', r'contact', 
+                        r'about', r'help', r'support', r'faq'
+                    ]
+                }
+            }
+            
+            # Calculate confidence scores for each intent
+            scores = {}
+            for intent, pattern_groups in patterns.items():
+                score = 0.0
+                
+                # Check high confidence patterns (match = 0.9)
+                for pattern in pattern_groups.get('high_confidence', []):
+                    if re.search(pattern, cleaned_query, re.IGNORECASE):
+                        score = max(score, 0.9)
+                        break
+                        
+                # If no high confidence match, check medium confidence patterns (match = 0.7)
+                if score < 0.7:
+                    for pattern in pattern_groups.get('medium_confidence', []):
+                        if re.search(pattern, cleaned_query, re.IGNORECASE):
+                            score = max(score, 0.7)
+                            break
+                
+                scores[intent] = score
+            
+            # Determine the intent with the highest confidence
+            max_score = 0.0
+            max_intent = QueryIntent.GENERAL
+            
+            for intent, score in scores.items():
+                if score > max_score:
+                    max_score = score
+                    max_intent = intent
+            
+            # Extract potential expert name if expert intent is detected
+            expert_name = None
+            if max_intent == QueryIntent.EXPERT and max_score > 0.7:
+                # Try to extract the expert name using regex patterns
+                name_patterns = [
+                    r'(by|from|about) ([A-Z][a-z]+ [A-Z][a-z]+)',  # Match "by John Smith"
+                    r'([A-Z][a-z]+ [A-Z][a-z]+)\'s (publications|research|papers|work)',  # Match "John Smith's publications"
+                    r'(Dr\.|Professor) ([A-Z][a-z]+ [A-Z][a-z]+)'  # Match "Dr. John Smith"
+                ]
+                
+                for pattern in name_patterns:
+                    match = re.search(pattern, message, re.IGNORECASE)
+                    if match:
+                        # Extract the name from the appropriate match group
+                        if len(match.groups()) > 1:
+                            expert_name = match.group(2)
+                        else:
+                            expert_name = match.group(1)
+                        break
+            
+            # Generate appropriate clarification if needed
+            clarification = None
+            if max_score < 0.6:
+                if max_intent == QueryIntent.PUBLICATION:
+                    clarification = "Could you specify which publication or research topic you're interested in?"
+                elif max_intent == QueryIntent.EXPERT:
+                    clarification = "Are you looking for information about a specific researcher or expert?"
+                elif max_intent == QueryIntent.NAVIGATION:
+                    clarification = "Which part of our website or resources are you trying to access?"
+            
+            # Build result dictionary
+            result = {
+                'intent': max_intent if max_score >= 0.5 else QueryIntent.GENERAL,
+                'confidence': max_score,
+                'clarification': clarification
+            }
+            
+            # Add expert name if found
+            if expert_name:
+                result['expert_name'] = expert_name
+                
+            logger.debug(f"Keyword intent detection: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in keyword intent detection: {e}")
+            return {
+                'intent': QueryIntent.GENERAL,
+                'confidence': 0.0,
+                'clarification': None
+            }
 
     async def detect_intent(self, message: str) -> Dict[str, Any]:
         """Enhanced intent detection with fallbacks"""
