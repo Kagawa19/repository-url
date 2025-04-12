@@ -353,90 +353,53 @@ class GeminiLLMManager:
                 'confidence': 0.0,
                 'clarification': None
             }
+        
+    def semantic_search(self, query: str, embeddings: List[np.ndarray], texts: List[str], top_k: int = 3) -> List[str]:
+        try:
+            query_embedding = self.embedding_model.encode(query)
+            similarities = cos_sim(query_embedding, embeddings).numpy().flatten()
+            top_indices = np.argsort(similarities)[-top_k:][::-1]
+            return [texts[i] for i in top_indices]
+        except Exception as e:
+            logger.error(f"Error in semantic search: {e}")
+            return []
 
 
     async def generate_async_response(self, message: str) -> AsyncGenerator[str, None]:
-        """Generates a response without mixing expert and publication logic."""
         try:
-            # 1. Intent Detection
+            # Step 1: Detect intent
             intent_result = await self.detect_intent(message)
             intent = intent_result['intent']
-            expert_name = intent_result.get('expert_name')
-
-            # 2. Initialize Response Metadata
-            metadata = {
-                'intent': intent.value,
-                'confidence': intent_result['confidence'],
-                'content_matches': [],
-                'timestamp': datetime.now().isoformat()
-            }
-
-            # 3. Handle EXPERT Intent (ONLY Experts - No Publications)
+            
+            # Step 2: Handle intent-specific logic
             if intent == QueryIntent.EXPERT:
-                if expert_name:
-                    # Case 1: "Dr. Smith" → Fetch only expert profile (no publications)
-                    experts, _ = await self.get_experts(expert_name, limit=1)
-                    if experts:
-                        expert = experts[0]
-                        context = self._format_expert_profile(expert)
-                        metadata['content_matches'] = [expert['id']]
-                    else:
-                        context = f"No expert named '{expert_name}' found."
+                experts, _ = await self.get_experts(message, limit=5)
+                if experts:
+                    ranked_experts = self.semantic_search(message, [e['embedding'] for e in experts], experts)
+                    context = self.format_expert_context(ranked_experts)
                 else:
-                    # Case 2: "Health policy experts" → General expert search
-                    experts, _ = await self.get_experts(message, limit=5)
-                    if experts:
-                        # Encode the query
-                        if self.embedding_model:
-                            query_embedding = self.embedding_model.encode(message)
-                        else:
-                            query_embedding = self._create_fallback_embedding(message)
-
-                        # Rank experts by cosine similarity
-                        ranked = sorted(
-                            experts,
-                            key=lambda e: cos_sim(query_embedding, e['embedding'])[0][0]
-                            if 'embedding' in e else 0,
-                            reverse=True
-                        )
-                        top_experts = ranked[:3]
-                        context = self.format_expert_context(top_experts)
-                        metadata['content_matches'] = [e['id'] for e in top_experts]
-                    else:
-                        context = "No matching experts found."
-
-            # 4. Handle PUBLICATION Intent (ONLY Publications - No Experts)
+                    context = "No matching experts found."
             elif intent == QueryIntent.PUBLICATION:
                 publications, _ = await self.get_publications(message, limit=3)
                 if publications:
-                    context = self.format_publication_context(publications)
-                    metadata['content_matches'] = [p['id'] for p in publications]
+                    ranked_pubs = self.semantic_search(message, [p['embedding'] for p in publications], publications)
+                    context = self.format_publication_context(ranked_pubs)
                 else:
                     context = "No matching publications found."
-
-            # 5. Default Response
             else:
                 context = "How can I assist you with APHRC research?"
-
-            # 6. Stream Metadata
-            yield json.dumps({'is_metadata': True, 'metadata': metadata})
-
-            # 7. Generate Final Response with Gemini
+            
+            # Step 3: Generate response
+            yield json.dumps({'is_metadata': True, 'metadata': {'intent': intent.value}})
             model = self._setup_gemini()
-            prompt = f"Context:\n{context}\n\nQuestion: {message}"
+            prompt = f"Context:\n{context}\nQuestion: {message}"
             response = model.generate_content(prompt, stream=True)
-
-            # 8. Stream Text Chunks
+            
             for chunk in response:
                 if hasattr(chunk, 'text') and chunk.text:
                     yield chunk.text
-                elif hasattr(chunk, 'parts') and chunk.parts:
-                    for part in chunk.parts:
-                        if hasattr(part, 'text') and part.text:
-                            yield part.text
-
         except Exception as e:
-            logger.error(f"Error: {str(e)}")
+            logger.error(f"Error generating response: {e}")
             yield json.dumps({'error': str(e)})
 
     def _setup_remote_embeddings(self):
@@ -500,141 +463,56 @@ class GeminiLLMManager:
 
 
     async def _detect_intent_with_embeddings(self, message: str) -> Dict[str, Any]:
-        """
-        Detect intent using embedding models to compute similarity scores.
-        
-        Args:
-            message: The user's query message
-            
-        Returns:
-            Dictionary with intent type, confidence score, and optional clarification
-        """
         try:
             if not self.embedding_model:
                 raise ValueError("No embedding model available")
-                
-            if not hasattr(self.embedding_model, 'encode'):
-                raise ValueError("Embedding model missing encode method")
-                
-            # Test encode a small string to verify model works
-            try:
-                test_embedding = self.embedding_model.encode("test")
-                if len(test_embedding) == 0:
-                    raise ValueError("Empty embedding generated")
-            except Exception as test_error:
-                logger.error(f"Embedding model test failed: {test_error}")
-                raise ValueError("Embedding model not functioning properly")
-                if not self.embedding_model:
-                    raise ValueError("No embedding model available")
-                
-            # Prepare cleaned message
+            
+            # Clean and normalize the query
             cleaned_message = re.sub(r'[^\w\s]', ' ', message.lower()).strip()
+            query_embedding = self.embedding_model.encode(cleaned_message)
             
             # Define example queries for each intent type
             intent_examples = {
                 QueryIntent.PUBLICATION: [
                     "Show me publications about maternal health",
                     "What papers have been published on climate change",
-                    "Research articles on education in Africa",
-                    "Find studies on urban development",
-                    "Recent publications by Dr. Smith"
+                    "Research articles on education in Africa"
                 ],
                 QueryIntent.EXPERT: [
                     "Who are the experts in health policy",
                     "Find researchers working on climate change",
-                    "Information about Dr. Johnson",
-                    "Which scientists study education outcomes",
-                    "Tell me about specialists in urban planning"
+                    "Information about Dr. Johnson"
                 ],
                 QueryIntent.NAVIGATION: [
                     "How do I find the contact page",
                     "Where can I access research tools",
-                    "Show me the about section",
-                    "Where is the publications list",
-                    "How to navigate to resources"
+                    "Show me the about section"
                 ]
             }
             
-            # Get embeddings of the query
-            query_embedding = self.embedding_model.encode(cleaned_message)
-            
-            # Calculate similarity scores for each intent
+            # Compute similarity scores for each intent
             intent_scores = {}
-            expert_name = None
-            
             for intent, examples in intent_examples.items():
-                # Encode all examples for this intent
                 example_embeddings = self.embedding_model.encode(examples)
-                
-                # Calculate cosine similarity between query and examples
-                similarities = np.dot(example_embeddings, query_embedding) / (
-                    np.linalg.norm(example_embeddings, axis=1) * np.linalg.norm(query_embedding)
-                )
-                
-                # Use max similarity as the score for this intent
-                max_similarity = np.max(similarities)
-                intent_scores[intent] = float(max_similarity)  # Convert numpy float to Python float
-                
-                # If this is an expert intent with high similarity, try to extract expert name
-                if intent == QueryIntent.EXPERT and max_similarity > 0.7:
-                    # Use regex patterns to extract potential expert names
-                    name_patterns = [
-                        r'(by|from|about) ([A-Z][a-z]+ [A-Z][a-z]+)',
-                        r'([A-Z][a-z]+ [A-Z][a-z]+)\'s',
-                        r'(Dr\.|Professor) ([A-Z][a-z]+ [A-Z][a-z]+)'
-                    ]
-                    
-                    for pattern in name_patterns:
-                        match = re.search(pattern, message)
-                        if match:
-                            if len(match.groups()) > 1:
-                                expert_name = match.group(2)
-                            else:
-                                expert_name = match.group(1)
-                            break
+                similarities = cos_sim(query_embedding, example_embeddings).numpy().flatten()
+                max_similarity = max(similarities)
+                intent_scores[intent] = float(max_similarity)
             
             # Determine the intent with the highest score
-            max_score = 0.0
-            max_intent = QueryIntent.GENERAL
-            
-            for intent, score in intent_scores.items():
-                if score > max_score:
-                    max_score = score
-                    max_intent = intent
+            max_intent = max(intent_scores, key=intent_scores.get)
+            confidence = intent_scores[max_intent]
             
             # Apply threshold to determine final intent
-            confidence = max_score
-            
-            # If confidence is too low, default to GENERAL intent
             if confidence < 0.6:
                 max_intent = QueryIntent.GENERAL
-                
-            # Prepare appropriate clarification if confidence is moderate
-            clarification = None
-            if 0.6 <= confidence < 0.75:
-                if max_intent == QueryIntent.PUBLICATION:
-                    clarification = "Which specific publication topic are you interested in?"
-                elif max_intent == QueryIntent.EXPERT:
-                    clarification = "Can you specify which expert or research area you're looking for?"
-                elif max_intent == QueryIntent.NAVIGATION:
-                    clarification = "Which specific section of our resources are you trying to find?"
             
-            # Build result
-            result = {
+            return {
                 'intent': max_intent,
                 'confidence': confidence,
-                'clarification': clarification
+                'clarification': None
             }
-            
-            # Add expert name if found
-            if expert_name:
-                result['expert_name'] = expert_name
-                
-            logger.info(f"Embedding intent detection result: {max_intent.value} with confidence {confidence:.2f}")
-            return result
-            
         except Exception as e:
-            logger.error(f"Error in embedding intent detection: {e}", exc_info=True)
+            logger.error(f"Error in embedding intent detection: {e}")
             raise
 
     async def _detect_intent_with_gemini(self, message: str) -> Dict[str, Any]:
