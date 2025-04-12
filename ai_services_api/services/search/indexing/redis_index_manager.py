@@ -1007,11 +1007,26 @@ class ExpertRedisIndexManager:
                 pipeline.sadd(expert_resources_key, str(resource['id']))
                 
                 pipeline.execute()
+                logger.info(f"Successfully stored resource {resource['id']} for expert {expert_id}")
                 
             except Exception as e:
                 if pipeline:
                     pipeline.reset()
+                    logger.debug("Reset Redis pipeline due to error")
                 logger.error(f"Error storing resource {resource.get('id')}: {e}")
+                raise
+                
+        except Exception as e:
+            logger.error(f"Failed to process resource {resource.get('id')}: {e}")
+            raise
+            
+        finally:
+            try:
+                if conn:
+                    conn.close()
+                    logger.debug("Closed database connection")
+            except Exception as e:
+                logger.warning(f"Error closing database connection: {e}")
             
 
     def _create_resource_text_content(self, resource: Dict[str, Any]) -> str:
