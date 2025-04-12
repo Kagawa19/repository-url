@@ -22,30 +22,29 @@ class ExpertRedisIndexManager:
         try:
             self.db = DatabaseConnector()  # Initialize the database connector
             load_dotenv()
-            
-            # Explicitly set model path to pre-downloaded location
-            model_name = os.getenv('EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
-            model_cache_dir = '/app/models'  # Use the pre-downloaded model directory
-            
+
+            # Define the path to the pre-downloaded model directory
+            model_path = '/app/models/sentence-transformers/all-MiniLM-L6-v2'
+
             try:
-                logger.info(f"Attempting to load model from {model_cache_dir}")
+                logger.info(f"Loading SentenceTransformer model from: {model_path}")
                 self.embedding_model = SentenceTransformer(
-                    model_name, 
-                    cache_folder=model_cache_dir,
-                    local_files_only=True  # Force local files
+                    model_path,
+                    local_files_only=True  # Ensures only local files are used
                 )
             except Exception as e:
-                logger.error(f"Failed to load model: {e}")
-                logger.warning("Falling back to None and using manual embedding")
+                logger.error(f"Failed to load model from {model_path}: {e}")
+                logger.warning("Falling back to None; manual embedding will be used.")
                 self.embedding_model = None
-            
+
             # Setup Redis connections
             self.setup_redis_connections()
-            
+
             logger.info("ExpertRedisIndexManager initialized successfully")
         except Exception as e:
             logger.error(f"Error initializing ExpertRedisIndexManager: {e}")
             raise
+
 
     def setup_redis_connections(self):
         """Setup Redis connections with retry logic."""
