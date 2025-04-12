@@ -399,8 +399,20 @@ class GeminiLLMManager:
                 except Exception as emb_err:
                     logger.warning(f"Failed to create query embedding: {emb_err}")
 
+            # Extract meaningful name terms from the query
+            query_terms = query.lower().split()
+            name_terms = []
+            for term in query_terms:
+                # Skip very short terms and common words
+                if len(term) <= 2 or term in ['is', 'there', 'an', 'expert', 'who', 'the', 'a', 'of', 'and', 
+                                            'what', 'where', 'when', 'how', 'why', 'which', 'this', 'that']:
+                    continue
+                name_terms.append(term)
+            
+            logger.info(f"Extracted name terms from query: {name_terms}")
+
             # Process each key (expert)
-            for key in keys[:limit * 2]:  # Slightly more than limit
+            for key in keys:  # Process all keys to find matches
                 try:
                     # Get expert data using appropriate method
                     expert = {}
@@ -415,11 +427,24 @@ class GeminiLLMManager:
                     if not expert:
                         continue
                         
-                    # Check if the query matches expert name
-                    if query.lower() in expert.get('first_name', '').lower() or \
-                    query.lower() in expert.get('last_name', '').lower():
+                    # Improved name matching logic
+                    expert_first_name = expert.get('first_name', '').lower()
+                    expert_last_name = expert.get('last_name', '').lower()
+                    full_name = f"{expert_first_name} {expert_last_name}"
+                    
+                    # Check if any name term matches any part of the expert's name
+                    name_match = False
+                    matched_term = None
+                    
+                    for term in name_terms:
+                        if term in expert_first_name or term in expert_last_name:
+                            name_match = True
+                            matched_term = term
+                            break
+                    
+                    if name_match:
                         expert_id = expert.get('id') or key.split(':')[-1]
-                        logger.info(f"Found matching expert: {expert.get('first_name', '')} {expert.get('last_name', '')}")
+                        logger.info(f"Found matching expert: {expert.get('first_name', '')} {expert.get('last_name', '')} (matched term: {matched_term})")
                         
                         # Try different embedding key patterns
                         embedding_patterns = [
@@ -462,6 +487,10 @@ class GeminiLLMManager:
                             )
 
                         experts.append(expert)
+                        
+                        # Break early if we have enough experts
+                        if len(experts) >= limit * 2:
+                            break
                 except Exception as expert_err:
                     logger.warning(f"Error processing expert from key {key}: {expert_err}")
                     continue
