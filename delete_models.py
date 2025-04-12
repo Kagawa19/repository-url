@@ -2,84 +2,123 @@
 import os
 import shutil
 import sys
+import subprocess
 
 def clear_model_cache():
-    """Clear all SentenceTransformer model caches in the container"""
+    """Clear ALL SentenceTransformer model caches in the container"""
     
-    # Define all possible cache locations based on your .env and code
-    cache_paths = [
-        '/app/.model_cache',
+    # List all directories to check
+    cache_dirs = [
         '/app/models',
-        '.model_cache',
-        os.environ.get('MODEL_CACHE_DIR', '/app/.model_cache'),
-        os.environ.get('TRANSFORMERS_CACHE', '/app/.model_cache'),
-        os.environ.get('HF_HOME', '/app/.model_cache'),
-        os.environ.get('MODEL_PATH', '/app/.model_cache'),
+        '/app/.model_cache',
+        '/home/appuser/models',
+        '/tmp/.cache'
     ]
     
-    # Get unique paths
-    unique_paths = set()
-    for path in cache_paths:
-        if path:
-            unique_paths.add(os.path.abspath(path))
+    paths_removed = []
     
-    # Clear each path
-    removed = False
-    for path in unique_paths:
-        if os.path.exists(path):
-            print(f"Examining path: {path}")
+    # First try finding all model-related paths
+    print("Searching for all model-related directories:")
+    for root_dir in cache_dirs:
+        if not os.path.exists(root_dir):
+            print(f"  {root_dir} (doesn't exist)")
+            continue
             
-            # Check if it's a directory
-            if os.path.isdir(path):
-                # Option 1: Clear the entire directory
-                if path.endswith('.model_cache') or path.endswith('models'):
-                    try:
-                        print(f"Removing entire directory: {path}")
-                        shutil.rmtree(path)
-                        os.makedirs(path, exist_ok=True)  # Recreate empty directory
-                        removed = True
-                        print(f"Successfully removed and recreated: {path}")
-                    except Exception as e:
-                        print(f"Error removing directory {path}: {e}")
-                
-                # Option 2: Clear specific model subdirectories
-                else:
-                    model_dirs = [
-                        os.path.join(path, d) for d in os.listdir(path)
-                        if d.startswith('sentence-transformers') or 
-                           d.startswith('models--sentence-transformers') or
-                           d == 'all-MiniLM-L6-v2'
-                    ]
+        print(f"  {root_dir}/")
+        
+        # Check direct paths - thorough approach
+        potential_model_paths = [
+            os.path.join(root_dir, 'all-MiniLM-L6-v2'),
+            os.path.join(root_dir, 'sentence-transformers', 'all-MiniLM-L6-v2'),
+            os.path.join(root_dir, 'models--sentence-transformers--all-MiniLM-L6-v2'),
+            os.path.join(root_dir, 'hub', 'models--sentence-transformers--all-MiniLM-L6-v2'),
+        ]
+        
+        for path in potential_model_paths:
+            if os.path.exists(path):
+                print(f"    ✓ Found: {path}")
+                try:
+                    print(f"    Removing: {path}")
+                    shutil.rmtree(path)
+                    paths_removed.append(path)
+                except Exception as e:
+                    print(f"    Error removing {path}: {e}")
                     
-                    for model_dir in model_dirs:
-                        try:
-                            print(f"Removing model directory: {model_dir}")
-                            shutil.rmtree(model_dir)
-                            removed = True
-                        except Exception as e:
-                            print(f"Error removing {model_dir}: {e}")
+        # Search recursively for any remaining sentence-transformer related directories
+        for subdir, dirs, files in os.walk(root_dir):
+            for d in dirs:
+                if 'sentence-transformer' in d.lower() or 'miniml' in d.lower():
+                    full_path = os.path.join(subdir, d)
+                    print(f"    ✓ Found: {full_path}")
+                    try:
+                        print(f"    Removing: {full_path}")
+                        shutil.rmtree(full_path)
+                        paths_removed.append(full_path)
+                    except Exception as e:
+                        print(f"    Error removing {full_path}: {e}")
     
-    print("\nChecking environment variables:")
-    for var in ['MODEL_CACHE_DIR', 'TRANSFORMERS_CACHE', 'HF_HOME', 'MODEL_PATH']:
-        print(f"{var}={os.environ.get(var, 'not set')}")
-    
-    # If TRANSFORMERS_OFFLINE=1, warn that new model won't be downloaded
-    if os.environ.get('TRANSFORMERS_OFFLINE') == '1':
-        print("\nWARNING: TRANSFORMERS_OFFLINE=1 is set!")
-        print("After clearing the cache, the model won't be able to download again.")
-        print("You should either:")
-        print("1. Rebuild the Docker image")
-        print("2. Temporarily set TRANSFORMERS_OFFLINE=0 to allow download")
-        print("3. Mount a volume with the model to /app/.model_cache\n")
-    
-    if removed:
-        print("Model cache cleared successfully")
+    # Report what was done
+    if paths_removed:
+        print("\nSuccessfully removed these model directories:")
+        for path in paths_removed:
+            print(f"  - {path}")
     else:
-        print("No model caches found to remove")
+        print("\nNo model directories found to remove")
+    
+    # Check huggingface cache
+    try:
+        from huggingface_hub import scan_cache_dir, delete_from_cache
+        print("\nChecking HuggingFace cache:")
+        cache_info = scan_cache_dir()
+        for repo in cache_info.repos:
+            if "sentence-transformers" in repo.repo_id or "all-MiniLM-L6-v2" in repo.repo_id:
+                print(f"  Deleting: {repo.repo_id}")
+                delete_from_cache(repo_id=repo.repo_id)
+    except ImportError:
+        print("\nHuggingFace Hub not installed, skipping that cache check")
+    except Exception as e:
+        print(f"\nError checking HuggingFace cache: {e}")
+    
+    # Check environment variables
+    print("\nRelevant environment variables:")
+    env_vars = ['TRANSFORMERS_CACHE', 'HF_HOME', 'EMBEDDING_MODEL', 'MODEL_CACHE_DIR', 'MODEL_PATH', 'TRANSFORMERS_OFFLINE']
+    for var in env_vars:
+        print(f"  {var}={os.environ.get(var, 'not set')}")
+    
+    if os.environ.get('TRANSFORMERS_OFFLINE') == '1':
+        print("\n⚠️ WARNING: TRANSFORMERS_OFFLINE=1 is set!")
+        print("After clearing the cache, the model won't be able to download again automatically.")
+        print("Options:")
+        print("  1. Rebuild the Docker image")
+        print("  2. Temporarily set TRANSFORMERS_OFFLINE=0 to allow download")
+    
+    # Try to release memory if the model might be loaded
+    try:
+        import gc
+        gc.collect()
+        print("\nGarbage collection completed")
+    except:
+        pass
+    
+    return bool(paths_removed)
 
 if __name__ == "__main__":
-    answer = input("This will clear all SentenceTransformer model caches. Continue? (y/n): ")
+    print("=" * 60)
+    print("SENTENCE TRANSFORMER MODEL CACHE CLEANER")
+    print("=" * 60)
+    print("This will search for and remove ALL instances of SentenceTransformer models")
+    print("in various cache directories throughout the container.")
+    print()
+    answer = input("Continue? (y/n): ")
     if answer.lower() in ['y', 'yes']:
-        clear_model_cache()
+        removed = clear_model_cache()
+        
+        if removed:
+            print("\n✅ Model caches cleared successfully")
+            print("\nTo prevent the model from being loaded again, you might need to:")
+            print("1. Restart the container")
+            print("2. Rebuild the Docker image")
+        else:
+            print("\n❌ No model caches were found or could be removed.")
     else:
         print("Operation cancelled")
