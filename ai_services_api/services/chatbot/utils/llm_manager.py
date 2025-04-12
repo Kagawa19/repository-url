@@ -262,7 +262,7 @@ class GeminiLLMManager:
                 }}
                 """
 
-                response = await model.generateContent(prompt)
+                response = await model.generate_content(prompt)
                 content = response.text.replace("```json", "").replace("```", "").strip()
                 
                 # Extract JSON from response
@@ -438,7 +438,7 @@ class GeminiLLMManager:
             # Step 6: Generate Final Response with Gemini
             model = self._setup_gemini()
             prompt = f"Context:\n{context}\nQuestion: {message}"
-            response = model.generateContent(prompt, stream=True)  # Use generateContent
+            response = model.generate_content(prompt, stream=True)  # Use generateContent
             
             for chunk in response:
                 if hasattr(chunk, 'text') and chunk.text:
@@ -610,7 +610,7 @@ class GeminiLLMManager:
             """
             
             # Generate content using Gemini
-            response = await model.generateContent(prompt)  # Use generateContent for async
+            response = await model.generate_content(prompt)  # Use generateContent for async
             content = response.text.replace("```json", "").replace("```", "").strip()
             
             # Extract JSON from the response
@@ -1185,7 +1185,7 @@ class GeminiLLMManager:
                 # Call the model and get response content safely
                 try:
                     # Handle async or sync invoke results properly
-                    model_response = await model.generateContent(prompt)
+                    model_response = await model.generate_content(prompt)
                     response_text = self._extract_content_safely(model_response)
                     
                     # Reset any rate limit flag if successful
