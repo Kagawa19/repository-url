@@ -384,6 +384,11 @@ class GeminiLLMManager:
                         if cursor == 0:
                             break
             
+            # Log the number of expert keys found
+            logger.info(f"Found {len(keys)} expert keys in Redis")
+            if not keys:
+                return [], "No experts found in database"
+            
             experts = []
             query_embedding = None
 
@@ -414,17 +419,32 @@ class GeminiLLMManager:
                     if query.lower() in expert.get('first_name', '').lower() or \
                     query.lower() in expert.get('last_name', '').lower():
                         expert_id = expert.get('id') or key.split(':')[-1]
-                        embedding_key = f"embedding:aphrc_expert:{expert_id}"
+                        logger.info(f"Found matching expert: {expert.get('first_name', '')} {expert.get('last_name', '')}")
+                        
+                        # Try different embedding key patterns
+                        embedding_patterns = [
+                            f"emb:aphrc_expert:{expert_id}",
+                            f"embedding:aphrc_expert:{expert_id}"
+                        ]
                         
                         # Retrieve embedding data
                         embedding_data = None
-                        if is_async_redis:
-                            if hasattr(self.redis_manager.redis_text, 'aget'):
-                                embedding_data = await self.redis_manager.redis_text.aget(embedding_key)
-                            else:
-                                embedding_data = await self.redis_manager.redis_text.get(embedding_key)
-                        else:
-                            embedding_data = self.redis_manager.redis_text.get(embedding_key)
+                        for emb_key in embedding_patterns:
+                            try:
+                                if is_async_redis:
+                                    if hasattr(self.redis_manager.redis_text, 'aget'):
+                                        embedding_data = await self.redis_manager.redis_text.aget(emb_key)
+                                    else:
+                                        embedding_data = await self.redis_manager.redis_text.get(emb_key)
+                                else:
+                                    embedding_data = self.redis_manager.redis_text.get(emb_key)
+                                    
+                                if embedding_data:
+                                    logger.debug(f"Found embedding at key: {emb_key}")
+                                    break
+                            except Exception as e:
+                                logger.debug(f"Error retrieving embedding from {emb_key}: {e}")
+                                continue
                         
                         if embedding_data:
                             try:
@@ -436,6 +456,7 @@ class GeminiLLMManager:
                                         f"{expert.get('first_name', '')} {expert.get('last_name', '')}"
                                     )
                         elif hasattr(self, '_create_fallback_embedding'):
+                            logger.debug(f"Creating fallback embedding for expert {expert_id}")
                             expert['embedding'] = self._create_fallback_embedding(
                                 f"{expert.get('first_name', '')} {expert.get('last_name', '')}"
                             )
@@ -445,24 +466,39 @@ class GeminiLLMManager:
                     logger.warning(f"Error processing expert from key {key}: {expert_err}")
                     continue
 
+            logger.info(f"Found {len(experts)} matching experts for query: {query}")
+            
             # Rank experts by cosine similarity if query embedding is available
             if query_embedding is not None and experts:
                 try:
-                    ranked_experts = sorted(
-                        experts,
-                        key=lambda e: cos_sim(query_embedding, e['embedding'])[0][0] if 'embedding' in e and e['embedding'] is not None else 0,
-                        reverse=True
-                    )
-                    return ranked_experts[:limit], None
+                    # Only rank experts with valid embeddings
+                    experts_with_embeddings = [e for e in experts if 'embedding' in e and e['embedding'] is not None]
+                    
+                    if experts_with_embeddings:
+                        ranked_experts = sorted(
+                            experts_with_embeddings,
+                            key=lambda e: cos_sim(query_embedding, e['embedding'])[0][0],
+                            reverse=True
+                        )
+                        
+                        # Add any experts without embeddings at the end
+                        experts_without_embeddings = [e for e in experts if 'embedding' not in e or e['embedding'] is None]
+                        ranked_experts.extend(experts_without_embeddings)
+                        
+                        return ranked_experts[:limit], None
+                    else:
+                        # If no experts have embeddings, return them unranked
+                        return experts[:limit], None
                 except Exception as ranking_err:
                     logger.warning(f"Error ranking experts: {ranking_err}")
                     # Fall back to unranked experts
+                    return experts[:limit], None
                     
             return experts[:limit], None
         except Exception as e:
             logger.error(f"Error fetching experts: {e}")
             return [], str(e)
-        
+            
     def semantic_search(self, query: str, embeddings: List[np.ndarray], texts: List[str], top_k: int = 3) -> List[str]:
         try:
             query_embedding = self.embedding_model.encode(query)
