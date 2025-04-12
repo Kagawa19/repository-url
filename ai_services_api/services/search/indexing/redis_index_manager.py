@@ -933,9 +933,7 @@ class ExpertRedisIndexManager:
                         logger.warning("resources_resource table does not exist yet")
                         return []
                     
-                    # Modified query to get:
-                    # 1. Resources with expert_id in experts_expert table
-                    # 2. Resources linked via expert_resource_links
+                    # Corrected query with proper SQL syntax
                     query = """
                         SELECT DISTINCT r.*
                         FROM resources_resource r
@@ -1017,7 +1015,6 @@ class ExpertRedisIndexManager:
                     conn.close()
         
         return []
-
 
     def _create_resource_text_content(self, resource: Dict[str, Any]) -> str:
         """Create comprehensive text content for resource embedding."""
