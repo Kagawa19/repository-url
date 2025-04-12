@@ -434,7 +434,9 @@ class SchemaManager:
             # Chat session indexes
             "CREATE INDEX IF NOT EXISTS idx_chat_sessions_user ON chat_sessions(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_chat_sessions_timestamp ON chat_sessions(start_timestamp)",
-            
+            "CREATE INDEX IF NOT EXISTS idx_resources_expert_id ON resources_resource(expert_id)"
+            "CREATE INDEX IF NOT EXISTS idx_erl_resource_id ON expert_resource_links(resource_id)"
+            "CREATE INDEX IF NOT EXISTS idx_erl_expert_id ON expert_resource_links(expert_id)"
             # response quality
             "CREATE INDEX IF NOT EXISTS idx_response_quality_interaction_id ON response_quality_metrics(interaction_id)",
             
