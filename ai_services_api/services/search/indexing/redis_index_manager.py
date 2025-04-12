@@ -939,9 +939,8 @@ class ExpertRedisIndexManager:
 
     def _store_resource_data(self, resource: Dict[str, Any], text_content: str, embedding: np.ndarray) -> None:
         """Stores resources that are linked to experts in Redis."""
-        # Initialize pipeline at start
-        pipeline = None
         conn = None
+        pipeline = None
         
         try:
             # Get expert_id - can come from either direct field or links
@@ -949,69 +948,71 @@ class ExpertRedisIndexManager:
             
             # If no direct expert_id, check if resource is linked to any expert
             if not expert_id or str(expert_id).strip().lower() == 'none':
-                conn = self.db.get_connection()
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT expert_id FROM expert_resource_links 
-                        WHERE resource_id = %s LIMIT 1
-                    """, (resource['id'],))
-                    link_result = cur.fetchone()
-                    expert_id = link_result[0] if link_result else None
-                    
-            # Skip if still no valid expert_id
-            if not expert_id or str(expert_id).strip().lower() == 'none':
-                logger.warning(f"Skipping resource {resource.get('id')} - no valid expert association")
+                try:
+                    conn = self.db.get_connection()
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT expert_id FROM expert_resource_links 
+                            WHERE resource_id = %s LIMIT 1
+                        """, (resource['id'],))
+                        link_result = cur.fetchone()
+                        expert_id = link_result[0] if link_result else None
+                except Exception as e:
+                    logger.error(f"Error checking resource links for {resource.get('id')}: {e}")
+                    raise
+
+            # Validate we have an expert_id
+            if not expert_id:
+                logger.warning(f"Resource {resource.get('id')} has no expert association - skipping")
                 return
                 
             # Convert to string and clean
             expert_id = str(expert_id).strip()
             
-            # Verify expert exists
-            with conn.cursor() if conn else get_db_cursor() as (cur, _):
-                cur.execute("SELECT id FROM experts_expert WHERE id = %s", (expert_id,))
-                if not cur.fetchone():
-                    logger.warning(f"Skipping resource {resource.get('id')} - expert {expert_id} not found")
-                    return
+            # Verify expert exists using same connection
+            try:
+                if not conn:  # Reuse connection if we have one
+                    conn = self.db.get_connection()
+                    
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id FROM experts_expert WHERE id = %s", (expert_id,))
+                    if not cur.fetchone():
+                        logger.warning(f"Expert {expert_id} not found for resource {resource.get('id')}")
+                        return
 
-            # Proceed with Redis storage
-            base_key = f"expert_resource:{expert_id}:{resource['id']}"
-            pipeline = self.redis_text.pipeline()
+                # Proceed with Redis storage
+                base_key = f"expert_resource:{resource['id']}"  # Simplified key pattern
+                pipeline = self.redis_text.pipeline()
+                
+                # Store text content
+                pipeline.set(f"text:{base_key}", text_content)
+                
+                # Store embedding
+                self.redis_binary.set(f"emb:{base_key}", embedding.astype(np.float32).tobytes())
+                
+                # Store metadata
+                metadata = {
+                    'id': str(resource['id']),
+                    'title': str(resource.get('title', '')),
+                    'abstract': str(resource.get('abstract', '')),
+                    'authors': json.dumps(resource.get('authors', [])),
+                    'publication_year': str(resource.get('publication_year', '')),
+                    'expert_id': expert_id,
+                    'doi': str(resource.get('doi', ''))
+                }
+                pipeline.hset(f"meta:{base_key}", mapping=metadata)
+                
+                # Create reverse link from expert to resource
+                expert_resources_key = f"expert:{expert_id}:resources"
+                pipeline.sadd(expert_resources_key, str(resource['id']))
+                
+                pipeline.execute()
+                
+            except Exception as e:
+                if pipeline:
+                    pipeline.reset()
+                logger.error(f"Error storing resource {resource.get('id')}: {e}")
             
-            # Store text content
-            pipeline.set(f"text:{base_key}", text_content)
-            
-            # Store embedding
-            self.redis_binary.set(f"emb:{base_key}", embedding.astype(np.float32).tobytes())
-            
-            # Store metadata
-            metadata = {
-                'id': str(resource['id']),
-                'title': str(resource.get('title', '')),
-                'abstract': str(resource.get('abstract', '')),
-                'authors': json.dumps(resource.get('authors', [])),
-                'publication_year': str(resource.get('publication_year', '')),
-                'expert_id': expert_id,
-                'doi': str(resource.get('doi', ''))
-            }
-            pipeline.hset(f"meta:{base_key}", mapping=metadata)
-            
-            # Create index entry
-            index_key = f"expert:{expert_id}:resources"
-            pipeline.sadd(index_key, str(resource['id']))
-            
-            pipeline.execute()
-            
-        except Exception as e:
-            if pipeline:
-                pipeline.reset()
-            logger.error(f"Error storing resource {resource.get('id')} for expert {expert_id}: {e}")
-            raise
-        finally:
-            if conn:
-                conn.close()
-
-
-    
 
     def _create_resource_text_content(self, resource: Dict[str, Any]) -> str:
         """Create comprehensive text content for resource embedding."""
