@@ -28,6 +28,166 @@ class MessageHandler:
         Returns:
             str: Cleaned and reformatted text that preserves structure for lists
         """
+        # ⚠️ Changed: This method now calls our new helper method for text cleaning
+        # This maintains backward compatibility while using enhanced cleaning
+        return MessageHandler._clean_text_for_user(text)
+    
+    
+    async def process_stream_response(self, response_stream):
+        """
+        Process the streaming response with enhanced formatting and structure preservation.
+        
+        Args:
+            response_stream: Async generator of response chunks
+            
+        Yields:
+            str or dict: Cleaned and formatted response chunks or metadata
+        """
+        buffer = ""
+        metadata = None
+        in_publication_list = False
+        list_count = 0
+        publication_buffer = ""
+        
+        try:
+            async for chunk in response_stream:
+                # Capture metadata with improved detection
+                if isinstance(chunk, dict) and chunk.get('is_metadata'):
+                    # Store metadata both in method instance and for internal use
+                    metadata = chunk.get('metadata', chunk)
+                    self.metadata = metadata
+                    
+                    # Log metadata capture but don't yield it to user
+                    logger.debug(f"Captured metadata: {json.dumps(metadata, default=str) if metadata else 'None'}")
+                    # ⚠️ Changed: Don't yield metadata to user, just store it internally
+                    continue
+                
+                # Extract text from chunk with enhanced format handling
+                if isinstance(chunk, dict):
+                    if 'chunk' in chunk:
+                        text = chunk['chunk']
+                    elif 'content' in chunk:
+                        text = chunk['content']
+                    elif 'text' in chunk:
+                        text = chunk['text']
+                    else:
+                        # Try to stringify the dict as fallback
+                        text = str(chunk)
+                elif isinstance(chunk, (str, bytes)):
+                    text = chunk.decode('utf-8') if isinstance(chunk, bytes) else chunk
+                elif hasattr(chunk, 'content'):
+                    # Handle AIMessage or similar objects
+                    text = chunk.content
+                elif hasattr(chunk, 'text'):
+                    # Handle objects with text attribute
+                    text = chunk.text
+                else:
+                    # Skip unknown formats
+                    logger.debug(f"Skipping unknown chunk format: {type(chunk)}")
+                    continue
+                
+                # Skip empty chunks
+                if not text:
+                    continue
+                    
+                buffer += text
+                
+                # Detect publication lists
+                if re.search(r'\d+\.\s+Title:', buffer) or re.search(r'Title:', buffer):
+                    if not in_publication_list:
+                        in_publication_list = True
+                        publication_buffer = buffer
+                        buffer = ""
+                        continue
+                    else:
+                        publication_buffer += text
+                        
+                        # Check if we have a complete publication entry or multiple entries
+                        if re.search(r'\n\d+\.', publication_buffer):
+                            # Multiple entries detected, try to split
+                            entries = re.split(r'(?=\d+\.\s+Title:)', publication_buffer)
+                            if len(entries) > 1:
+                                # Process all but the last entry
+                                for entry in entries[:-1]:
+                                    if entry.strip():
+                                        # ⚠️ Changed: Apply enhanced text cleaning for publication entries
+                                        cleaned_entry = self._clean_text_for_user(entry)
+                                        yield cleaned_entry
+                                
+                                # Keep the last entry in the buffer
+                                publication_buffer = entries[-1]
+                            
+                        # Check if entry appears complete (has multiple fields and ending line)
+                        elif len(re.findall(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', publication_buffer)) >= 3 and '\n\n' in publication_buffer:
+                            # This looks like a complete entry
+                            # ⚠️ Changed: Apply enhanced text cleaning
+                            cleaned_entry = self._clean_text_for_user(publication_buffer)
+                            yield cleaned_entry
+                            publication_buffer = ""
+                            in_publication_list = False
+                            
+                        continue
+                
+                # If we were in a publication list but now we're not, yield the publication buffer
+                if in_publication_list and not re.search(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', text):
+                    if publication_buffer.strip():
+                        # ⚠️ Changed: Apply enhanced text cleaning
+                        cleaned_entry = self._clean_text_for_user(publication_buffer)
+                        yield cleaned_entry
+                    publication_buffer = ""
+                    in_publication_list = False
+                
+                # Normal sentence processing for non-publication content
+                if not in_publication_list:
+                    # Check if buffer contains complete sentences
+                    sentences = re.split(r'(?<=[.!?])\s+', buffer)
+                    if len(sentences) > 1:
+                        # Process all but the last sentence
+                        for sentence in sentences[:-1]:
+                            if sentence.strip():
+                                # ⚠️ Changed: Apply enhanced text cleaning
+                                cleaned_sentence = self._clean_text_for_user(sentence)
+                                yield cleaned_sentence
+                        
+                        # Keep the last sentence in the buffer
+                        buffer = sentences[-1]
+            
+            # Handle any remaining text in buffers
+            if publication_buffer.strip():
+                yield self._clean_text_for_user(publication_buffer)
+            elif buffer.strip():
+                yield self._clean_text_for_user(buffer)
+            
+            # ⚠️ Changed: Don't yield metadata to user, it's already been processed internally
+            # Metadata is stored in self.metadata for internal use but not exposed to the user
+                
+        except Exception as e:
+            logger.error(f"Error processing stream response: {e}", exc_info=True)
+            # Yield any remaining buffer to avoid losing content
+            if publication_buffer.strip():
+                yield self._clean_text_for_user(publication_buffer)
+            elif buffer.strip():
+                yield self._clean_text_for_user(buffer)
+
+    @staticmethod
+    def _clean_text_for_user(text: str) -> str:
+        """
+        Enhanced text cleaning for user-facing responses.
+        Removes technical artifacts and properly formats markdown.
+        
+        Args:
+            text (str): The input text that may contain technical artifacts or raw markdown
+            
+        Returns:
+            str: Clean, well-formatted text suitable for user display
+        """
+        if not text:
+            return ""
+        
+        # Remove any JSON metadata that might have slipped through
+        metadata_pattern = r'^\s*\{\"is_metadata\"\s*:\s*true.*?\}\s*'
+        text = re.sub(metadata_pattern, '', text)
+        
         # Check if text is part of a structured publication list
         is_publication_item = bool(re.search(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:|Research Domains:)', text))
         
@@ -43,6 +203,12 @@ class MessageHandler:
         if re.match(r'^DOI:', text.strip()):
             return text.strip()
         
+        # Convert markdown formatting: replace ** with proper formatting or remove
+        # In this implementation, we'll remove them for clean plain text
+        # If UI supports formatting, this could be modified
+        text = text.replace('***', '')
+        text = text.replace('**', '')
+        
         # Handle structured publication data differently
         if is_publication_item:
             # For publication data, preserve line structure but clean up extra whitespace
@@ -57,9 +223,6 @@ class MessageHandler:
             # Clean up extra whitespace while preserving line structure
             lines = [line.strip() for line in cleaned.split('\n')]
             cleaned = '\n'.join(lines)
-            
-            # Remove markdown bold marks
-            cleaned = cleaned.replace('**', '')
             
             return cleaned
         
@@ -123,148 +286,29 @@ class MessageHandler:
             cleaned = cleaned.replace(placeholder, doi)
         
         return cleaned
-    
-    
-    async def process_stream_response(self, response_stream):
+
+    def _extract_metadata(self, chunk):
         """
-        Process the streaming response with enhanced formatting and structure preservation.
+        Extract metadata from a response chunk for internal use.
         
         Args:
-            response_stream: Async generator of response chunks
+            chunk: A response chunk that may contain metadata
             
-        Yields:
-            str or dict: Cleaned and formatted response chunks or metadata
+        Returns:
+            dict or None: Extracted metadata if present, None otherwise
         """
-        buffer = ""
-        metadata = None
-        in_publication_list = False
-        list_count = 0
-        publication_buffer = ""
-        
         try:
-            async for chunk in response_stream:
-                # Capture metadata with improved detection
-                if isinstance(chunk, dict) and chunk.get('is_metadata'):
-                    # Store metadata both in method instance and for return
-                    metadata = chunk.get('metadata', chunk)
-                    self.metadata = metadata
-                    
-                    # Log metadata capture
-                    logger.debug(f"Captured metadata: {json.dumps(metadata, default=str) if metadata else 'None'}")
-                    continue
-                
-                # Extract text from chunk with enhanced format handling
-                if isinstance(chunk, dict):
-                    if 'chunk' in chunk:
-                        text = chunk['chunk']
-                    elif 'content' in chunk:
-                        text = chunk['content']
-                    elif 'text' in chunk:
-                        text = chunk['text']
-                    else:
-                        # Try to stringify the dict as fallback
-                        text = str(chunk)
-                elif isinstance(chunk, (str, bytes)):
-                    text = chunk.decode('utf-8') if isinstance(chunk, bytes) else chunk
-                elif hasattr(chunk, 'content'):
-                    # Handle AIMessage or similar objects
-                    text = chunk.content
-                elif hasattr(chunk, 'text'):
-                    # Handle objects with text attribute
-                    text = chunk.text
-                else:
-                    # Skip unknown formats
-                    logger.debug(f"Skipping unknown chunk format: {type(chunk)}")
-                    continue
-                
-                # Skip empty chunks
-                if not text:
-                    continue
-                    
-                buffer += text
-                
-                # Detect publication lists
-                if re.search(r'\d+\.\s+Title:', buffer) or re.search(r'Title:', buffer):
-                    if not in_publication_list:
-                        in_publication_list = True
-                        publication_buffer = buffer
-                        buffer = ""
-                        continue
-                    else:
-                        publication_buffer += text
-                        
-                        # Check if we have a complete publication entry or multiple entries
-                        if re.search(r'\n\d+\.', publication_buffer):
-                            # Multiple entries detected, try to split
-                            entries = re.split(r'(?=\d+\.\s+Title:)', publication_buffer)
-                            if len(entries) > 1:
-                                # Process all but the last entry
-                                for entry in entries[:-1]:
-                                    if entry.strip():
-                                        cleaned_entry = self.clean_response_text(entry)
-                                        yield cleaned_entry
-                                
-                                # Keep the last entry in the buffer
-                                publication_buffer = entries[-1]
-                            
-                        # Check if entry appears complete (has multiple fields and ending line)
-                        elif len(re.findall(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', publication_buffer)) >= 3 and '\n\n' in publication_buffer:
-                            # This looks like a complete entry
-                            cleaned_entry = self.clean_response_text(publication_buffer)
-                            yield cleaned_entry
-                            publication_buffer = ""
-                            in_publication_list = False
-                            
-                        continue
-                
-                # If we were in a publication list but now we're not, yield the publication buffer
-                if in_publication_list and not re.search(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', text):
-                    if publication_buffer.strip():
-                        cleaned_entry = self.clean_response_text(publication_buffer)
-                        yield cleaned_entry
-                    publication_buffer = ""
-                    in_publication_list = False
-                
-                # Normal sentence processing for non-publication content
-                if not in_publication_list:
-                    # Check if buffer contains complete sentences
-                    sentences = re.split(r'(?<=[.!?])\s+', buffer)
-                    if len(sentences) > 1:
-                        # Process all but the last sentence
-                        for sentence in sentences[:-1]:
-                            if sentence.strip():
-                                cleaned_sentence = self.clean_response_text(sentence)
-                                yield cleaned_sentence
-                        
-                        # Keep the last sentence in the buffer
-                        buffer = sentences[-1]
-            
-            # Handle any remaining text in buffers
-            if publication_buffer.strip():
-                yield self.clean_response_text(publication_buffer)
-            elif buffer.strip():
-                yield self.clean_response_text(buffer)
-            
-            # Yield metadata if exists
-            if metadata:
-                # Wrap in proper format if needed
-                if not isinstance(metadata, dict) or 'is_metadata' not in metadata:
-                    metadata_wrapper = {'is_metadata': True, 'metadata': metadata}
-                    yield metadata_wrapper
-                else:
-                    yield metadata
-                    
+            if isinstance(chunk, dict) and chunk.get('is_metadata'):
+                # Extract the metadata portion
+                metadata = chunk.get('metadata', {})
+                # Store it in the instance for later use
+                self.metadata = metadata
+                logger.debug(f"Extracted metadata: {json.dumps(metadata, default=str) if metadata else 'None'}")
+                return metadata
+            return None
         except Exception as e:
-            logger.error(f"Error processing stream response: {e}", exc_info=True)
-            # Yield any remaining buffer to avoid losing content
-            if publication_buffer.strip():
-                yield self.clean_response_text(publication_buffer)
-            elif buffer.strip():
-                yield self.clean_response_text(buffer)
-            
-            # If metadata was captured but not yet yielded, yield it now
-            if metadata and not isinstance(metadata, dict):
-                yield {'is_metadata': True, 'metadata': metadata}
+            logger.error(f"Error extracting metadata: {e}")
+            return None
     async def _create_error_metadata(self, start_time: float, error_type: str) -> Dict:
         """Create standardized error metadata."""
         return {
@@ -443,27 +487,29 @@ class MessageHandler:
             logger.info("Starting async response generation")
             response_generator = self.llm_manager.generate_async_response(message)
             
-            # Process and yield each part with detailed logging
-            async for part in response_generator:
-                # Log the type and partial content of each response part
+            # ⚠️ CRITICAL CHANGE: Process the response through process_stream_response
+            # This ensures responses are cleaned and formatted properly before being sent to users
+            logger.info("Processing response through cleaning pipeline")
+            async for part in self.process_stream_response(response_generator):
+                # The part is now cleaned by process_stream_response
+                
+                # Log the type and partial content of each processed part
                 part_type = type(part).__name__
                 
                 if isinstance(part, dict):
-                    logger.info(f"Yielding dictionary part type: {part_type}")
+                    # This should rarely happen now as metadata is filtered by process_stream_response
+                    logger.info(f"Yielding processed dictionary part type: {part_type}")
                     logger.debug(f"Dictionary content: {str(part)[:100]}... (truncated)")
-                    # Check if this is a metadata dictionary
-                    if 'is_metadata' in part:
-                        logger.info("Found metadata dictionary in response stream")
                 elif isinstance(part, bytes):
-                    logger.info(f"Yielding bytes part, length: {len(part)}")
+                    logger.info(f"Yielding processed bytes part, length: {len(part)}")
                 elif isinstance(part, str):
-                    logger.info(f"Yielding string part, length: {len(part)}")
+                    logger.info(f"Yielding processed string part, length: {len(part)}")
                     logger.debug(f"String content: {part[:50]}... (truncated)")
                 else:
-                    logger.warning(f"Unexpected part type: {part_type}")
+                    logger.warning(f"Unexpected processed part type: {part_type}")
                     logger.debug(f"Content representation: {str(part)[:100]}")
                     
-                # Yield the part regardless of logging
+                # Yield the cleaned part
                 yield part
                 
             logger.info("Completed send_message_async stream generation")
