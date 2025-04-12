@@ -326,100 +326,66 @@ class GeminiLLMManager:
                 'clarification': None
             }
     async def generate_async_response(self, message: str) -> AsyncGenerator[str, None]:
-        """
-        Generate streaming response with metadata, using unified semantic search methods.
-        Now includes circuit breaking and rate limit protection.
-        """
+        """Generates a response without mixing expert and publication logic."""
         try:
-            # Check circuit breaker first
-            if not await self.circuit_breaker.check():
-                yield "Our systems are currently busy. Please try again in a moment."
-                return
-
-            # Detect intent with fallback protection
+            # 1. Intent Detection
             intent_result = await self.detect_intent(message)
             intent = intent_result['intent']
-            confidence = intent_result['confidence']
-            
-            # Get relevant content based on intent
-            context = ""
+            expert_name = intent_result.get('expert_name')
+
+            # 2. Initialize Response Metadata
             metadata = {
-                'intent': {'type': intent.value, 'confidence': confidence},
+                'intent': intent.value,
+                'confidence': intent_result['confidence'],
                 'content_matches': [],
                 'timestamp': datetime.now().isoformat()
             }
 
-            # Handle specialized expert-publication queries
-            expert_name = intent_result.get('expert_name')
-            found_expert = None
-            
-            if intent == QueryIntent.EXPERT and expert_name:
-                logger.info(f"Handling expert-publication query for: {expert_name}")
-                experts, _ = await self.get_experts(expert_name, limit=1)
-                if experts:
-                    found_expert = experts[0]
-                    expert_id = found_expert.get('id')
-                    
-                    if expert_id:
-                        expert_publications = await self.get_publications(expert_id=expert_id, limit=5)
-                        if expert_publications and expert_publications[0]:
-                            expert_with_pubs = {**found_expert, 'publications': expert_publications[0]}
-                            context = self.format_expert_with_publications(expert_with_pubs)
-                            metadata['content_matches'] = [p.get('id') for p in expert_publications[0]]
-                            metadata['content_types'] = {'expert_publications': len(expert_publications[0])}
-                        else:
-                            context = f"Found expert {expert_name} but no associated publications."
-                            metadata['content_matches'] = [found_expert.get('id')]
-                            metadata['content_types'] = {'expert': 1, 'publications': 0}
-            
-            # Standard intent handling
+            # 3. Handle EXPERT Intent (ONLY Experts - No Publications)
+            if intent == QueryIntent.EXPERT:
+                if expert_name:
+                    # Case 1: "Dr. Smith" → Fetch only expert profile (no publications)
+                    experts, _ = await self.get_experts(expert_name, limit=1)
+                    if experts:
+                        expert = experts[0]
+                        context = self._format_expert_profile(expert)
+                        metadata['content_matches'] = [expert['id']]
+                    else:
+                        context = f"No expert named '{expert_name}' found."
+                else:
+                    # Case 2: "Health policy experts" → General expert search
+                    experts, _ = await self.get_experts(message, limit=3)
+                    if experts:
+                        context = self.format_expert_context(experts)
+                        metadata['content_matches'] = [e['id'] for e in experts]
+                    else:
+                        context = "No matching experts found."
+
+            # 4. Handle PUBLICATION Intent (ONLY Publications - No Experts)
             elif intent == QueryIntent.PUBLICATION:
                 publications, _ = await self.get_publications(message, limit=3)
                 if publications:
                     context = self.format_publication_context(publications)
                     metadata['content_matches'] = [p['id'] for p in publications]
-                    metadata['content_types'] = {'publication': len(publications)}
-            
-            elif intent == QueryIntent.EXPERT and not found_expert:
-                experts, _ = await self.get_experts(message, limit=3)
-                if experts:
-                    context = self.format_expert_context(experts)
-                    metadata['content_matches'] = [e['id'] for e in experts]
-                    metadata['content_types'] = {'expert': len(experts)}
+                else:
+                    context = "No matching publications found."
 
-            # Yield metadata first
-            yield {'is_metadata': True, 'metadata': metadata}
-
-            # Prepare system prompt and content prompt
-            system_prompt = "You are a helpful research assistant."
-            
-            if intent == QueryIntent.EXPERT and expert_name and found_expert:
-                content_prompt = f"""
-                Context:
-                {context}
-
-                Question: {message}
-                
-                Please format your response about the publications by {expert_name} as a numbered list,
-                with each publication title in bold and details as bullet points.
-                """
+            # 5. Default Response
             else:
-                content_prompt = f"Context:\n{context}\n\nQuestion: {message}"
-            
-            # Generate response with protected streaming
-            try:
-                async for chunk in self._safe_generate(content_prompt):
-                    yield chunk
-                self.circuit_breaker.record_success()
-                
-            except Exception as e:
-                self.circuit_breaker.record_failure()
-                yield f"Error: {str(e)}"
+                context = "How can I assist you with APHRC research?"
+
+            # 6. Stream Response
+            yield json.dumps({'is_metadata': True, 'metadata': metadata})
+            model = self._setup_gemini()
+            async for chunk in model.generate_content(
+                f"Context:\n{context}\n\nQuestion: {message}",
+                stream=True
+            ):
+                yield chunk.text
 
         except Exception as e:
-            logger.error(f"Error in generate_async_response: {e}")
-            yield f"Error: {str(e)}"
-
+            logger.error(f"Error: {str(e)}")
+            yield json.dumps({'error': str(e)})
     def _setup_remote_embeddings(self):
         """Setup fallback embedding options"""
         self.embedding_service = os.getenv('EMBEDDING_SERVICE_URL')
@@ -859,27 +825,6 @@ class GeminiLLMManager:
                 'confidence': 0.0,
                 'clarification': None
             }
-
-    async def generate_async_response(self, message: str) -> AsyncGenerator[str, None]:
-        """Generate response with circuit breaker protection"""
-        if not await self.circuit_breaker.check():
-            yield "System is currently busy. Please try again shortly."
-            return
-            
-        try:
-            async for chunk in self._safe_generate(message):
-                yield chunk
-            self.circuit_breaker.record_success()
-        except Exception as e:
-            self.circuit_breaker.record_failure()
-            yield f"Error: {str(e)}"
-
-    # All original methods below remain exactly the same (format_expert_context, 
-    # format_publication_context, analyze_quality, etc.) with no changes to their
-    # implementation or signatures to maintain full backward compatibility
-
-    
-    # 2. Update _get_all_expert_keys method in GeminiLLMManager
 
     
     async def _get_all_publication_keys(self):
@@ -1697,7 +1642,8 @@ class GeminiLLMManager:
 
     async def get_publications(self, query: str = None, expert_id: str = None, limit: int = 3) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """
-        Retrieves publications with simplified logic, matching the new storage format.
+        Retrieves publications either by general search or for a specific expert using pre-stored links.
+        No longer scans Redis - uses direct expert-resource links.
         """
         try:
             if not self.redis_manager:
@@ -1705,51 +1651,40 @@ class GeminiLLMManager:
                 
             publications = []
             
-            # Expert-specific search using the new key pattern
+            # Expert-specific publication retrieval
             if expert_id:
-                # Get resource IDs for this expert
-                index_key = f"expert:{expert_id}:resources"
+                links_key = f"links:expert:{expert_id}:resources"
                 
-                if self.redis_manager.redis_text.exists(index_key):
-                    # Get all resource IDs for this expert
-                    resource_ids = self.redis_manager.redis_text.smembers(index_key)
+                if self.redis_manager.redis_text.exists(links_key):
+                    # Get top publications by confidence score
+                    resource_items = self.redis_manager.redis_text.zrevrange(
+                        links_key, 0, limit-1, withscores=True
+                    )
                     
-                    # Fetch each resource's metadata
-                    for pub_id in resource_ids:
-                        meta_key = f"meta:expert_resource:{expert_id}:{pub_id}"
-                        
+                    for resource_id, confidence in resource_items:
+                        meta_key = f"meta:resource:{resource_id}"
                         if self.redis_manager.redis_text.exists(meta_key):
                             pub = self.redis_manager.redis_text.hgetall(meta_key)
-                            
-                            # Apply query filter if specified
-                            if not query or self._publication_matches_query(pub, query):
+                            if pub:
+                                # Add confidence score from the link
+                                pub['link_confidence'] = float(confidence)
                                 publications.append(pub)
-                                
-                            # Limit results if we have enough
-                            if len(publications) >= limit:
-                                break
-                                
-            # General search - look across all expert resources
+            
+            # General search (unchanged but included for completeness)
             else:
                 cursor = 0
-                # Scan for all expert_resource keys
                 while len(publications) < limit and (cursor != 0 or not publications):
                     cursor, keys = self.redis_manager.redis_text.scan(
-                        cursor, match='meta:expert_resource:*', count=limit*3)
+                        cursor, match='meta:resource:*', count=limit*3)
                     
                     for key in keys:
                         pub = self.redis_manager.redis_text.hgetall(key)
-                        
-                        # Apply query filter
                         if not query or self._publication_matches_query(pub, query):
                             publications.append(pub)
                             
-                        if len(publications) >= limit:
-                            break
-                            
                     if cursor == 0 or len(publications) >= limit:
                         break
-                        
+            
             return publications[:limit], None
             
         except Exception as e:
@@ -1789,80 +1724,30 @@ class GeminiLLMManager:
         
         return False
 
+    def _format_expert_profile(self, expert: Dict) -> str:
+        """Formats an expert profile WITHOUT publications."""
+        return f"""
+        **Expert Profile: {expert.get('first_name')} {expert.get('last_name')}**
+        - Position: {expert.get('position', 'N/A')}
+        - Expertise: {', '.join(expert.get('expertise', []))}
+        - Email: {expert.get('email', 'N/A')}
+        """
+
     
-    async def get_experts(self, query: str, limit: int = 3) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        """
-        Retrieves only APHRC experts (since global experts don't exist in experts_expert table).
-        Maintains same interface but optimized for APHRC-only search.
-        """
+    async def get_experts(self, query: str, limit: int = 3) -> Tuple[List[Dict], Optional[str]]:
+        """Fetches experts by name/query (APHRC only)."""
         try:
-            if not self.redis_manager:
-                return [], "Expert database unavailable"
-                
-            # Only search APHRC experts - updated key pattern to match storage
-            cursor = 0
-            expert_keys = []
-            while cursor != 0 or not expert_keys:
-                cursor, keys = self.redis_manager.redis_text.scan(
-                    cursor,
-                    match='meta:aphrc_expert:*',  # Updated pattern to match new key structure
-                    count=limit*5  # Get slightly more than needed
-                )
-                expert_keys.extend(keys)
-            
+            # Scan Redis for matching experts (key pattern: meta:aphrc_expert:*)
+            keys = await self.redis_manager.redis_text.keys("meta:aphrc_expert:*")
             experts = []
-            query_embedding = None
-            
-            # Calculate query embedding if model available
-            if self.embedding_model:
-                try:
-                    query_embedding = self.embedding_model.encode(query)
-                except Exception as e:
-                    logger.warning(f"Embedding generation failed: {e}")
-            
-            # Process potential matches
-            for key in expert_keys[:limit*3]:  # Limit processing for performance
-                try:
-                    expert_data = self.redis_manager.redis_text.hgetall(key)
-                    
-                    # Basic expert info
-                    expert = {
-                        'id': expert_data['id'],
-                        'first_name': expert_data.get('first_name', ''),
-                        'last_name': expert_data.get('last_name', ''),
-                        'email': expert_data.get('email', ''),
-                        'position': expert_data.get('position', ''),
-                        'is_aphrc': True  # All experts from this table are APHRC
-                    }
-                    
-                    # Calculate similarity score if embedding available
-                    if query_embedding is not None:
-                        # Updated embedding key to match new pattern
-                        emb_key = f"emb:aphrc_expert:{expert_data['id']}"
-                        if self.redis_manager.redis_binary.exists(emb_key):
-                            expert_embedding = np.frombuffer(
-                                self.redis_manager.redis_binary.get(emb_key),
-                                dtype=np.float32
-                            )
-                            similarity = np.dot(query_embedding, expert_embedding)
-                            expert['confidence'] = float(similarity)
-                    
+            for key in keys[:limit*2]:  # Check slightly more than limit
+                expert = self.redis_manager.redis_text.hgetall(key)
+                if query.lower() in expert.get('first_name', '').lower() or \
+                query.lower() in expert.get('last_name', '').lower():
                     experts.append(expert)
-                    
-                except Exception as e:
-                    logger.warning(f"Skipping corrupt expert data in key {key}: {e}")
-            
-            # Sort by confidence if available, otherwise by name
-            if all('confidence' in e for e in experts):
-                experts.sort(key=lambda x: x['confidence'], reverse=True)
-            else:
-                experts.sort(key=lambda x: (x['last_name'], x['first_name']))
-            
             return experts[:limit], None
-            
         except Exception as e:
-            logger.error(f"Error retrieving experts: {e}")
-            return [], "An error occurred while searching experts"
+            return [], str(e)
     async def _enrich_experts_with_publications(self, experts: List[Dict[str, Any]], limit_per_expert: int = 2) -> List[Dict[str, Any]]:
         """
         Enhanced method to enrich experts with publications from targeted indexing.
