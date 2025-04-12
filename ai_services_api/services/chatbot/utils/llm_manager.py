@@ -262,7 +262,7 @@ class GeminiLLMManager:
                 }}
                 """
 
-                response = await model.ainvoke(prompt)
+                response = await model.generateContent(prompt)
                 content = response.text.replace("```json", "").replace("```", "").strip()
                 
                 # Extract JSON from response
@@ -405,7 +405,7 @@ class GeminiLLMManager:
             # Step 1: Intent Detection
             intent_result = await self.detect_intent(message)
             intent = intent_result['intent']
-
+            
             # Step 2: Handle EXPERT Intent
             if intent == QueryIntent.EXPERT:
                 experts, _ = await self.get_experts(message, limit=5)
@@ -419,7 +419,7 @@ class GeminiLLMManager:
                     context = self.format_expert_context(ranked_experts)
                 else:
                     context = "No matching experts found."
-
+            
             # Step 3: Handle PUBLICATION Intent
             elif intent == QueryIntent.PUBLICATION:
                 publications, _ = await self.get_publications(message, limit=3)
@@ -427,19 +427,19 @@ class GeminiLLMManager:
                     context = self.format_publication_context(publications)
                 else:
                     context = "No matching publications found."
-
+            
             # Step 4: Default Response
             else:
                 context = "How can I assist you with APHRC research?"
-
+            
             # Step 5: Stream Metadata
             yield json.dumps({'is_metadata': True, 'metadata': {'intent': intent.value}})
-
+            
             # Step 6: Generate Final Response with Gemini
             model = self._setup_gemini()
             prompt = f"Context:\n{context}\nQuestion: {message}"
-            response = model.generate_content(prompt, stream=True)
-
+            response = model.generateContent(prompt, stream=True)  # Use generateContent
+            
             for chunk in response:
                 if hasattr(chunk, 'text') and chunk.text:
                     yield chunk.text
@@ -585,40 +585,21 @@ class GeminiLLMManager:
             raise
 
     async def _detect_intent_with_gemini(self, message: str) -> Dict[str, Any]:
-        """
-        Detect intent using Gemini API as a fallback.
-        
-        Args:
-            message: The user's query message
-            
-        Returns:
-            Dictionary with intent type, confidence score, and optional clarification
-        """
+        """Detect intent using the Gemini model."""
         try:
-            if not await self.circuit_breaker.check():
-                logger.warning("Circuit breaker open, skipping Gemini intent detection")
-                return {
-                    'intent': QueryIntent.GENERAL,
-                    'confidence': 0.0,
-                    'clarification': None
-                }
-
-            # Get Gemini model
+            # Set up the Gemini model
             model = self._setup_gemini()
             
-            # Create structured prompt for intent detection
+            # Create a structured prompt for intent detection
             prompt = f"""
             Analyze this query and classify its intent:
             Query: "{message}"
-
             Options:
             - PUBLICATION (research papers, studies)
             - EXPERT (researchers, specialists)
             - NAVIGATION (website sections, resources)
             - GENERAL (other queries)
-
             If asking about publications BY someone, extract the name.
-
             Return ONLY JSON in this format:
             {{
                 "intent": "PUBLICATION|EXPERT|NAVIGATION|GENERAL",
@@ -627,64 +608,39 @@ class GeminiLLMManager:
                 "expert_name": "name if detected"
             }}
             """
-
-            # Call Gemini API with rate limit protection
-            try:
-                await self._throttle_request()
-                response = await model.ainvoke(prompt)
-                content = response.text.replace("```json", "").replace("```", "").strip()
+            
+            # Generate content using Gemini
+            response = await model.generateContent(prompt)  # Use generateContent for async
+            content = response.text.replace("```json", "").replace("```", "").strip()
+            
+            # Extract JSON from the response
+            json_start = content.find('{')
+            json_end = content.rfind('}') + 1
+            if json_start >= 0 and json_end > json_start:
+                result = json.loads(content[json_start:json_end])
                 
-                # Extract JSON from response
-                json_start = content.find('{')
-                json_end = content.rfind('}') + 1
-                
-                if json_start >= 0 and json_end > json_start:
-                    result = json.loads(content[json_start:json_end])
-                    intent_mapping = {
-                        'PUBLICATION': QueryIntent.PUBLICATION,
-                        'EXPERT': QueryIntent.EXPERT,
-                        'NAVIGATION': QueryIntent.NAVIGATION,
-                        'GENERAL': QueryIntent.GENERAL
-                    }
-
-                    intent_result = {
-                        'intent': intent_mapping.get(result.get('intent', 'GENERAL'), QueryIntent.GENERAL),
-                        'confidence': min(1.0, max(0.0, float(result.get('confidence', 0.0)))),
-                        'clarification': result.get('clarification')
-                    }
-                    
-                    # Add expert name if detected
-                    if 'expert_name' in result and result['expert_name']:
-                        intent_result['expert_name'] = result['expert_name']
-                    
-                    logger.info(f"Gemini intent detection result: {intent_result}")
-                    return intent_result
-                    
-                else:
-                    logger.warning(f"Failed to extract JSON from Gemini response: {content}")
-                    return {
-                        'intent': QueryIntent.GENERAL,
-                        'confidence': 0.0,
-                        'clarification': None
-                    }
-                    
-            except Exception as api_error:
-                logger.error(f"Gemini API error in intent detection: {api_error}")
-                if "429" in str(api_error) or "quota" in str(api_error).lower():
-                    await self._handle_rate_limit()
-                return {
-                    'intent': QueryIntent.GENERAL,
-                    'confidence': 0.0,
-                    'clarification': None
+                # Map intent strings to QueryIntent enum
+                intent_mapping = {
+                    'PUBLICATION': QueryIntent.PUBLICATION,
+                    'EXPERT': QueryIntent.EXPERT,
+                    'NAVIGATION': QueryIntent.NAVIGATION,
+                    'GENERAL': QueryIntent.GENERAL
                 }
-                
+                intent_result = {
+                    'intent': intent_mapping.get(result.get('intent', 'GENERAL'), QueryIntent.GENERAL),
+                    'confidence': result.get('confidence', 0.0),
+                    'clarification': result.get('clarification', None)
+                }
+                logger.info(f"Gemini intent detection result: {intent_result['intent']} with confidence {intent_result['confidence']}")
+                return intent_result
+            else:
+                logger.warning(f"Could not extract valid JSON from response: {content}")
+                return {'intent': QueryIntent.GENERAL, 'confidence': 0.0, 'clarification': None}
         except Exception as e:
-            logger.error(f"Error in Gemini intent detection: {e}")
-            return {
-                'intent': QueryIntent.GENERAL,
-                'confidence': 0.0,
-                'clarification': None
-            }
+            logger.error(f"Gemini intent detection failed: {e}")
+            if "429" in str(e):  # Handle rate-limiting errors
+                await self._handle_rate_limit()
+            return {'intent': QueryIntent.GENERAL, 'confidence': 0.0, 'clarification': None}
 
     def _detect_intent_with_keywords(self, message: str) -> Dict[str, Any]:
         """
@@ -896,12 +852,12 @@ class GeminiLLMManager:
             if not api_key:
                 raise ValueError("GEMINI_API_KEY environment variable is not set")
             
-            # Simple configuration without specifying API version
+            # Configure the Gemini API client
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-2.0-flash')
+            model = genai.GenerativeModel('gemini-2.0-flash')  # Use the correct model name
+            
             logger.info("Gemini model setup completed")
             return model
-            
         except Exception as e:
             logger.error(f"Error setting up Gemini model: {e}")
             raise
@@ -1229,7 +1185,7 @@ class GeminiLLMManager:
                 # Call the model and get response content safely
                 try:
                     # Handle async or sync invoke results properly
-                    model_response = await model.ainvoke(prompt)
+                    model_response = await model.generateContent(prompt)
                     response_text = self._extract_content_safely(model_response)
                     
                     # Reset any rate limit flag if successful
