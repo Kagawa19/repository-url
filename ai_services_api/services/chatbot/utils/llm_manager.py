@@ -340,7 +340,8 @@ class GeminiLLMManager:
         
     async def get_experts(self, query: str, limit: int = 3) -> Tuple[List[Dict], Optional[str]]:
         """
-        Fetches experts by name/query (APHRC only), with embedding support.
+        Enhanced method to fetch experts by name/query with improved matching and richer results.
+        Includes expertise matching and publication information.
         """
         try:
             if not self.redis_manager or not self.redis_manager.redis_text:
@@ -349,7 +350,7 @@ class GeminiLLMManager:
             # Check if we need to use async or sync Redis methods
             is_async_redis = hasattr(self.redis_manager.redis_text, 'ascan') or hasattr(self.redis_manager.redis_text, 'akeys')
             
-            # Get keys using the appropriate method
+            # Get expert keys using the appropriate Redis method
             keys = []
             if is_async_redis:
                 # Use async methods if available
@@ -389,8 +390,10 @@ class GeminiLLMManager:
             if not keys:
                 return [], "No experts found in database"
             
+            # Initialize collections
             experts = []
             query_embedding = None
+            match_scores = {}  # Track multiple matching criteria
 
             # Encode the query if an embedding model is available
             if self.embedding_model:
@@ -399,20 +402,29 @@ class GeminiLLMManager:
                 except Exception as emb_err:
                     logger.warning(f"Failed to create query embedding: {emb_err}")
 
-            # Extract meaningful name terms from the query
+            # Extract meaningful terms from the query
             query_terms = query.lower().split()
+            # Extract name terms, expertise terms, and domain terms
             name_terms = []
+            expertise_terms = []
+            
             for term in query_terms:
                 # Skip very short terms and common words
                 if len(term) <= 2 or term in ['is', 'there', 'an', 'expert', 'who', 'the', 'a', 'of', 'and', 
                                             'what', 'where', 'when', 'how', 'why', 'which', 'this', 'that']:
                     continue
+                    
+                # Categorize terms (could be in multiple categories)
                 name_terms.append(term)
+                
+                # Terms longer than 4 chars could be expertise-related
+                if len(term) > 4:
+                    expertise_terms.append(term)
             
-            logger.info(f"Extracted name terms from query: {name_terms}")
+            logger.info(f"Query analysis - Name terms: {name_terms}, Expertise terms: {expertise_terms}")
 
-            # Process each key (expert)
-            for key in keys:  # Process all keys to find matches
+            # Process each expert key
+            for key in keys:
                 try:
                     # Get expert data using appropriate method
                     expert = {}
@@ -427,103 +439,219 @@ class GeminiLLMManager:
                     if not expert:
                         continue
                         
-                    # Improved name matching logic
+                    expert_id = expert.get('id') or key.split(':')[-1]
+                    match_score = 0.0
+                    matched_criteria = []
+                    
+                    # 1. NAME MATCHING - check first name, last name, middle name
                     expert_first_name = expert.get('first_name', '').lower()
                     expert_last_name = expert.get('last_name', '').lower()
-                    full_name = f"{expert_first_name} {expert_last_name}"
-                    
-                    # Check if any name term matches any part of the expert's name
-                    name_match = False
-                    matched_term = None
+                    expert_middle_name = expert.get('middle_name', '').lower()
+                    full_name = f"{expert_first_name} {expert_middle_name} {expert_last_name}".strip()
                     
                     for term in name_terms:
-                        if term in expert_first_name or term in expert_last_name:
-                            name_match = True
-                            matched_term = term
-                            break
+                        if term in expert_first_name:
+                            match_score += 0.8
+                            matched_criteria.append(f"First name contains '{term}'")
+                        elif term in expert_last_name:
+                            match_score += 0.9
+                            matched_criteria.append(f"Last name contains '{term}'")
+                        elif term in expert_middle_name:
+                            match_score += 0.7
+                            matched_criteria.append(f"Middle name contains '{term}'")
+                        elif term in full_name:
+                            match_score += 0.6
+                            matched_criteria.append(f"Full name contains '{term}'")
                     
-                    if name_match:
-                        expert_id = expert.get('id') or key.split(':')[-1]
-                        logger.info(f"Found matching expert: {expert.get('first_name', '')} {expert.get('last_name', '')} (matched term: {matched_term})")
+                    # 2. EXPERTISE MATCHING - check expertise, domains, fields, skills
+                    if expertise_terms:
+                        # Parse JSON fields
+                        try:
+                            expert_expertise = json.loads(expert.get('expertise', '{}')) if expert.get('expertise') else {}
+                            domains = json.loads(expert.get('domains', '[]')) if expert.get('domains') else []
+                            fields = json.loads(expert.get('fields', '[]')) if expert.get('fields') else []
+                            skills = json.loads(expert.get('normalized_skills', '[]')) if expert.get('normalized_skills') else []
+                            keywords = json.loads(expert.get('keywords', '[]')) if expert.get('keywords') else []
+                        except json.JSONDecodeError:
+                            expert_expertise = {}
+                            domains = []
+                            fields = []
+                            skills = []
+                            keywords = []
                         
-                        # Try different embedding key patterns
-                        embedding_patterns = [
-                            f"emb:aphrc_expert:{expert_id}",
-                            f"embedding:aphrc_expert:{expert_id}"
-                        ]
+                        # Flatten expertise into a list of terms
+                        expertise_values = []
+                        if isinstance(expert_expertise, dict):
+                            for values in expert_expertise.values():
+                                if isinstance(values, list):
+                                    expertise_values.extend([str(v).lower() for v in values if v])
+                                elif values:
+                                    expertise_values.append(str(values).lower())
                         
-                        # Retrieve embedding data
-                        embedding_data = None
-                        for emb_key in embedding_patterns:
-                            try:
-                                if is_async_redis:
-                                    if hasattr(self.redis_manager.redis_text, 'aget'):
-                                        embedding_data = await self.redis_manager.redis_text.aget(emb_key)
-                                    else:
-                                        embedding_data = await self.redis_manager.redis_text.get(emb_key)
-                                else:
-                                    embedding_data = self.redis_manager.redis_text.get(emb_key)
-                                    
-                                if embedding_data:
-                                    logger.debug(f"Found embedding at key: {emb_key}")
+                        # Check if any expertise term matches query terms
+                        for term in expertise_terms:
+                            # Check in expertise values
+                            for value in expertise_values:
+                                if term in value:
+                                    match_score += 0.7
+                                    matched_criteria.append(f"Expertise contains '{term}'")
                                     break
-                            except Exception as e:
-                                logger.debug(f"Error retrieving embedding from {emb_key}: {e}")
-                                continue
+                            
+                            # Check in domains
+                            for domain in domains:
+                                if term in str(domain).lower():
+                                    match_score += 0.6
+                                    matched_criteria.append(f"Domain contains '{term}'")
+                                    break
+                            
+                            # Check in fields
+                            for field in fields:
+                                if term in str(field).lower():
+                                    match_score += 0.5
+                                    matched_criteria.append(f"Field contains '{term}'")
+                                    break
+                                    
+                            # Check in skills and keywords
+                            for skill in skills + keywords:
+                                if term in str(skill).lower():
+                                    match_score += 0.6
+                                    matched_criteria.append(f"Skill/keyword contains '{term}'")
+                                    break
+                    
+                    # 3. BIOGRAPHICAL MATCHING
+                    if expert.get('bio'):
+                        bio = expert.get('bio', '').lower()
+                        for term in expertise_terms:
+                            if term in bio:
+                                match_score += 0.4
+                                matched_criteria.append(f"Biography contains '{term}'")
+                    
+                    # If we have any match, prepare the expert data
+                    if match_score > 0:
+                        logger.info(f"Expert {expert_id} matched with score {match_score:.2f}: {', '.join(matched_criteria[:3])}")
                         
-                        if embedding_data:
-                            try:
-                                expert['embedding'] = np.array(json.loads(embedding_data))
-                            except Exception as emb_err:
-                                logger.warning(f"Failed to parse embedding for {expert_id}: {emb_err}")
-                                if hasattr(self, '_create_fallback_embedding'):
-                                    expert['embedding'] = self._create_fallback_embedding(
-                                        f"{expert.get('first_name', '')} {expert.get('last_name', '')}"
-                                    )
-                        elif hasattr(self, '_create_fallback_embedding'):
-                            logger.debug(f"Creating fallback embedding for expert {expert_id}")
-                            expert['embedding'] = self._create_fallback_embedding(
-                                f"{expert.get('first_name', '')} {expert.get('last_name', '')}"
+                        # Get embedding from Redis
+                        embedding_key = f"emb:aphrc_expert:{expert_id}"
+                        embedding_data = None
+                        
+                        try:
+                            if is_async_redis:
+                                if hasattr(self.redis_manager.redis_text, 'aget'):
+                                    embedding_data = await self.redis_manager.redis_text.aget(embedding_key)
+                                else:
+                                    embedding_data = await self.redis_manager.redis_text.get(embedding_key)
+                            else:
+                                embedding_data = self.redis_manager.redis_text.get(embedding_key)
+                            
+                            if embedding_data:
+                                # Load binary embedding data
+                                if isinstance(embedding_data, bytes):
+                                    # Handle binary data
+                                    arr = np.frombuffer(embedding_data, dtype=np.float32)
+                                    expert['embedding'] = arr
+                                else:
+                                    # Handle JSON data
+                                    expert['embedding'] = np.array(json.loads(embedding_data))
+                        except Exception as emb_err:
+                            logger.warning(f"Failed to load embedding for {expert_id}: {emb_err}")
+                        
+                        # Retrieve and add linked publications
+                        links_key = f"links:expert:{expert_id}:resources"
+                        if is_async_redis:
+                            if hasattr(self.redis_manager.redis_text, 'azrevrange'):
+                                resource_items = await self.redis_manager.redis_text.azrevrange(
+                                    links_key, 0, 2, withscores=True
+                                )
+                            else:
+                                resource_items = await self.redis_manager.redis_text.zrevrange(
+                                    links_key, 0, 2, withscores=True
+                                )
+                        else:
+                            resource_items = self.redis_manager.redis_text.zrevrange(
+                                links_key, 0, 2, withscores=True
                             )
-
-                        experts.append(expert)
                         
-                        # Break early if we have enough experts
-                        if len(experts) >= limit * 2:
-                            break
+                        publications = []
+                        if resource_items:
+                            for resource_id, confidence in resource_items:
+                                resource_key = f"meta:resource:{resource_id}"
+                                
+                                # Fetch resource metadata
+                                resource_meta = {}
+                                try:
+                                    if is_async_redis:
+                                        if hasattr(self.redis_manager.redis_text, 'ahgetall'):
+                                            resource_meta = await self.redis_manager.redis_text.ahgetall(resource_key)
+                                        else:
+                                            resource_meta = await self.redis_manager.redis_text.hgetall(resource_key)
+                                    else:
+                                        resource_meta = self.redis_manager.redis_text.hgetall(resource_key)
+                                except Exception as res_err:
+                                    logger.warning(f"Error fetching resource {resource_id}: {res_err}")
+                                
+                                if resource_meta:
+                                    # Only include essential publication info
+                                    publication = {
+                                        'id': resource_id,
+                                        'title': resource_meta.get('title', 'Untitled Publication'),
+                                        'publication_year': resource_meta.get('publication_year', ''),
+                                        'doi': resource_meta.get('doi', ''),
+                                        'confidence': confidence
+                                    }
+                                    publications.append(publication)
+                        
+                        # Add publications to expert data
+                        expert['publications'] = publications
+                        
+                        # Store match score for ranking
+                        expert['match_score'] = match_score
+                        expert['matched_criteria'] = matched_criteria
+                        
+                        # Add to results
+                        experts.append(expert)
+                
                 except Exception as expert_err:
                     logger.warning(f"Error processing expert from key {key}: {expert_err}")
                     continue
 
             logger.info(f"Found {len(experts)} matching experts for query: {query}")
             
-            # Rank experts by cosine similarity if query embedding is available
-            if query_embedding is not None and experts:
-                try:
-                    # Only rank experts with valid embeddings
-                    experts_with_embeddings = [e for e in experts if 'embedding' in e and e['embedding'] is not None]
-                    
-                    if experts_with_embeddings:
+            # If we have too many matches, filter and rank them
+            if len(experts) > limit:
+                # Rank experts by multiple criteria
+                if query_embedding is not None:
+                    try:
+                        # For experts with embeddings, calculate semantic similarity
+                        experts_with_embeddings = [e for e in experts if 'embedding' in e and e['embedding'] is not None]
+                        
+                        if experts_with_embeddings:
+                            # Calculate semantic similarity scores
+                            for expert in experts_with_embeddings:
+                                similarity = float(cos_sim(query_embedding, expert['embedding'])[0][0])
+                                # Boost match score with semantic similarity
+                                expert['match_score'] = 0.6 * expert['match_score'] + 0.4 * similarity
+                        
+                        # Sort by final match score
                         ranked_experts = sorted(
-                            experts_with_embeddings,
-                            key=lambda e: cos_sim(query_embedding, e['embedding'])[0][0],
+                            experts,
+                            key=lambda e: e.get('match_score', 0),
                             reverse=True
                         )
                         
-                        # Add any experts without embeddings at the end
-                        experts_without_embeddings = [e for e in experts if 'embedding' not in e or e['embedding'] is None]
-                        ranked_experts.extend(experts_without_embeddings)
-                        
                         return ranked_experts[:limit], None
-                    else:
-                        # If no experts have embeddings, return them unranked
-                        return experts[:limit], None
-                except Exception as ranking_err:
-                    logger.warning(f"Error ranking experts: {ranking_err}")
-                    # Fall back to unranked experts
-                    return experts[:limit], None
-                    
+                    except Exception as ranking_err:
+                        logger.warning(f"Error in semantic ranking: {ranking_err}")
+                
+                # Fallback to basic match score ranking
+                ranked_experts = sorted(
+                    experts,
+                    key=lambda e: e.get('match_score', 0),
+                    reverse=True
+                )
+                return ranked_experts[:limit], None
+            
             return experts[:limit], None
+            
         except Exception as e:
             logger.error(f"Error fetching experts: {e}")
             return [], str(e)
@@ -1019,33 +1147,7 @@ class GeminiLLMManager:
     
 
     
-    async def _get_all_publication_keys(self):
-        """Helper method to get all publication keys from Redis"""
-        try:
-            # Use scan to find all publication keys
-            cursor = 0
-            publication_keys = []
-            
-            while cursor != 0 or len(publication_keys) == 0:
-                cursor, batch = self.redis_manager.redis_text.scan(
-                    cursor=cursor, 
-                    match='meta:resource:*', 
-                    count=100
-                )
-                publication_keys.extend(batch)
-                
-                if cursor == 0:
-                    break
-            
-            logger.info(f"Found {len(publication_keys)} total publications in Redis")
-            return publication_keys
-        
-        except Exception as e:
-            logger.error(f"Error retrieving publication keys: {e}")
-            return []
-
-    
-
+   
    
     async def _reset_rate_limited_after(self, seconds: int):
         """Reset rate limited flag after specified seconds."""
@@ -1453,50 +1555,7 @@ class GeminiLLMManager:
             'requires_review': False
         }
     
-    # 2. Updated _get_all_publication_keys method in GeminiLLMManager
-    async def _get_all_publication_keys(self):
-        """Helper method to get all publication keys from Redis with consistent patterns."""
-        try:
-            # Use the exact same patterns as used in the _store_resource_data method
-            patterns = [
-                'meta:resource:*',  # Primary pattern used by _store_resource_data
-                'meta::*'  # Alternative pattern
-            ]
-            
-            all_keys = []
-            
-            # For each pattern, scan Redis for matching keys
-            for pattern in patterns:
-                cursor = 0
-                pattern_keys = []
-                
-                while cursor != 0 or len(pattern_keys) == 0:
-                    try:
-                        cursor, batch = self.redis_manager.redis_text.scan(
-                            cursor=cursor, 
-                            match=pattern, 
-                            count=100
-                        )
-                        pattern_keys.extend(batch)
-                        
-                        if cursor == 0:
-                            break
-                    except Exception as scan_error:
-                        logger.warning(f"Error scanning with pattern '{pattern}': {scan_error}")
-                        break
-                
-                logger.info(f"Found {len(pattern_keys)} keys with pattern '{pattern}'")
-                all_keys.extend(pattern_keys)
-            
-            # Remove any duplicates
-            unique_keys = list(set(all_keys))
-            
-            logger.info(f"Found {len(unique_keys)} total unique publication keys in Redis")
-            return unique_keys
-            
-        except Exception as e:
-            logger.error(f"Error retrieving publication keys: {e}")
-            return []
+    # 
 
     # This maintains backwards compatibility with code still calling analyze_sentiment
     async def analyze_sentiment(self, message: str) -> Dict:
@@ -1707,66 +1766,10 @@ class GeminiLLMManager:
         if len(self.context_window) > self.max_context_items:
             self.context_window.pop(0)
 
-    def update_expert_resource_links(self):
-        """Update the expert-resource relationships in Redis without full reindexing."""
-        try:
-            # Connect to database to get expert-resource links
-            conn = self.db.get_connection()
-            with conn.cursor() as cur:
-                # Get links with confidence scores
-                cur.execute("""
-                    SELECT expert_id, resource_id, confidence_score 
-                    FROM expert_resource_links
-                    WHERE confidence_score >= 0.7
-                    ORDER BY expert_id, confidence_score DESC
-                """)
-                
-                links = cur.fetchall()
-                logger.info(f"Retrieved {len(links)} expert-resource links to update")
-                
-                # Store links in Redis
-                pipeline = self.redis_text.pipeline()
-                
-                # Group by expert_id for efficiency
-                expert_resources = {}
-                for expert_id, resource_id, confidence in links:
-                    if expert_id not in expert_resources:
-                        expert_resources[expert_id] = []
-                    expert_resources[expert_id].append((resource_id, float(confidence)))
-                
-                # Store in Redis using sets and sorted sets
-                for expert_id, resources in expert_resources.items():
-                    # Create a sorted set key for each expert
-                    key = f"links:expert:{expert_id}:resources"
-                    
-                    # Clear existing set
-                    pipeline.delete(key)
-                    
-                    # Add all resources with confidence as score
-                    for resource_id, confidence in resources:
-                        pipeline.zadd(key, {str(resource_id): confidence})
-                    
-                    # Add inverse lookups for resources to experts
-                    for resource_id, confidence in resources:
-                        res_key = f"links:resource:{resource_id}:experts"
-                        pipeline.zadd(res_key, {str(expert_id): confidence})
-                
-                # Execute pipeline
-                pipeline.execute()
-                logger.info(f"Successfully updated {len(expert_resources)} expert-resource relationships")
-                
-                return True
-        
-        except Exception as e:
-            logger.error(f"Error updating expert-resource links: {e}")
-            return False
-
     
-
     async def get_publications(self, query: str = None, expert_id: str = None, limit: int = 3) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """
-        Retrieves publications either by general search or for a specific expert using pre-stored links.
-        No longer scans Redis - uses direct expert-resource links.
+        Retrieves publications (works) either by general search or for a specific expert (author) using pre-stored links.
         """
         try:
             if not self.redis_manager:
@@ -1776,29 +1779,30 @@ class GeminiLLMManager:
             
             # Expert-specific publication retrieval
             if expert_id:
-                links_key = f"links:expert:{expert_id}:resources"
+                # Using new key pattern for author-work links
+                links_key = f"author:{expert_id}:works"
                 
                 if self.redis_manager.redis_text.exists(links_key):
-                    # Get top publications by confidence score
-                    resource_items = self.redis_manager.redis_text.zrevrange(
-                        links_key, 0, limit-1, withscores=True
-                    )
+                    # Get all works for this author
+                    resource_ids = self.redis_manager.redis_text.smembers(links_key)
                     
-                    for resource_id, confidence in resource_items:
-                        meta_key = f"meta:resource:{resource_id}"
+                    for resource_id in resource_ids:
+                        meta_key = f"meta:work:{resource_id}"
                         if self.redis_manager.redis_text.exists(meta_key):
                             pub = self.redis_manager.redis_text.hgetall(meta_key)
                             if pub:
-                                # Add confidence score from the link
-                                pub['link_confidence'] = float(confidence)
                                 publications.append(pub)
+                                # Limit results if we have enough
+                                if len(publications) >= limit:
+                                    break
             
-            # General search (unchanged but included for completeness)
+            # General search
             else:
                 cursor = 0
                 while len(publications) < limit and (cursor != 0 or not publications):
+                    # Updated pattern to match the new key structure
                     cursor, keys = self.redis_manager.redis_text.scan(
-                        cursor, match='meta:resource:*', count=limit*3)
+                        cursor, match='meta:work:*', count=limit*3)
                     
                     for key in keys:
                         pub = self.redis_manager.redis_text.hgetall(key)
@@ -1813,7 +1817,6 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error in get_publications: {e}")
             return [], str(e)
-            
     def _publication_matches_query(self, publication: Dict, query: str) -> bool:
         """
         Check if a publication matches the given query.
