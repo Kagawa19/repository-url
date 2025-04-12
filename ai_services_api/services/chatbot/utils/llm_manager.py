@@ -408,7 +408,7 @@ class GeminiLLMManager:
             
             # Step 2: Handle EXPERT Intent
             if intent == QueryIntent.EXPERT:
-                experts, _ = await self.get_experts(message, limit=5)
+                experts, _ =  self.get_experts(message, limit=5)
                 if experts:
                     ranked_experts = sorted(
                         experts,

@@ -11,6 +11,7 @@ services:
     volumes:
       - ./:/app:rw
       - ./logs/api:/app/logs:rw
+      - ./models/sentence-transformers:/app/models/sentence-transformers:ro
       - ./ai_services_api/services/search/models:/app/ai_services_api/services/search/models:rw
       - ./scripts/init-script.sh:/app/scripts/init-script.sh:ro
       - /dev/shm:/dev/shm:rw
