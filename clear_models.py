@@ -44,4 +44,4 @@ if __name__ == "__main__":
     if answer.lower() in ['y', 'yes']:
         clear_model_cache()
     else:
-        print("Operation cancelled")
+        print("Operation cancelled")el

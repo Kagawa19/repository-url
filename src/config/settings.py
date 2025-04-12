@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Redis Configuration
-REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
+REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
 REDIS_TEXT_DB = int(os.getenv('REDIS_TEXT_DB', 0))
 REDIS_EMBEDDINGS_DB = int(os.getenv('REDIS_EMBEDDINGS_DB', 1))
@@ -16,10 +16,10 @@ MAX_PAGES = int(os.getenv('MAX_PAGES', 1000))
 CHECK_INTERVAL_HOURS = int(os.getenv('CHECK_INTERVAL_HOURS', 24))
 
 # Database Configuration
-DB_HOST = os.getenv('DB_HOST', 'localhost')
+DB_HOST = os.getenv('DB_HOST', 'postgres')
 DB_NAME = os.getenv('DB_NAME', 'aphrc')
 DB_USER = os.getenv('DB_USER', 'postgres')
-DB_PASSWORD = os.getenv('DB_PASSWORD', 'postgres')
+DB_PASSWORD = os.getenv('DB_PASSWORD', 'p0stgres')
 
 # Model Configuration
 MODEL_NAME = os.getenv('MODEL_NAME', 'sentence-transformers/all-MiniLM-L6-v2')
