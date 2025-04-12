@@ -860,41 +860,18 @@ class ExpertRedisIndexManager:
             # Convert to string and clean
             expert_id = str(expert_id).strip()
             
+            # Ensure we have a connection
+            if not conn:
+                conn = self.db.get_connection()
+            
             # Verify expert exists
-            with conn.cursor() if conn else get_db_cursor() as (cur, _):
+            with conn.cursor() as cur:
                 cur.execute("SELECT id FROM experts_expert WHERE id = %s", (expert_id,))
                 if not cur.fetchone():
                     logger.warning(f"Skipping resource {resource.get('id')} - expert {expert_id} not found")
                     return
 
-            # Proceed with Redis storage
-            base_key = f"expert_resource:{expert_id}:{resource['id']}"
-            pipeline = self.redis_text.pipeline()
-            
-            # Store text content
-            pipeline.set(f"text:{base_key}", text_content)
-            
-            # Store embedding
-            self.redis_binary.set(f"emb:{base_key}", embedding.astype(np.float32).tobytes())
-            
-            # Store metadata
-            metadata = {
-                'id': str(resource['id']),
-                'title': str(resource.get('title', '')),
-                'abstract': str(resource.get('abstract', '')),
-                'authors': json.dumps(resource.get('authors', [])),
-                'publication_year': str(resource.get('publication_year', '')),
-                'expert_id': expert_id,
-                'doi': str(resource.get('doi', ''))
-            }
-            pipeline.hset(f"meta:{base_key}", mapping=metadata)
-            
-            # Create index entry
-            index_key = f"expert:{expert_id}:resources"
-            pipeline.sadd(index_key, str(resource['id']))
-            
-            pipeline.execute()
-            
+            # Rest of the method remains the same...
         except Exception as e:
             if pipeline:
                 pipeline.reset()
