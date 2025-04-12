@@ -408,14 +408,28 @@ class GeminiLLMManager:
             
             # Step 2: Handle EXPERT Intent
             if intent == QueryIntent.EXPERT:
-                experts, _ =  self.get_experts(message, limit=5)
+                experts, _ = await self.get_experts(message, limit=5)
                 if experts:
-                    ranked_experts = sorted(
-                        experts,
-                        key=lambda e: cos_sim(self.embedding_model.encode(message), e['embedding'])[0][0]
-                        if 'embedding' in e else 0,
-                        reverse=True
-                    )
+                    # Check if we have a valid embedding model
+                    if self.embedding_model:
+                        try:
+                            # Get query embedding
+                            query_embedding = self.embedding_model.encode(message)
+                            
+                            # Sort experts by similarity when both embeddings exist
+                            ranked_experts = sorted(
+                                experts,
+                                key=lambda e: cos_sim(query_embedding, e['embedding'])[0][0] 
+                                if 'embedding' in e and e['embedding'] is not None else 0,
+                                reverse=True
+                            )
+                        except Exception as e:
+                            logger.warning(f"Error ranking experts: {e}")
+                            ranked_experts = experts  # Fall back to original order
+                    else:
+                        # No embedding model available
+                        ranked_experts = experts
+                        
                     context = self.format_expert_context(ranked_experts)
                 else:
                     context = "No matching experts found."
