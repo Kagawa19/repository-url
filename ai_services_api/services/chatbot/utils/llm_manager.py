@@ -343,6 +343,7 @@ class GeminiLLMManager:
         Fetches experts by name/query (APHRC only), with embedding support.
         """
         try:
+            # Use asyncio-compatible Redis methods
             keys = await self.redis_manager.redis_text.keys("meta:aphrc_expert:*")
             experts = []
             query_embedding = None
