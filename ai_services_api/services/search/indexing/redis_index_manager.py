@@ -906,17 +906,17 @@ class ExpertRedisIndexManager:
 
 
     def fetch_resources(self) -> List[Dict[str, Any]]:
-        """Fetch all resource data that belongs to experts in experts_expert table."""
+        """Fetch all resources linked to experts either directly or through links."""
         max_retries = 3
         retry_delay = 2
-
+        
         for attempt in range(max_retries):
             conn = None
             cur = None
             try:
                 conn = self.db.get_connection()
                 with conn.cursor() as cur:
-                    # Check if tables exist
+                    # Check if required tables exist
                     cur.execute("""
                         SELECT EXISTS (
                             SELECT FROM information_schema.tables 
@@ -928,46 +928,41 @@ class ExpertRedisIndexManager:
                         ) AS links_exists;
                     """)
                     exists = cur.fetchone()
-
+                    
                     if not exists[0]:  # resources_resource table doesn't exist
                         logger.warning("resources_resource table does not exist yet")
                         return []
-
-                    # Corrected query with proper SQL syntax
-                    if exists[1]:
-                        query = """
-                            SELECT DISTINCT r.*
-                            FROM resources_resource r
-                            WHERE (
-                                -- Resources with direct expert_id that exists in experts_expert
-                                (r.expert_id IS NOT NULL AND r.expert_id IN (SELECT id FROM experts_expert))
-                                OR
-                                -- Resources linked via expert_resource_links
-                                (r.id IN (SELECT resource_id FROM expert_resource_links))
-                            )
-                            ORDER BY r.id
-                        """
-                    else:
-                        query = """
-                            SELECT r.*
-                            FROM resources_resource r
-                            WHERE r.expert_id IS NOT NULL 
-                            AND r.expert_id IN (SELECT id FROM experts_expert)
-                            ORDER BY r.id
-                        """
-
+                    
+                    # Modified query to get all resources linked to experts
+                    query = """
+                        SELECT r.* 
+                        FROM resources_resource r
+                        WHERE (
+                            -- Resources with direct expert_id that exists in experts_expert
+                            (r.expert_id IS NOT NULL AND r.expert_id IN (SELECT id FROM experts_expert))
+                            OR
+                            -- Resources linked via expert_resource_links
+                            (EXISTS (
+                                SELECT 1 FROM expert_resource_links erl 
+                                WHERE erl.resource_id = r.id 
+                                AND erl.expert_id IN (SELECT id FROM experts_expert)
+                            ))
+                        )
+                        ORDER BY r.id
+                    """ if exists[1] else """
+                        SELECT r.*
+                        FROM resources_resource r
+                        WHERE r.expert_id IS NOT NULL 
+                        AND r.expert_id IN (SELECT id FROM experts_expert)
+                        ORDER BY r.id
+                    """
+                    
                     cur.execute(query)
                     resources = []
                     skipped_count = 0
-
+                    
                     for row in cur.fetchall():
                         try:
-                            # Skip if expert_id is None or invalid
-                            expert_id = row[8]  # expert_id is at index 8
-                            if expert_id is None or str(expert_id).strip().lower() == 'none':
-                                skipped_count += 1
-                                continue
-
                             resource = {
                                 'id': row[0],
                                 'doi': str(row[1]) if row[1] is not None else '',
@@ -977,7 +972,7 @@ class ExpertRedisIndexManager:
                                 'domains': self._parse_jsonb(row[5]) if row[5] else [],
                                 'topics': self._parse_jsonb(row[6]) if row[6] else {},
                                 'description': str(row[7]) if row[7] is not None else '',
-                                'expert_id': str(expert_id) if expert_id is not None else '',
+                                'expert_id': str(row[8]) if row[8] is not None else '',
                                 'type': str(row[9]) if row[9] is not None else 'publication',
                                 'subtitles': self._parse_jsonb(row[10]) if row[10] else {},
                                 'publishers': self._parse_jsonb(row[11]) if row[11] else {},
@@ -993,18 +988,17 @@ class ExpertRedisIndexManager:
                                 'publication_year': str(row[21]) if row[21] is not None else ''
                             }
                             resources.append(resource)
-
                         except Exception as row_error:
                             skipped_count += 1
                             logger.error(f"Error processing resource row: {row_error}")
                             continue
-
+                    
                     logger.info(
                         f"Fetched {len(resources)} expert-linked resources from database "
                         f"(skipped {skipped_count} invalid records)"
                     )
                     return resources
-
+                    
             except Exception as e:
                 logger.error(f"Attempt {attempt + 1}/{max_retries} failed: {e}")
                 if attempt < max_retries - 1:
@@ -1017,9 +1011,8 @@ class ExpertRedisIndexManager:
                     cur.close()
                 if conn:
                     conn.close()
-
+        
         return []
-
 
     def _create_resource_text_content(self, resource: Dict[str, Any]) -> str:
         """Create comprehensive text content for resource embedding."""
