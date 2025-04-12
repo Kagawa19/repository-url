@@ -666,68 +666,58 @@ class GeminiLLMManager:
             logger.error(f"Error in semantic search: {e}")
             return []
         
-    async def generate_async_response(self, message: str) -> AsyncGenerator[str, None]:
-        """Generates a response without mixing expert and publication logic."""
+    async def send_message_async(self, message: str, user_id: str, session_id: str) -> AsyncGenerator:
+        """Stream messages with enhanced logging for debugging."""
+        logger.info(f"Starting send_message_async - User: {user_id}, Session: {session_id}")
+        logger.info(f"Message content: {message[:50]}... (truncated)")
+        
         try:
-            # Step 1: Intent Detection
-            intent_result = await self.detect_intent(message)
-            intent = intent_result['intent']
+            # Log intent detection start
+            logger.info("Detecting message intent")
+            intent_result = await self.llm_manager.detect_intent(message)
+            intent_type = intent_result.get('intent', 'unknown')
+            logger.info(f"Detected intent: {intent_type}, confidence: {intent_result.get('confidence', 0)}")
             
-            # Step 2: Handle EXPERT Intent
-            if intent == QueryIntent.EXPERT:
-                experts, _ = await self.get_experts(message, limit=5)
-                if experts:
-                    # Check if we have a valid embedding model
-                    if self.embedding_model:
-                        try:
-                            # Get query embedding
-                            query_embedding = self.embedding_model.encode(message)
-                            
-                            # Sort experts by similarity when both embeddings exist
-                            ranked_experts = sorted(
-                                experts,
-                                key=lambda e: cos_sim(query_embedding, e['embedding'])[0][0] 
-                                if 'embedding' in e and e['embedding'] is not None else 0,
-                                reverse=True
-                            )
-                        except Exception as e:
-                            logger.warning(f"Error ranking experts: {e}")
-                            ranked_experts = experts  # Fall back to original order
-                    else:
-                        # No embedding model available
-                        ranked_experts = experts
-                        
-                    context = self.format_expert_context(ranked_experts)
+            # Special handling for publication and expert list requests
+            if "list" in message.lower() and "publication" in message.lower():
+                logger.info("Detected publication list request - will apply special formatting")
+            elif "list" in message.lower() and ("expert" in message.lower() or "researcher" in message.lower()):
+                logger.info("Detected expert list request - will apply special formatting")
+                
+            # Start the async response generator
+            logger.info("Starting async response generation")
+            response_generator = self.llm_manager.generate_async_response(message)
+            
+            # ⚠️ CRITICAL CHANGE: Process the response through process_stream_response
+            # This ensures responses are cleaned and formatted properly before being sent to users
+            logger.info("Processing response through cleaning pipeline")
+            async for part in self.process_stream_response(response_generator):
+                # The part is now cleaned by process_stream_response
+                
+                # Log the type and partial content of each processed part
+                part_type = type(part).__name__
+                
+                if isinstance(part, dict):
+                    # This should rarely happen now as metadata is filtered by process_stream_response
+                    logger.info(f"Yielding processed dictionary part type: {part_type}")
+                    logger.debug(f"Dictionary content: {str(part)[:100]}... (truncated)")
+                elif isinstance(part, bytes):
+                    logger.info(f"Yielding processed bytes part, length: {len(part)}")
+                elif isinstance(part, str):
+                    logger.info(f"Yielding processed string part, length: {len(part)}")
+                    logger.debug(f"String content: {part[:50]}... (truncated)")
                 else:
-                    context = "No matching experts found."
+                    logger.warning(f"Unexpected processed part type: {part_type}")
+                    logger.debug(f"Content representation: {str(part)[:100]}")
+                    
+                # Yield the cleaned part
+                yield part
+                
+            logger.info("Completed send_message_async stream generation")
             
-            # Step 3: Handle PUBLICATION Intent
-            elif intent == QueryIntent.PUBLICATION:
-                publications, _ = await self.get_publications(message, limit=3)
-                if publications:
-                    context = self.format_publication_context(publications)
-                else:
-                    context = "No matching publications found."
-            
-            # Step 4: Default Response
-            else:
-                context = "How can I assist you with APHRC research?"
-            
-            # Step 5: Stream Metadata
-            yield json.dumps({'is_metadata': True, 'metadata': {'intent': intent.value}})
-            
-            # Step 6: Generate Final Response with Gemini
-            model = self._setup_gemini()
-            prompt = f"Context:\n{context}\nQuestion: {message}"
-            response = model.generate_content(prompt, stream=True)  # Use generateContent
-            
-            for chunk in response:
-                if hasattr(chunk, 'text') and chunk.text:
-                    yield chunk.text
         except Exception as e:
-            logger.error(f"Error generating response: {e}")
-            yield json.dumps({'error': str(e)})
-
+            logger.error(f"Error in send_message_async: {e}", exc_info=True)
+            yield f"Error processing message: {str(e)}"
 
     def _load_embedding_model(self):
         """Try loading embedding model from various locations."""
