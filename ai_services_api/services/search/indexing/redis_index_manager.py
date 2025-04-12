@@ -373,26 +373,16 @@ class ExpertRedisIndexManager:
             pipeline.reset()
             logger.error(f"Error storing expert {expert.get('id')}: {e}")
             raise
-    def get_expert_metadata(self, expert_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve expert metadata from Redis."""
-        try:
-            metadata = self.redis_text.hgetall(f"meta:expert:{expert_id}")
-            if metadata:
-                # Parse JSON fields
-                if metadata.get('expertise'):
-                    metadata['expertise'] = json.loads(metadata['expertise'])
-                return metadata
-            return None
-        except Exception as e:
-            logger.error(f"Error retrieving expert metadata: {e}")
-            return None
+    
 
     def clear_redis_indexes(self) -> bool:
         """Clear all Redis indexes for both experts and publications."""
         try:
-            # Clear expert indexes
-            expert_patterns = ['text:expert:*', 'emb:expert:*', 'meta:expert:*']
-            for pattern in expert_patterns:
+            # Clear both old and new patterns to ensure complete cleanup
+            
+            # Clear expert indexes - old patterns
+            old_expert_patterns = ['text:expert:*', 'emb:expert:*', 'meta:expert:*']
+            for pattern in old_expert_patterns:
                 cursor = 0
                 while True:
                     cursor, keys = self.redis_text.scan(cursor, match=pattern, count=100)
@@ -401,12 +391,23 @@ class ExpertRedisIndexManager:
                     if cursor == 0:
                         break
             
-            # Clear publication/resource indexes - include both key formats for thoroughness
-            resource_patterns = [
+            # Clear expert indexes - new patterns
+            new_expert_patterns = ['text:aphrc_expert:*', 'emb:aphrc_expert:*', 'meta:aphrc_expert:*']
+            for pattern in new_expert_patterns:
+                cursor = 0
+                while True:
+                    cursor, keys = self.redis_text.scan(cursor, match=pattern, count=100)
+                    if keys:
+                        self.redis_text.delete(*keys)
+                    if cursor == 0:
+                        break
+            
+            # Clear publication/resource indexes - old patterns
+            old_resource_patterns = [
                 'text:resource:*', 'emb:resource:*', 'meta:resource:*',
                 'text:publication:*', 'emb:publication:*', 'meta:publication:*'
             ]
-            for pattern in resource_patterns:
+            for pattern in old_resource_patterns:
                 cursor = 0
                 while True:
                     cursor, keys = self.redis_text.scan(cursor, match=pattern, count=100)
@@ -415,7 +416,31 @@ class ExpertRedisIndexManager:
                     if cursor == 0:
                         break
             
-            logger.info("Cleared all expert and publication Redis indexes")
+            # Clear publication/resource indexes - new patterns
+            new_resource_patterns = [
+                'text:expert_resource:*', 'emb:expert_resource:*', 'meta:expert_resource:*'
+            ]
+            for pattern in new_resource_patterns:
+                cursor = 0
+                while True:
+                    cursor, keys = self.redis_text.scan(cursor, match=pattern, count=100)
+                    if keys:
+                        self.redis_text.delete(*keys)
+                    if cursor == 0:
+                        break
+            
+            # Clear resource links
+            link_patterns = ['links:expert:*', 'links:resource:*', 'expert:*:resources']
+            for pattern in link_patterns:
+                cursor = 0
+                while True:
+                    cursor, keys = self.redis_text.scan(cursor, match=pattern, count=100)
+                    if keys:
+                        self.redis_text.delete(*keys)
+                    if cursor == 0:
+                        break
+            
+            logger.info("Cleared all expert and publication Redis indexes (both old and new patterns)")
             return True
             
         except Exception as e:
@@ -1138,16 +1163,7 @@ class ExpertRedisIndexManager:
         except Exception as e:
             logger.error(f"Error creating text content for resource {resource.get('id', 'Unknown')}: {e}")
             return "Error Processing Resource"
-    def get_expert_embedding(self, expert_id: str) -> Optional[np.ndarray]:
-        """Retrieve expert embedding from Redis."""
-        try:
-            embedding_bytes = self.redis_binary.get(f"emb:expert:{expert_id}")
-            if embedding_bytes:
-                return np.frombuffer(embedding_bytes, dtype=np.float32)
-            return None
-        except Exception as e:
-            logger.error(f"Error retrieving expert embedding: {e}")
-            return None
+   
 
     
     def close(self):

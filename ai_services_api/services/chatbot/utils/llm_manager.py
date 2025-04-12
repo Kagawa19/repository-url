@@ -881,15 +881,13 @@ class GeminiLLMManager:
     
     # 2. Update _get_all_expert_keys method in GeminiLLMManager
 
-    async def _get_all_expert_keys(self):
-        """Helper method to get all expert keys from Redis with improved error handling."""
+    
+    async def _get_all_publication_keys(self):
+        """Helper method to get all publication keys from Redis with consistent patterns."""
         try:
-            if not self.redis_manager:
-                logger.warning("Redis manager not available, cannot retrieve expert keys")
-                return []
-                
+            # Only use new pattern
             patterns = [
-                'meta:expert:*'  # Primary pattern for expert data
+                'meta:expert_resource:*'  # New pattern for expert resources
             ]
             
             all_keys = []
@@ -899,7 +897,7 @@ class GeminiLLMManager:
                 cursor = 0
                 pattern_keys = []
                 
-                while True:
+                while cursor != 0 or len(pattern_keys) == 0:
                     try:
                         cursor, batch = self.redis_manager.redis_text.scan(
                             cursor=cursor, 
@@ -920,11 +918,11 @@ class GeminiLLMManager:
             # Remove any duplicates
             unique_keys = list(set(all_keys))
             
-            logger.info(f"Found {len(unique_keys)} total unique expert keys in Redis")
+            logger.info(f"Found {len(unique_keys)} total unique publication keys in Redis")
             return unique_keys
             
         except Exception as e:
-            logger.error(f"Error retrieving expert keys: {e}")
+            logger.error(f"Error retrieving publication keys: {e}")
             return []
 
     # 3. Update get_relevant_experts method to better handle empty results
