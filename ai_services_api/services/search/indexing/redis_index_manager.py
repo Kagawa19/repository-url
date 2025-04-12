@@ -832,37 +832,42 @@ class ExpertRedisIndexManager:
         return normalized
 
     def _store_resource_data(self, resource: Dict[str, Any], text_content: str, embedding: np.ndarray) -> None:
-        """Stores resources that belong to experts in the experts_expert table."""
-        # Initialize pipeline at the start
+        """Stores resources that are linked to experts in Redis."""
+        # Initialize pipeline at start
         pipeline = None
         conn = None
         
         try:
-            # Get and validate expert_id first
+            # Get expert_id - can come from either direct field or links
             expert_id = resource.get('expert_id')
             
-            # Skip if expert_id is None or invalid
-            if expert_id is None or str(expert_id).strip().lower() == 'none':
-                logger.warning(f"Skipping resource {resource.get('id')} - invalid expert_id: {expert_id}")
+            # If no direct expert_id, check if resource is linked to any expert
+            if not expert_id or str(expert_id).strip().lower() == 'none':
+                conn = self.db.get_connection()
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT expert_id FROM expert_resource_links 
+                        WHERE resource_id = %s LIMIT 1
+                    """, (resource['id'],))
+                    link_result = cur.fetchone()
+                    expert_id = link_result[0] if link_result else None
+                    
+            # Skip if still no valid expert_id
+            if not expert_id or str(expert_id).strip().lower() == 'none':
+                logger.warning(f"Skipping resource {resource.get('id')} - no valid expert association")
                 return
                 
             # Convert to string and clean
             expert_id = str(expert_id).strip()
             
-            # Check if expert exists
-            conn = self.db.get_connection()
-            with conn.cursor() as cur:
-                try:
-                    # Use parameterized query to prevent SQL injection
-                    cur.execute("SELECT id FROM experts_expert WHERE id = %s", (expert_id,))
-                    if not cur.fetchone():
-                        logger.warning(f"Skipping resource {resource.get('id')} - expert {expert_id} not found")
-                        return
-                except Exception as query_error:
-                    logger.error(f"Error checking expert existence: {query_error}")
+            # Verify expert exists
+            with conn.cursor() if conn else get_db_cursor() as (cur, _):
+                cur.execute("SELECT id FROM experts_expert WHERE id = %s", (expert_id,))
+                if not cur.fetchone():
+                    logger.warning(f"Skipping resource {resource.get('id')} - expert {expert_id} not found")
                     return
 
-            # Only proceed with Redis storage if we have valid data
+            # Proceed with Redis storage
             base_key = f"expert_resource:{expert_id}:{resource['id']}"
             pipeline = self.redis_text.pipeline()
             
@@ -901,7 +906,7 @@ class ExpertRedisIndexManager:
 
 
     def fetch_resources(self) -> List[Dict[str, Any]]:
-        """Fetch all resource data from database with robust validation."""
+        """Fetch all resource data that belongs to experts in experts_expert table."""
         max_retries = 3
         retry_delay = 2
         
@@ -911,37 +916,54 @@ class ExpertRedisIndexManager:
             try:
                 conn = self.db.get_connection()
                 with conn.cursor() as cur:
-                    # Check if table exists
+                    # Check if tables exist
                     cur.execute("""
                         SELECT EXISTS (
                             SELECT FROM information_schema.tables 
                             WHERE table_name = 'resources_resource'
-                        );
+                        ) AS resources_exists,
+                        EXISTS (
+                            SELECT FROM information_schema.tables
+                            WHERE table_name = 'expert_resource_links'
+                        ) AS links_exists;
                     """)
-                    if not cur.fetchone()[0]:
+                    exists = cur.fetchone()
+                    
+                    if not exists[0]:  # resources_resource table doesn't exist
                         logger.warning("resources_resource table does not exist yet")
                         return []
-
-                    # Modified query to filter out NULL/None expert_ids
+                    
+                    # Modified query to get:
+                    # 1. Resources with expert_id in experts_expert table
+                    # 2. Resources linked via expert_resource_links
                     query = """
-                        SELECT 
-                            id, doi, title, abstract, summary, domains, topics,
-                            description, expert_id, type, subtitles, publishers,
-                            collection, date_issue, citation, language, identifiers,
-                            created_at, updated_at, source, authors, publication_year
-                        FROM resources_resource
-                        WHERE id IS NOT NULL
-                        AND expert_id IS NOT NULL
-                        AND expert_id != 'None'
+                        SELECT DISTINCT r.*
+                        FROM resources_resource r
+                        WHERE (
+                            -- Resources with direct expert_id that exists in experts_expert
+                            (r.expert_id IS NOT NULL AND r.expert_id IN (SELECT id FROM experts_expert))
+                            OR
+                            -- Resources linked via expert_resource_links
+                            (r.id IN (SELECT resource_id FROM expert_resource_links))
+                        ORDER BY r.id
+                    """ if exists[1] else """
+                        SELECT r.*
+                        FROM resources_resource r
+                        WHERE r.expert_id IS NOT NULL 
+                        AND r.expert_id IN (SELECT id FROM experts_expert)
+                        ORDER BY r.id
                     """
                     
                     cur.execute(query)
                     resources = []
+                    skipped_count = 0
                     
                     for row in cur.fetchall():
                         try:
-                            # Skip if expert_id is invalid
-                            if row[8] is None or str(row[8]).strip().lower() == 'none':
+                            # Skip if expert_id is None or invalid
+                            expert_id = row[8]  # expert_id is at index 8
+                            if expert_id is None or str(expert_id).strip().lower() == 'none':
+                                skipped_count += 1
                                 continue
                                 
                             resource = {
@@ -953,7 +975,7 @@ class ExpertRedisIndexManager:
                                 'domains': self._parse_jsonb(row[5]) if row[5] else [],
                                 'topics': self._parse_jsonb(row[6]) if row[6] else {},
                                 'description': str(row[7]) if row[7] is not None else '',
-                                'expert_id': str(row[8]) if row[8] is not None else '',
+                                'expert_id': str(expert_id) if expert_id is not None else '',
                                 'type': str(row[9]) if row[9] is not None else 'publication',
                                 'subtitles': self._parse_jsonb(row[10]) if row[10] else {},
                                 'publishers': self._parse_jsonb(row[11]) if row[11] else {},
@@ -971,10 +993,14 @@ class ExpertRedisIndexManager:
                             resources.append(resource)
                             
                         except Exception as row_error:
+                            skipped_count += 1
                             logger.error(f"Error processing resource row: {row_error}")
                             continue
                     
-                    logger.info(f"Fetched {len(resources)} valid resources from database")
+                    logger.info(
+                        f"Fetched {len(resources)} expert-linked resources from database "
+                        f"(skipped {skipped_count} invalid records)"
+                    )
                     return resources
                     
             except Exception as e:
