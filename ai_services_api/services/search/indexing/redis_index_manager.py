@@ -542,7 +542,114 @@ class ExpertRedisIndexManager:
             return False
 
             
-
+    def fetch_resources(self) -> List[Dict[str, Any]]:
+        """Fetch all resources linked to experts either directly or through links."""
+        max_retries = 3
+        retry_delay = 2
+        
+        for attempt in range(max_retries):
+            conn = None
+            cur = None
+            try:
+                conn = self.db.get_connection()
+                with conn.cursor() as cur:
+                    # Check if required tables exist
+                    cur.execute("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_name = 'resources_resource'
+                        ) AS resources_exists,
+                        EXISTS (
+                            SELECT FROM information_schema.tables
+                            WHERE table_name = 'expert_resource_links'
+                        ) AS links_exists;
+                    """)
+                    exists = cur.fetchone()
+                    
+                    if not exists[0]:  # resources_resource table doesn't exist
+                        logger.warning("resources_resource table does not exist yet")
+                        return []
+                    
+                    # Modified query to get all resources linked to experts
+                    query = """
+                        SELECT r.* 
+                        FROM resources_resource r
+                        WHERE (
+                            -- Resources with direct expert_id that exists in experts_expert
+                            (r.expert_id IS NOT NULL AND r.expert_id IN (SELECT id FROM experts_expert))
+                            OR
+                            -- Resources linked via expert_resource_links
+                            (EXISTS (
+                                SELECT 1 FROM expert_resource_links erl 
+                                WHERE erl.resource_id = r.id 
+                                AND erl.expert_id IN (SELECT id FROM experts_expert)
+                            ))
+                        )
+                        ORDER BY r.id
+                    """ if exists[1] else """
+                        SELECT r.*
+                        FROM resources_resource r
+                        WHERE r.expert_id IS NOT NULL 
+                        AND r.expert_id IN (SELECT id FROM experts_expert)
+                        ORDER BY r.id
+                    """
+                    
+                    cur.execute(query)
+                    resources = []
+                    skipped_count = 0
+                    
+                    for row in cur.fetchall():
+                        try:
+                            resource = {
+                                'id': row[0],
+                                'doi': str(row[1]) if row[1] is not None else '',
+                                'title': str(row[2]) if row[2] is not None else '',
+                                'abstract': str(row[3]) if row[3] is not None else '',
+                                'summary': str(row[4]) if row[4] is not None else '',
+                                'domains': self._parse_jsonb(row[5]) if row[5] else [],
+                                'topics': self._parse_jsonb(row[6]) if row[6] else {},
+                                'description': str(row[7]) if row[7] is not None else '',
+                                'expert_id': str(row[8]) if row[8] is not None else '',
+                                'type': str(row[9]) if row[9] is not None else 'publication',
+                                'subtitles': self._parse_jsonb(row[10]) if row[10] else {},
+                                'publishers': self._parse_jsonb(row[11]) if row[11] else {},
+                                'collection': str(row[12]) if row[12] is not None else '',
+                                'date_issue': str(row[13]) if row[13] is not None else '',
+                                'citation': str(row[14]) if row[14] is not None else '',
+                                'language': str(row[15]) if row[15] is not None else '',
+                                'identifiers': self._parse_jsonb(row[16]) if row[16] else {},
+                                'created_at': row[17].isoformat() if row[17] else None,
+                                'updated_at': row[18].isoformat() if row[18] else None,
+                                'source': str(row[19]) if row[19] is not None else 'unknown',
+                                'authors': self._parse_jsonb(row[20]) if row[20] else [],
+                                'publication_year': str(row[21]) if row[21] is not None else ''
+                            }
+                            resources.append(resource)
+                        except Exception as row_error:
+                            skipped_count += 1
+                            logger.error(f"Error processing resource row: {row_error}")
+                            continue
+                    
+                    logger.info(
+                        f"Fetched {len(resources)} expert-linked resources from database "
+                        f"(skipped {skipped_count} invalid records)"
+                    )
+                    return resources
+                    
+            except Exception as e:
+                logger.error(f"Attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                else:
+                    logger.error("All retry attempts failed")
+                    raise
+            finally:
+                if cur:
+                    cur.close()
+                if conn:
+                    conn.close()
+        
+        return []
     def create_publications_redis_index(self) -> bool:
         """Create Redis indexes for publications/resources."""
         try:
