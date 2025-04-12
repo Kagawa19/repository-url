@@ -541,6 +541,145 @@ class ExpertRedisIndexManager:
             logger.error(f"Catastrophic error during Redis indexing: {final_err}")
             return False
 
+    def fetch_resources(self) -> List[Dict[str, Any]]:
+        """Fetch all resource data from database with robust error handling and validation.
+        
+        Returns:
+            List of resource dictionaries with validated data
+        """
+        max_retries = 3
+        retry_delay = 2
+        
+        for attempt in range(max_retries):
+            conn = None
+            cur = None
+            try:
+                conn = self.db.get_connection()
+                with conn.cursor() as cur:
+                    # Check if table exists with more detailed error handling
+                    try:
+                        cur.execute("""
+                            SELECT EXISTS (
+                                SELECT FROM information_schema.tables 
+                                WHERE table_name = 'resources_resource'
+                            );
+                        """)
+                        table_exists = cur.fetchone()[0]
+                    except Exception as table_check_error:
+                        logger.error(f"Error checking table existence: {table_check_error}")
+                        table_exists = False
+                    
+                    if not table_exists:
+                        logger.warning("resources_resource table does not exist yet")
+                        return []
+
+                    # Fetch ALL columns with explicit field validation
+                    query = """
+                        SELECT 
+                            id,
+                            COALESCE(doi, '') as doi,
+                            COALESCE(title, '') as title,
+                            COALESCE(abstract, '') as abstract,
+                            COALESCE(summary, '') as summary,
+                            domains,
+                            topics,
+                            COALESCE(description, '') as description,
+                            expert_id,
+                            COALESCE(type, 'publication') as type,
+                            subtitles,
+                            publishers,
+                            COALESCE(collection, '') as collection,
+                            COALESCE(date_issue, '') as date_issue,
+                            COALESCE(citation, '') as citation,
+                            COALESCE(language, '') as language,
+                            identifiers,
+                            created_at,
+                            updated_at,
+                            COALESCE(source, 'unknown') as source,
+                            authors,
+                            COALESCE(publication_year, '') as publication_year
+                        FROM resources_resource
+                        WHERE id IS NOT NULL
+                    """
+                    
+                    try:
+                        cur.execute(query)
+                        rows = cur.fetchall()
+                    except Exception as query_error:
+                        logger.error(f"Error executing resources query: {query_error}")
+                        raise
+
+                    resources = []
+                    skipped_count = 0
+                    
+                    for row in rows:
+                        try:
+                            # Skip resources with invalid expert_id (None or string 'None')
+                            expert_id = row[8]
+                            if expert_id is None or str(expert_id).strip().lower() == 'none':
+                                skipped_count += 1
+                                continue
+
+                            resource = {
+                                'id': row[0],
+                                'doi': str(row[1]) if row[1] is not None else '',
+                                'title': str(row[2]) if row[2] is not None else '',
+                                'abstract': str(row[3]) if row[3] is not None else '',
+                                'summary': str(row[4]) if row[4] is not None else '',
+                                'domains': self._parse_jsonb(row[5]) if row[5] else [],
+                                'topics': self._parse_jsonb(row[6]) if row[6] else {},
+                                'description': str(row[7]) if row[7] is not None else '',
+                                'expert_id': str(expert_id) if expert_id is not None else '',
+                                'type': str(row[9]) if row[9] is not None else 'publication',
+                                'subtitles': self._parse_jsonb(row[10]) if row[10] else {},
+                                'publishers': self._parse_jsonb(row[11]) if row[11] else {},
+                                'collection': str(row[12]) if row[12] is not None else '',
+                                'date_issue': str(row[13]) if row[13] is not None else '',
+                                'citation': str(row[14]) if row[14] is not None else '',
+                                'language': str(row[15]) if row[15] is not None else '',
+                                'identifiers': self._parse_jsonb(row[16]) if row[16] else {},
+                                'created_at': row[17].isoformat() if row[17] else None,
+                                'updated_at': row[18].isoformat() if row[18] else None,
+                                'source': str(row[19]) if row[19] is not None else 'unknown',
+                                'authors': self._parse_jsonb(row[20]) if row[20] else [],
+                                'publication_year': str(row[21]) if row[21] is not None else ''
+                            }
+
+                            # Validate required fields
+                            if not resource['id']:
+                                logger.warning(f"Skipping resource with empty ID: {resource}")
+                                skipped_count += 1
+                                continue
+
+                            resources.append(resource)
+                            
+                        except Exception as row_error:
+                            logger.error(f"Error processing resource row {row[0] if row else 'unknown'}: {row_error}")
+                            skipped_count += 1
+                            continue
+
+                    logger.info(
+                        f"Fetched {len(resources)} resources from database "
+                        f"(skipped {skipped_count} invalid records)"
+                    )
+                    return resources
+                    
+            except Exception as e:
+                logger.error(f"Attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                else:
+                    logger.error("All retry attempts failed")
+                    raise
+            finally:
+                if cur:
+                    cur.close()
+                if conn:
+                    conn.close()
+        
+        # Return empty list if all retries failed
+        return []
+
     def create_publications_redis_index(self) -> bool:
         """Create Redis indexes for publications/resources."""
         try:
@@ -802,97 +941,7 @@ class ExpertRedisIndexManager:
         except Exception as e:
             logger.error(f"Error retrieving publications for expert {expert_id}: {e}")
             return []
-    def fetch_resources(self) -> List[Dict[str, Any]]:
-        """Fetch all resource data from database."""
-        max_retries = 3
-        retry_delay = 2
-        
-        for attempt in range(max_retries):
-            conn = None
-            cur = None
-            try:
-                conn = self.db.get_connection()
-                with conn.cursor() as cur:
-                    # Check if table exists
-                    cur.execute("""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.tables 
-                            WHERE table_name = 'resources_resource'
-                        );
-                    """)
-                    if not cur.fetchone()[0]:
-                        logger.warning("resources_resource table does not exist yet")
-                        return []
-                    
-                    # Fetch ALL columns from resources_resource to ensure comprehensive indexing
-                    cur.execute("""
-                        SELECT 
-                            id,
-                            doi,
-                            title,
-                            abstract,
-                            summary,
-                            domains,
-                            topics,
-                            description,
-                            expert_id,
-                            type,
-                            subtitles,
-                            publishers,
-                            collection,
-                            date_issue,
-                            citation,
-                            language,
-                            identifiers,
-                            created_at,
-                            updated_at,
-                            source,
-                            authors,
-                            publication_year
-                        FROM resources_resource
-                        WHERE id IS NOT NULL
-                    """)
-                    
-                    resources = [{
-                        'id': row[0],
-                        'doi': row[1],
-                        'title': row[2] or '',
-                        'abstract': row[3] or '',
-                        'summary': row[4] or '',
-                        'domains': self._parse_jsonb(row[5]) if row[5] else [],
-                        'topics': self._parse_jsonb(row[6]) if row[6] else {},
-                        'description': row[7] or '',
-                        'expert_id': row[8],
-                        'type': row[9] or 'publication',
-                        'subtitles': self._parse_jsonb(row[10]) if row[10] else {},
-                        'publishers': self._parse_jsonb(row[11]) if row[11] else {},
-                        'collection': row[12] or '',
-                        'date_issue': row[13] or '',
-                        'citation': row[14] or '',
-                        'language': row[15] or '',
-                        'identifiers': self._parse_jsonb(row[16]) if row[16] else {},
-                        'created_at': row[17].isoformat() if row[17] else None,
-                        'updated_at': row[18].isoformat() if row[18] else None,
-                        'source': row[19] or 'unknown',
-                        'authors': self._parse_jsonb(row[20]) if row[20] else [],
-                        'publication_year': row[21] or ''
-                    } for row in cur.fetchall()]
-                    
-                    logger.info(f"Fetched {len(resources)} resources from database")
-                    return resources
-                    
-            except Exception as e:
-                logger.error(f"Attempt {attempt + 1}/{max_retries} failed: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
-                else:
-                    logger.error("All retry attempts failed")
-                    raise
-            finally:
-                if cur:
-                    cur.close()
-                if conn:
-                    conn.close()
+    
 
 
 
@@ -922,40 +971,38 @@ class ExpertRedisIndexManager:
 
     def _store_resource_data(self, resource: Dict[str, Any], text_content: str, embedding: np.ndarray) -> None:
         """Stores resources that belong to experts in the experts_expert table."""
-        # Get expert_id directly from the resource
-        expert_id = str(resource.get('expert_id', ''))
-        
-        # Skip if no expert_id provided
-        if not expert_id or expert_id.lower() == 'none':
-            return
-        
-        # Initialize pipeline variable in the outer scope
+        # Initialize pipeline variable at the start
         pipeline = None
         conn = None
         
         try:
+            # Get expert_id directly from the resource
+            expert_id = str(resource.get('expert_id', ''))
+            
+            # Skip if no expert_id provided or it's 'None'
+            if not expert_id or expert_id.lower() == 'none':
+                logger.warning(f"Skipping resource {resource.get('id')} with invalid expert_id: {expert_id}")
+                return
+                
             conn = self.db.get_connection()
             with conn.cursor() as cur:
+                # Use parameterized query to avoid SQL injection
                 cur.execute("SELECT id FROM experts_expert WHERE id = %s", (expert_id,))
                 expert_exists = cur.fetchone() is not None
                 
             # Only proceed if the expert exists
             if not expert_exists:
+                logger.warning(f"Skipping resource {resource.get('id')} - expert {expert_id} not found")
                 return
                 
             # Store with a completely different key pattern
             base_key = f"expert_resource:{expert_id}:{resource['id']}"
             pipeline = self.redis_text.pipeline()
             
-            # Rest of your code...
-            
-            # Store text content
+            # Rest of your storage logic...
             pipeline.set(f"text:{base_key}", text_content)
-            
-            # Store embedding
             self.redis_binary.set(f"emb:{base_key}", embedding.astype(np.float32).tobytes())
             
-            # Store metadata - only essential fields
             metadata = {
                 'id': str(resource['id']),
                 'title': str(resource.get('title', '')),
@@ -967,11 +1014,8 @@ class ExpertRedisIndexManager:
             }
             
             pipeline.hset(f"meta:{base_key}", mapping=metadata)
-            
-            # Create a direct index entry for this expert's resources
             index_key = f"expert:{expert_id}:resources"
             pipeline.sadd(index_key, str(resource['id']))
-            
             pipeline.execute()
             
         except Exception as e:
@@ -982,7 +1026,6 @@ class ExpertRedisIndexManager:
         finally:
             if conn:
                 conn.close()
-
 
 
     def _create_resource_text_content(self, resource: Dict[str, Any]) -> str:
