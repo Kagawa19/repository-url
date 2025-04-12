@@ -377,11 +377,19 @@ class GeminiLLMManager:
             # 6. Stream Response
             yield json.dumps({'is_metadata': True, 'metadata': metadata})
             model = self._setup_gemini()
-            async for chunk in model.generate_content(
-                f"Context:\n{context}\n\nQuestion: {message}",
-                stream=True
-            ):
-                yield chunk.text
+            
+            # Fixed part: Use the response directly instead of async for
+            prompt = f"Context:\n{context}\n\nQuestion: {message}"
+            response = model.generate_content(prompt, stream=True)
+            
+            # Process the response - the response is likely a generator or iterable, not an async iterable
+            for chunk in response:
+                if hasattr(chunk, 'text') and chunk.text:
+                    yield chunk.text
+                elif hasattr(chunk, 'parts') and chunk.parts:
+                    for part in chunk.parts:
+                        if hasattr(part, 'text') and part.text:
+                            yield part.text
 
         except Exception as e:
             logger.error(f"Error: {str(e)}")
