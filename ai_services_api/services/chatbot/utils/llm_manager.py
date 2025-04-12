@@ -343,24 +343,46 @@ class GeminiLLMManager:
         Fetches experts by name/query (APHRC only), with embedding support.
         """
         try:
-            if not self.redis_manager:
+            if not self.redis_manager or not self.redis_manager.redis_text:
                 return [], "Redis manager not available"
                 
-            # Use scan instead of keys for Redis (keys is usually synchronous)
-            # If scan is also not async, you may need to use a different approach
-            cursor = 0
-            keys = []
+            # Check if we need to use async or sync Redis methods
+            is_async_redis = hasattr(self.redis_manager.redis_text, 'ascan') or hasattr(self.redis_manager.redis_text, 'akeys')
             
-            # Scan for keys instead of using keys() directly
-            while True:
-                cursor, batch = await self.redis_manager.redis_text.scan(
-                    cursor=cursor, 
-                    match="meta:aphrc_expert:*", 
-                    count=100
-                )
-                keys.extend(batch)
-                if cursor == 0:
-                    break
+            # Get keys using the appropriate method
+            keys = []
+            if is_async_redis:
+                # Use async methods if available
+                if hasattr(self.redis_manager.redis_text, 'akeys'):
+                    keys = await self.redis_manager.redis_text.akeys("meta:aphrc_expert:*")
+                else:
+                    # Use async scan
+                    cursor = 0
+                    while True:
+                        cursor, batch = await self.redis_manager.redis_text.ascan(
+                            cursor=cursor, 
+                            match="meta:aphrc_expert:*", 
+                            count=100
+                        )
+                        keys.extend(batch)
+                        if cursor == 0:
+                            break
+            else:
+                # Use synchronous methods
+                if hasattr(self.redis_manager.redis_text, 'keys'):
+                    keys = self.redis_manager.redis_text.keys("meta:aphrc_expert:*")
+                else:
+                    # Use synchronous scan
+                    cursor = 0
+                    while True:
+                        cursor, batch = self.redis_manager.redis_text.scan(
+                            cursor=cursor, 
+                            match="meta:aphrc_expert:*", 
+                            count=100
+                        )
+                        keys.extend(batch)
+                        if cursor == 0:
+                            break
             
             experts = []
             query_embedding = None
@@ -372,9 +394,19 @@ class GeminiLLMManager:
                 except Exception as emb_err:
                     logger.warning(f"Failed to create query embedding: {emb_err}")
 
+            # Process each key (expert)
             for key in keys[:limit * 2]:  # Slightly more than limit
                 try:
-                    expert = await self.redis_manager.redis_text.hgetall(key)
+                    # Get expert data using appropriate method
+                    expert = {}
+                    if is_async_redis:
+                        if hasattr(self.redis_manager.redis_text, 'ahgetall'):
+                            expert = await self.redis_manager.redis_text.ahgetall(key)
+                        else:
+                            expert = await self.redis_manager.redis_text.hgetall(key)
+                    else:
+                        expert = self.redis_manager.redis_text.hgetall(key)
+                    
                     if not expert:
                         continue
                         
@@ -385,7 +417,14 @@ class GeminiLLMManager:
                         embedding_key = f"embedding:aphrc_expert:{expert_id}"
                         
                         # Retrieve embedding data
-                        embedding_data = await self.redis_manager.redis_text.get(embedding_key)
+                        embedding_data = None
+                        if is_async_redis:
+                            if hasattr(self.redis_manager.redis_text, 'aget'):
+                                embedding_data = await self.redis_manager.redis_text.aget(embedding_key)
+                            else:
+                                embedding_data = await self.redis_manager.redis_text.get(embedding_key)
+                        else:
+                            embedding_data = self.redis_manager.redis_text.get(embedding_key)
                         
                         if embedding_data:
                             try:
@@ -423,7 +462,7 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error fetching experts: {e}")
             return [], str(e)
-            
+        
     def semantic_search(self, query: str, embeddings: List[np.ndarray], texts: List[str], top_k: int = 3) -> List[str]:
         try:
             query_embedding = self.embedding_model.encode(query)
