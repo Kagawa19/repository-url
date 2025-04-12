@@ -7,6 +7,8 @@ import re
 import time
 import google.generativeai as genai
 import numpy as np
+from sentence_transformers.util import cos_sim
+
 from typing import Dict, Set, Tuple, Any, List, AsyncGenerator, Optional
 from datetime import datetime
 from enum import Enum
@@ -18,7 +20,9 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.callbacks import AsyncIteratorCallbackHandler
 from ai_services_api.services.search.indexing.redis_index_manager import ExpertRedisIndexManager
 from langchain.callbacks.streaming_aiter import AsyncIteratorCallbackHandler
-
+import numpy as np
+import json
+from typing import List, Dict, Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
@@ -135,6 +139,8 @@ class GeminiLLMManager:
                 self.redis_manager = None
 
             self.context_window = []
+            self.embedding_model = None
+            self._init_embeddings()
             self.max_context_items = 5
             self.context_expiry = 1800
             self.confidence_threshold = 0.6
@@ -214,6 +220,28 @@ class GeminiLLMManager:
             except Exception as e:
                 logger.debug(f"Could not load model from {path}: {e}")
         return None
+    
+    def _init_embeddings(self):
+        """Initialize embedding model with verification."""
+        try:
+            self.embedding_model = self._load_embedding_model()
+            if self.embedding_model:
+                # Test the model
+                test_embed = self.embedding_model.encode("test")
+                if len(test_embed) > 0:
+                    logger.info("Embedding model loaded and verified")
+                else:
+                    logger.warning("Embedding model returned empty vector")
+                    self.embedding_model = None
+            else:
+                logger.warning("No local embedding model available")
+                
+            if not self.embedding_model:
+                self._setup_remote_embeddings()
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize embeddings: {e}")
+            self.embedding_model = None
     
     async def detect_intent(self, message: str) -> Dict[str, Any]:
         """
@@ -325,6 +353,8 @@ class GeminiLLMManager:
                 'confidence': 0.0,
                 'clarification': None
             }
+
+
     async def generate_async_response(self, message: str) -> AsyncGenerator[str, None]:
         """Generates a response without mixing expert and publication logic."""
         try:
@@ -354,10 +384,24 @@ class GeminiLLMManager:
                         context = f"No expert named '{expert_name}' found."
                 else:
                     # Case 2: "Health policy experts" → General expert search
-                    experts, _ = await self.get_experts(message, limit=3)
+                    experts, _ = await self.get_experts(message, limit=5)
                     if experts:
-                        context = self.format_expert_context(experts)
-                        metadata['content_matches'] = [e['id'] for e in experts]
+                        # Encode the query
+                        if self.embedding_model:
+                            query_embedding = self.embedding_model.encode(message)
+                        else:
+                            query_embedding = self._create_fallback_embedding(message)
+
+                        # Rank experts by cosine similarity
+                        ranked = sorted(
+                            experts,
+                            key=lambda e: cos_sim(query_embedding, e['embedding'])[0][0]
+                            if 'embedding' in e else 0,
+                            reverse=True
+                        )
+                        top_experts = ranked[:3]
+                        context = self.format_expert_context(top_experts)
+                        metadata['content_matches'] = [e['id'] for e in top_experts]
                     else:
                         context = "No matching experts found."
 
@@ -374,15 +418,15 @@ class GeminiLLMManager:
             else:
                 context = "How can I assist you with APHRC research?"
 
-            # 6. Stream Response
+            # 6. Stream Metadata
             yield json.dumps({'is_metadata': True, 'metadata': metadata})
+
+            # 7. Generate Final Response with Gemini
             model = self._setup_gemini()
-            
-            # Fixed part: Use the response directly instead of async for
             prompt = f"Context:\n{context}\n\nQuestion: {message}"
             response = model.generate_content(prompt, stream=True)
-            
-            # Process the response - the response is likely a generator or iterable, not an async iterable
+
+            # 8. Stream Text Chunks
             for chunk in response:
                 if hasattr(chunk, 'text') and chunk.text:
                     yield chunk.text
@@ -394,6 +438,7 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error: {str(e)}")
             yield json.dumps({'error': str(e)})
+
     def _setup_remote_embeddings(self):
         """Setup fallback embedding options"""
         self.embedding_service = os.getenv('EMBEDDING_SERVICE_URL')
@@ -467,6 +512,20 @@ class GeminiLLMManager:
         try:
             if not self.embedding_model:
                 raise ValueError("No embedding model available")
+                
+            if not hasattr(self.embedding_model, 'encode'):
+                raise ValueError("Embedding model missing encode method")
+                
+            # Test encode a small string to verify model works
+            try:
+                test_embedding = self.embedding_model.encode("test")
+                if len(test_embedding) == 0:
+                    raise ValueError("Empty embedding generated")
+            except Exception as test_error:
+                logger.error(f"Embedding model test failed: {test_error}")
+                raise ValueError("Embedding model not functioning properly")
+                if not self.embedding_model:
+                    raise ValueError("No embedding model available")
                 
             # Prepare cleaned message
             cleaned_message = re.sub(r'[^\w\s]', ' ', message.lower()).strip()
@@ -1741,21 +1800,42 @@ class GeminiLLMManager:
         - Email: {expert.get('email', 'N/A')}
         """
 
-    
+
     async def get_experts(self, query: str, limit: int = 3) -> Tuple[List[Dict], Optional[str]]:
-        """Fetches experts by name/query (APHRC only)."""
+        """Fetches experts by name/query (APHRC only), with embedding support."""
         try:
-            # Scan Redis for matching experts (key pattern: meta:aphrc_expert:*)
             keys = await self.redis_manager.redis_text.keys("meta:aphrc_expert:*")
             experts = []
-            for key in keys[:limit*2]:  # Check slightly more than limit
-                expert = self.redis_manager.redis_text.hgetall(key)
+            for key in keys[:limit * 2]:  # Slightly more than limit
+                expert = await self.redis_manager.redis_text.hgetall(key)
                 if query.lower() in expert.get('first_name', '').lower() or \
                 query.lower() in expert.get('last_name', '').lower():
+                    
+                    # Try to fetch corresponding embedding
+                    expert_id = expert.get('id') or key.split(':')[-1]
+                    embedding_key = f"embedding:aphrc_expert:{expert_id}"
+                    embedding_data = await self.redis_manager.redis_text.get(embedding_key)
+
+                    if embedding_data:
+                        try:
+                            expert['embedding'] = np.array(json.loads(embedding_data))
+                        except Exception as emb_err:
+                            logger.warning(f"Failed to parse embedding for {expert_id}: {emb_err}")
+                            expert['embedding'] = self._create_fallback_embedding(
+                                f"{expert.get('first_name', '')} {expert.get('last_name', '')}"
+                            )
+                    else:
+                        expert['embedding'] = self._create_fallback_embedding(
+                            f"{expert.get('first_name', '')} {expert.get('last_name', '')}"
+                        )
+                    
                     experts.append(expert)
+
             return experts[:limit], None
+
         except Exception as e:
             return [], str(e)
+
     async def _enrich_experts_with_publications(self, experts: List[Dict[str, Any]], limit_per_expert: int = 2) -> List[Dict[str, Any]]:
         """
         Enhanced method to enrich experts with publications from targeted indexing.
