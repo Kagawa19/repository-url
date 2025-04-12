@@ -323,9 +323,9 @@ class Matcher:
     def _normalize_name(self, name: str) -> str:
         """Normalize author name for comparison"""
         return ' '.join(str(name).lower().split())
-
+    
     def match_experts_to_resources(self, experts: List[Dict], resources: List[Dict], 
-                                 use_enhanced: bool = False) -> Dict[int, List[int]]:
+                             use_enhanced: bool = False) -> Dict[int, List[int]]:
         """
         Match experts to resources based on author names.
         
@@ -344,7 +344,7 @@ class Matcher:
             # Convert the enhanced format back to the original format
             original_format = {}
             for expert_id, resource_matches in enhanced_matches.items():
-                original_format[expert_id] = [resource_id for resource_id, confidence in resource_matches]
+                original_format[expert_id] = [resource_id for resource_id, confidence, _ in resource_matches]
                 
             return original_format
         
@@ -389,6 +389,10 @@ class Matcher:
                             author_list = authors
                         elif authors is None:
                             author_list = []
+                        # NEW: Handle float and other non-iterable types
+                        elif isinstance(authors, (float, int)):
+                            # Convert to string and use as a single author name
+                            author_list = [str(authors)]
                         else:
                             # Try converting to string if other type
                             author_list = [str(authors)]
@@ -401,10 +405,17 @@ class Matcher:
                                 author_list = json.loads(author_list)
                             except json.JSONDecodeError:
                                 author_list = [author_list]
+                        # NEW: Handle float and other non-iterable types
+                        elif isinstance(author_list, (float, int)):
+                            author_list = [str(author_list)]
                     
                     # Skip empty author lists
                     if not author_list:
                         continue
+                        
+                    # Ensure author_list is always a list (even for non-iterable types)
+                    if not isinstance(author_list, list):
+                        author_list = [str(author_list)]
                         
                     # Process each author
                     for author in author_list:
@@ -427,6 +438,8 @@ class Matcher:
         except Exception as e:
             self.logger.error(f"Error matching experts to resources: {e}")
             raise
+
+    
 
     
 
