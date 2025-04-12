@@ -919,104 +919,20 @@ class ExpertRedisIndexManager:
         
         return normalized
 
-    def _store_resource_data(self, resource: Dict[str, Any], text_content: str, 
-                    embedding: np.ndarray) -> None:
-        """
-        Stores publication with APHRC/global classification based on authors
-        """
-        # Fetch experts to create a temporary name cache for APHRC experts
-        experts = self.fetch_experts()
-        
-        # Create a temporary name cache
-        temp_name_cache = {
-            self._normalize_name(f"{expert.get('first_name', '')} {expert.get('last_name', '')}").strip(): expert.get('id')
-            for expert in experts 
-            if expert.get('first_name') or expert.get('last_name')
-        }
 
-        # Determine if APHRC publication
-        author_list = resource.get('authors', [])
-        if isinstance(author_list, str):
-            try:
-                author_list = json.loads(author_list)
-            except json.JSONDecodeError:
-                author_list = [author_list]
-        
-        is_aphrc = any(
-            self._normalize_name(author) in temp_name_cache
-            for author in author_list
-        )
-        
-        domain = 'aphrc' if is_aphrc else 'global'
-        base_key = f"resource:{domain}:{resource['id']}"
-        pipeline = self.redis_text.pipeline()
-        try:
-            # Store with domain classification
-            pipeline.set(f"text:{base_key}", text_content)
-            self.redis_binary.set(f"emb:{base_key}", embedding.astype(np.float32).tobytes())
-            
-            metadata = {
-                    'id': str(resource['id']),
-                    'doi': str(resource.get('doi', '')),
-                    'title': str(resource.get('title', '')),
-                    'abstract': str(resource.get('abstract', '')),
-                    'summary': str(resource.get('summary', '')),
-                    'domains': json.dumps(resource.get('domains', [])),
-                    'topics': json.dumps(resource.get('topics', {})),
-                    'description': str(resource.get('description', '')),
-                    'expert_id': str(resource.get('expert_id', '')),
-                    'type': str(resource.get('type', 'publication')),
-                    'subtitles': json.dumps(resource.get('subtitles', {})),
-                    'publishers': json.dumps(resource.get('publishers', {})),
-                    'collection': str(resource.get('collection', '')),
-                    'date_issue': str(resource.get('date_issue', '')),
-                    'citation': str(resource.get('citation', '')),
-                    'language': str(resource.get('language', '')),
-                    'identifiers': json.dumps(resource.get('identifiers', {})),
-                    'created_at': str(resource.get('created_at', '')),
-                    'updated_at': str(resource.get('updated_at', '')),
-                    'source': str(resource.get('source', 'unknown')),
-                    'authors': json.dumps(resource.get('authors', [])),
-                    'publication_year': str(resource.get('publication_year', ''))
-                }
-                
-            pipeline.hset(f"meta:{base_key}", mapping=metadata)
-            
-            # Store expert links only for APHRC authors
-            if is_aphrc:
-                for author in author_list:
-                    normalized = self._normalize_name(author)
-                    if normalized in temp_name_cache:
-                        expert_id = temp_name_cache[normalized]
-                        links_key = f"links:expert:{expert_id}:resources"
-                        pipeline.zadd(links_key, {str(resource['id']): 0.9})  # High confidence
-                        
-                        # Reverse link
-                        res_key = f"links:resource:{resource['id']}:experts"
-                        pipeline.zadd(res_key, {str(expert_id): 0.9})
-            
-            pipeline.execute()
-            
-        except Exception as e:
-            pipeline.reset()
-            raise
-
-    def _store_resource_data(self, resource: Dict[str, Any], text_content: str, 
-                    embedding: np.ndarray) -> None:
-        """
-        Stores resources that belong to experts in the experts_expert table.
-        Simple storage with no domain classification or name caching.
-        """
+    def _store_resource_data(self, resource: Dict[str, Any], text_content: str, embedding: np.ndarray) -> None:
+        """Stores resources that belong to experts in the experts_expert table."""
         # Get expert_id directly from the resource
         expert_id = str(resource.get('expert_id', ''))
         
-        # Only store resources that have a valid expert_id that exists in experts_expert
-        if not expert_id:
+        # Skip if no expert_id provided
+        if not expert_id or expert_id.lower() == 'none':
             return
         
-        # Check if this expert_id exists in experts_expert table
-        # This is a direct check without caching
+        # Initialize pipeline variable in the outer scope
+        pipeline = None
         conn = None
+        
         try:
             conn = self.db.get_connection()
             with conn.cursor() as cur:
@@ -1030,6 +946,8 @@ class ExpertRedisIndexManager:
             # Store with a completely different key pattern
             base_key = f"expert_resource:{expert_id}:{resource['id']}"
             pipeline = self.redis_text.pipeline()
+            
+            # Rest of your code...
             
             # Store text content
             pipeline.set(f"text:{base_key}", text_content)
