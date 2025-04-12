@@ -321,7 +321,8 @@ class ExpertRedisIndexManager:
         All experts from experts_expert table are considered APHRC experts.
         """
         # All experts are APHRC (from experts_expert table)
-        base_key = f"expert:aphrc:{expert['id']}"
+        # Changed key pattern from "expert:aphrc:{expert_id}" to "aphrc_expert:{expert_id}"
+        base_key = f"aphrc_expert:{expert['id']}"
         
         pipeline = self.redis_text.pipeline()
         try:
@@ -974,6 +975,70 @@ class ExpertRedisIndexManager:
         except Exception as e:
             pipeline.reset()
             raise
+
+    def _store_resource_data(self, resource: Dict[str, Any], text_content: str, 
+                    embedding: np.ndarray) -> None:
+        """
+        Stores resources that belong to experts in the experts_expert table.
+        Simple storage with no domain classification or name caching.
+        """
+        # Get expert_id directly from the resource
+        expert_id = str(resource.get('expert_id', ''))
+        
+        # Only store resources that have a valid expert_id that exists in experts_expert
+        if not expert_id:
+            return
+        
+        # Check if this expert_id exists in experts_expert table
+        # This is a direct check without caching
+        conn = None
+        try:
+            conn = self.db.get_connection()
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM experts_expert WHERE id = %s", (expert_id,))
+                expert_exists = cur.fetchone() is not None
+                
+            # Only proceed if the expert exists
+            if not expert_exists:
+                return
+                
+            # Store with a completely different key pattern
+            base_key = f"expert_resource:{expert_id}:{resource['id']}"
+            pipeline = self.redis_text.pipeline()
+            
+            # Store text content
+            pipeline.set(f"text:{base_key}", text_content)
+            
+            # Store embedding
+            self.redis_binary.set(f"emb:{base_key}", embedding.astype(np.float32).tobytes())
+            
+            # Store metadata - only essential fields
+            metadata = {
+                'id': str(resource['id']),
+                'title': str(resource.get('title', '')),
+                'abstract': str(resource.get('abstract', '')),
+                'authors': json.dumps(resource.get('authors', [])),
+                'publication_year': str(resource.get('publication_year', '')),
+                'expert_id': expert_id,
+                'doi': str(resource.get('doi', ''))
+            }
+            
+            pipeline.hset(f"meta:{base_key}", mapping=metadata)
+            
+            # Create a direct index entry for this expert's resources
+            index_key = f"expert:{expert_id}:resources"
+            pipeline.sadd(index_key, str(resource['id']))
+            
+            pipeline.execute()
+            
+        except Exception as e:
+            if pipeline:
+                pipeline.reset()
+            logger.error(f"Error storing resource {resource.get('id')} for expert {expert_id}: {e}")
+            raise
+        finally:
+            if conn:
+                conn.close()
 
 
 

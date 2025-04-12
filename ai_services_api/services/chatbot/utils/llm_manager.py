@@ -1695,16 +1695,73 @@ class GeminiLLMManager:
             logger.error(f"Error updating expert-resource links: {e}")
             return False
 
-    def matches_query(publication: Dict, query: str) -> bool:
+    
+
+    async def get_publications(self, query: str = None, expert_id: str = None, limit: int = 3) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """
+        Retrieves publications with simplified logic, matching the new storage format.
+        """
+        try:
+            if not self.redis_manager:
+                return [], "Database unavailable"
+                
+            publications = []
+            
+            # Expert-specific search using the new key pattern
+            if expert_id:
+                # Get resource IDs for this expert
+                index_key = f"expert:{expert_id}:resources"
+                
+                if self.redis_manager.redis_text.exists(index_key):
+                    # Get all resource IDs for this expert
+                    resource_ids = self.redis_manager.redis_text.smembers(index_key)
+                    
+                    # Fetch each resource's metadata
+                    for pub_id in resource_ids:
+                        meta_key = f"meta:expert_resource:{expert_id}:{pub_id}"
+                        
+                        if self.redis_manager.redis_text.exists(meta_key):
+                            pub = self.redis_manager.redis_text.hgetall(meta_key)
+                            
+                            # Apply query filter if specified
+                            if not query or self._publication_matches_query(pub, query):
+                                publications.append(pub)
+                                
+                            # Limit results if we have enough
+                            if len(publications) >= limit:
+                                break
+                                
+            # General search - look across all expert resources
+            else:
+                cursor = 0
+                # Scan for all expert_resource keys
+                while len(publications) < limit and (cursor != 0 or not publications):
+                    cursor, keys = self.redis_manager.redis_text.scan(
+                        cursor, match='meta:expert_resource:*', count=limit*3)
+                    
+                    for key in keys:
+                        pub = self.redis_manager.redis_text.hgetall(key)
+                        
+                        # Apply query filter
+                        if not query or self._publication_matches_query(pub, query):
+                            publications.append(pub)
+                            
+                        if len(publications) >= limit:
+                            break
+                            
+                    if cursor == 0 or len(publications) >= limit:
+                        break
+                        
+            return publications[:limit], None
+            
+        except Exception as e:
+            logger.error(f"Error in get_publications: {e}")
+            return [], str(e)
+            
+    def _publication_matches_query(self, publication: Dict, query: str) -> bool:
         """
         Check if a publication matches the given query.
-        
-        Args:
-            publication (Dict): Dictionary containing publication metadata from Redis
-            query (str): Search query string
-        
-        Returns:
-            bool: True if publication matches query, False otherwise
+        Simplified version that searches common fields.
         """
         if not query:
             return True  # Return all publications if no query specified
@@ -1712,115 +1769,29 @@ class GeminiLLMManager:
         # Convert query to lowercase for case-insensitive matching
         query = query.lower().strip()
         
-        # Check against various publication fields
-        fields_to_search = [
-            'title', 
-            'abstract', 
-            'summary', 
-            'description',
-            'doi',
-            'topics',
-            'domains'
-        ]
+        # Fields to search
+        fields_to_search = ['title', 'abstract', 'doi']
         
+        # Check each field
         for field in fields_to_search:
-            field_value = publication.get(field, '')
-            
-            # Ensure field_value is a string
-            if not isinstance(field_value, str):
-                try:
-                    # Try to convert to JSON string if it's a dict or list
-                    field_value = json.dumps(field_value).lower()
-                except:
-                    field_value = str(field_value).lower()
-            
-            # Lowercase for case-insensitive search
-            field_value = field_value.lower()
-            
-            # Check if query is in field value
-            if query in field_value:
+            value = publication.get(field, '')
+            if value and query in value.lower():
                 return True
         
-        # Check authors separately
-        authors = publication.get('authors', [])
-        if isinstance(authors, str):
-            try:
-                authors = json.loads(authors)
-            except json.JSONDecodeError:
-                authors = [authors]
-        
-        # Check if query matches any author
-        if any(query in str(author).lower() for author in authors):
-            return True
+        # Check authors
+        authors_json = publication.get('authors', '[]')
+        try:
+            authors = json.loads(authors_json) if authors_json else []
+            if any(query in str(author).lower() for author in authors):
+                return True
+        except:
+            # If authors can't be parsed as JSON, try string match
+            if query in str(authors_json).lower():
+                return True
         
         return False
 
-    async def get_publications(self, query: str = None, expert_id: str = None, limit: int = 3) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        try:
-            if not self.redis_manager:
-                return [], "Database unavailable"
-                
-            publications = []
-            
-            # Expert-specific search
-            if expert_id:
-                # Get APHRC publications first
-                links_key = f"links:expert:{expert_id}:resources"
-                if self.redis_manager.redis_text.exists(links_key):
-                    resource_ids = self.redis_manager.redis_text.zrevrangebyscore(
-                        links_key, 1.0, 0.7, 0, limit)  # High confidence first
-                    
-                    for pub_id in resource_ids:
-                        # Check APHRC version first
-                        meta_key = f"meta:resource:aphrc:{pub_id}"
-                        if self.redis_manager.redis_text.exists(meta_key):
-                            pub = self.redis_manager.redis_text.hgetall(meta_key)
-                            publications.append(pub)
-                        else:
-                            # Fall back to global if exists
-                            meta_key = f"meta:resource:global:{pub_id}"
-                            if self.redis_manager.redis_text.exists(meta_key):
-                                pub = self.redis_manager.redis_text.hgetall(meta_key)
-                                publications.append(pub)
-                                
-                        if len(publications) >= limit:
-                            break
-                            
-            # General search
-            else:
-                # Search APHRC publications first
-                cursor = 0
-                while len(publications) < limit and (cursor != 0 or not publications):
-                    cursor, keys = self.redis_manager.redis_text.scan(
-                        cursor, match='meta:resource:aphrc:*', count=limit*2)
-                    
-                    for key in keys:
-                        pub = self.redis_manager.redis_text.hgetall(key)
-                        if matches_query(pub, query):  # Your search logic
-                            publications.append(pub)
-                            if len(publications) >= limit:
-                                break
-                                
-                # Fall back to global if needed
-                if len(publications) < limit:
-                    cursor = 0
-                    while len(publications) < limit and (cursor != 0 or not publications):
-                        cursor, keys = self.redis_manager.redis_text.scan(
-                            cursor, match='meta:resource:global:*', count=limit*2)
-                        
-                        for key in keys:
-                            pub = self.redis_manager.redis_text.hgetall(key)
-                            if matches_query(pub, query):
-                                publications.append(pub)
-                                if len(publications) >= limit:
-                                    break
-                                    
-            return publications[:limit], None
-            
-        except Exception as e:
-            logger.error(f"Error in get_publications: {e}")
-            return [], str(e)
-
+    
     async def get_experts(self, query: str, limit: int = 3) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """
         Retrieves only APHRC experts (since global experts don't exist in experts_expert table).
@@ -1830,13 +1801,13 @@ class GeminiLLMManager:
             if not self.redis_manager:
                 return [], "Expert database unavailable"
                 
-            # Only search APHRC experts
+            # Only search APHRC experts - updated key pattern to match storage
             cursor = 0
             expert_keys = []
             while cursor != 0 or not expert_keys:
                 cursor, keys = self.redis_manager.redis_text.scan(
                     cursor,
-                    match='meta:expert:aphrc:*',
+                    match='meta:aphrc_expert:*',  # Updated pattern to match new key structure
                     count=limit*5  # Get slightly more than needed
                 )
                 expert_keys.extend(keys)
@@ -1868,7 +1839,8 @@ class GeminiLLMManager:
                     
                     # Calculate similarity score if embedding available
                     if query_embedding is not None:
-                        emb_key = f"emb:expert:aphrc:{expert_data['id']}"
+                        # Updated embedding key to match new pattern
+                        emb_key = f"emb:aphrc_expert:{expert_data['id']}"
                         if self.redis_manager.redis_binary.exists(emb_key):
                             expert_embedding = np.frombuffer(
                                 self.redis_manager.redis_binary.get(emb_key),
