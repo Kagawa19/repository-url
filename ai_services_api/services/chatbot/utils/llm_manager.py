@@ -343,52 +343,87 @@ class GeminiLLMManager:
         Fetches experts by name/query (APHRC only), with embedding support.
         """
         try:
-            # Use asyncio-compatible Redis methods
-            keys = await self.redis_manager.redis_text.keys("meta:aphrc_expert:*")
+            if not self.redis_manager:
+                return [], "Redis manager not available"
+                
+            # Use scan instead of keys for Redis (keys is usually synchronous)
+            # If scan is also not async, you may need to use a different approach
+            cursor = 0
+            keys = []
+            
+            # Scan for keys instead of using keys() directly
+            while True:
+                cursor, batch = await self.redis_manager.redis_text.scan(
+                    cursor=cursor, 
+                    match="meta:aphrc_expert:*", 
+                    count=100
+                )
+                keys.extend(batch)
+                if cursor == 0:
+                    break
+            
             experts = []
             query_embedding = None
 
             # Encode the query if an embedding model is available
             if self.embedding_model:
-                query_embedding = self.embedding_model.encode(query.lower().strip())
+                try:
+                    query_embedding = self.embedding_model.encode(query.lower().strip())
+                except Exception as emb_err:
+                    logger.warning(f"Failed to create query embedding: {emb_err}")
 
             for key in keys[:limit * 2]:  # Slightly more than limit
-                expert = await self.redis_manager.redis_text.hgetall(key)
-                if query.lower() in expert.get('first_name', '').lower() or \
-                query.lower() in expert.get('last_name', '').lower():
-                    expert_id = expert.get('id') or key.split(':')[-1]
-                    embedding_key = f"embedding:aphrc_expert:{expert_id}"
-                    embedding_data = await self.redis_manager.redis_text.get(embedding_key)
-
-                    if embedding_data:
-                        try:
-                            expert['embedding'] = np.array(json.loads(embedding_data))
-                        except Exception as emb_err:
-                            logger.warning(f"Failed to parse embedding for {expert_id}: {emb_err}")
+                try:
+                    expert = await self.redis_manager.redis_text.hgetall(key)
+                    if not expert:
+                        continue
+                        
+                    # Check if the query matches expert name
+                    if query.lower() in expert.get('first_name', '').lower() or \
+                    query.lower() in expert.get('last_name', '').lower():
+                        expert_id = expert.get('id') or key.split(':')[-1]
+                        embedding_key = f"embedding:aphrc_expert:{expert_id}"
+                        
+                        # Retrieve embedding data
+                        embedding_data = await self.redis_manager.redis_text.get(embedding_key)
+                        
+                        if embedding_data:
+                            try:
+                                expert['embedding'] = np.array(json.loads(embedding_data))
+                            except Exception as emb_err:
+                                logger.warning(f"Failed to parse embedding for {expert_id}: {emb_err}")
+                                if hasattr(self, '_create_fallback_embedding'):
+                                    expert['embedding'] = self._create_fallback_embedding(
+                                        f"{expert.get('first_name', '')} {expert.get('last_name', '')}"
+                                    )
+                        elif hasattr(self, '_create_fallback_embedding'):
                             expert['embedding'] = self._create_fallback_embedding(
                                 f"{expert.get('first_name', '')} {expert.get('last_name', '')}"
                             )
-                    else:
-                        expert['embedding'] = self._create_fallback_embedding(
-                            f"{expert.get('first_name', '')} {expert.get('last_name', '')}"
-                        )
 
-                    experts.append(expert)
+                        experts.append(expert)
+                except Exception as expert_err:
+                    logger.warning(f"Error processing expert from key {key}: {expert_err}")
+                    continue
 
             # Rank experts by cosine similarity if query embedding is available
             if query_embedding is not None and experts:
-                ranked_experts = sorted(
-                    experts,
-                    key=lambda e: cos_sim(query_embedding, e['embedding'])[0][0] if 'embedding' in e else 0,
-                    reverse=True
-                )
-                return ranked_experts[:limit], None
-
+                try:
+                    ranked_experts = sorted(
+                        experts,
+                        key=lambda e: cos_sim(query_embedding, e['embedding'])[0][0] if 'embedding' in e and e['embedding'] is not None else 0,
+                        reverse=True
+                    )
+                    return ranked_experts[:limit], None
+                except Exception as ranking_err:
+                    logger.warning(f"Error ranking experts: {ranking_err}")
+                    # Fall back to unranked experts
+                    
             return experts[:limit], None
         except Exception as e:
             logger.error(f"Error fetching experts: {e}")
             return [], str(e)
-        
+            
     def semantic_search(self, query: str, embeddings: List[np.ndarray], texts: List[str], top_k: int = 3) -> List[str]:
         try:
             query_embedding = self.embedding_model.encode(query)
