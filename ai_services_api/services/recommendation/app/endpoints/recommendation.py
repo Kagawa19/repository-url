@@ -432,7 +432,9 @@ async def get_expert_recommendations(
     return recommendations
 
 
-
+class RecommendationClick(BaseModel):
+    view_id: str
+    expert_id: str
 @router.post("/recommend/track")
 async def track_recommendation_click(
     request: Request,
