@@ -523,7 +523,7 @@ class GraphDatabaseInitializer:
     def _create_semantic_relationships(self, session, expert_id: str, semantic_data: Dict[str, List[str]]):
         """Create semantic relationships for an expert"""
         try:
-            # Create concept relationships
+            # Create concept relationships (unchanged)
             for concept in semantic_data['concepts']:
                 if not concept:
                     continue
@@ -538,7 +538,7 @@ class GraphDatabaseInitializer:
                     "concept": concept
                 })
 
-            # Create research area relationships
+            # Create research area relationships (unchanged)
             for area in semantic_data['areas']:
                 if not area:
                     continue
@@ -553,7 +553,7 @@ class GraphDatabaseInitializer:
                     "area": area
                 })
 
-            # Create method relationships
+            # Create method relationships (unchanged)
             for method in semantic_data['methods']:
                 if not method:
                     continue
@@ -568,16 +568,16 @@ class GraphDatabaseInitializer:
                     "method": method
                 })
 
-            # Create related area relationships
+            # Create related area relationships - FIXED VERSION
             for related in semantic_data['related']:
                 if not related:
                     continue
                     
                 session.run("""
-                    MERGE (r:RelatedArea {name: $related})
-                    MERGE (e:Expert {id: $expert_id})-[r:RELATED_TO]->(r)
-                    SET r.weight = 0.5,
-                        r.last_updated = datetime()
+                    MERGE (ra:RelatedArea {name: $related})
+                    MERGE (e:Expert {id: $expert_id})-[rel:RELATED_TO]->(ra)
+                    SET rel.weight = 0.5,
+                        rel.last_updated = datetime()
                 """, {
                     "expert_id": expert_id,
                     "related": related
