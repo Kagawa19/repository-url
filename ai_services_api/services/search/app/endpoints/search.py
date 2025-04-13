@@ -16,7 +16,7 @@ import logging
 import uuid
 
 from ai_services_api.services.search.core.models import PredictionResponse, SearchResponse
-from ai_services_api.services.search.app.endpoints.process_functions import process_advanced_query_prediction, process_advanced_query_prediction
+from ai_services_api.services.search.app.endpoints.process_functions import process_advanced_query_prediction, get_search_categorizer
 from ai_services_api.services.search.core.expert_search import (
     process_expert_search,
     process_expert_name_search,
@@ -38,6 +38,9 @@ router = APIRouter()
 # Constants
 TEST_USER_ID = "123"
 
+# Initialize global categorizer instance (will be lazily initialized when needed)
+_categorizer = None
+
 # Helper functions for user ID extraction
 async def get_user_id(request: Request) -> str:
     logger.debug("Extracting user ID from request headers")
@@ -51,9 +54,6 @@ async def get_user_id(request: Request) -> str:
 async def get_test_user_id(request: Request) -> str:
     logger.debug("Using test user ID")
     return TEST_USER_ID
-
-
-
 
 @router.get("/test/experts/search/{query}")
 async def advanced_search(
@@ -119,6 +119,24 @@ async def advanced_search(
         
         logger.info(f"Constructed effective query: '{effective_query}'")
         
+        # Try to categorize the query if not already specified in search_type
+        if effective_query and not search_type:
+            try:
+                # Get categorizer
+                categorizer = await get_search_categorizer()
+                
+                if categorizer:
+                    # Categorize the query
+                    category_info = await categorizer.categorize_query(effective_query, user_id)
+                    detected_category = category_info.get("category")
+                    
+                    # Use detected category as search type if it's one of our valid types
+                    if detected_category in ["name", "theme", "designation", "publication"]:
+                        search_type = detected_category
+                        logger.info(f"Query '{effective_query}' categorized as '{search_type}'")
+            except Exception as category_error:
+                logger.warning(f"Error categorizing query: {category_error}")
+        
         # Select the appropriate search method based on search type
         if search_type == "name" and name:
             search_response = await process_expert_name_search(
@@ -156,6 +174,21 @@ async def advanced_search(
                 active_only=active_only,
                 k=k
             )
+        
+        # Add category information to response if available
+        if effective_query:
+            try:
+                categorizer = await get_search_categorizer()
+                if categorizer:
+                    category_info = await categorizer.categorize_query(effective_query, user_id)
+                    
+                    # Add category information to response metadata
+                    if hasattr(search_response, "metadata"):
+                        search_response.metadata = search_response.metadata or {}
+                        search_response.metadata["category"] = category_info.get("category", "general")
+                        search_response.metadata["category_confidence"] = category_info.get("confidence", 0.0)
+            except Exception as category_error:
+                logger.warning(f"Error adding category to response: {category_error}")
         
         # Log search results
         logger.info(f"Search completed with {search_response.total_results} results")
@@ -214,7 +247,8 @@ async def track_suggestion(
     request: Request,
     partial_query: str = Body(...),
     selected_suggestion: str = Body(...),
-    user_id: str = Depends(get_user_id)
+    user_id: str = Depends(get_user_id),
+    category: Optional[str] = Body(None)
 ):
     """
     Track which suggestion the user selected from the prediction results.
@@ -222,33 +256,85 @@ async def track_suggestion(
     """
     logger.info(f"Tracking selected suggestion - User: {user_id}")
     
-    from ai_services_api.services.search.core.personalization import track_selected_suggestion
-    await track_selected_suggestion(
-        user_id,
-        partial_query,
-        selected_suggestion
-    )
+    # Try to determine category if not provided
+    if not category:
+        try:
+            categorizer = await get_search_categorizer()
+            if categorizer:
+                category_info = await categorizer.categorize_query(selected_suggestion, user_id)
+                category = category_info.get("category", "general")
+                logger.info(f"Suggestion '{selected_suggestion}' categorized as '{category}'")
+        except Exception as e:
+            logger.warning(f"Error categorizing selected suggestion: {e}")
+            category = "general"
     
-    return {"status": "success", "message": "Suggestion selection tracked"}
+    # Track the suggestion with enhanced category information
+    try:
+        # Import with enhanced category support
+        from ai_services_api.services.search.core.personalization import track_selected_suggestion
+        await track_selected_suggestion(
+            user_id,
+            partial_query,
+            selected_suggestion,
+            category
+        )
+        
+        # Also track in predictor for immediate use
+        try:
+            from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
+            predictor = GoogleAutocompletePredictor()
+            await predictor.track_selection(
+                partial_query,
+                selected_suggestion,
+                user_id,
+                category
+            )
+        except Exception as pred_error:
+            logger.warning(f"Error tracking in predictor: {pred_error}")
+        
+        return {
+            "status": "success", 
+            "message": "Suggestion selection tracked",
+            "category": category
+        }
+    except Exception as track_error:
+        logger.error(f"Error tracking suggestion: {track_error}")
+        return {
+            "status": "error",
+            "message": "Failed to track suggestion",
+            "error": str(track_error)
+        }
 
-# Health check endpoint
+# Health check endpoint with categorizer status
 @router.get("/health")
 async def health_check():
     """API health check endpoint."""
     try:
-        # Check Gemini API connectivity
-        from ai_services_api.services.search.gemini.gemini_predictor import GeminiPredictor
+        components = {
+            "database": "healthy",  # Assuming database is healthy
+            "categorizer": "not_configured"
+        }
         
-        predictor = GeminiPredictor()
-        gemini_status = "healthy"
+        # Check Gemini API connectivity
+        from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
+        predictor = GoogleAutocompletePredictor()
+        components["gemini"] = "healthy"
+        
+        # Check categorizer status
+        try:
+            categorizer = await get_search_categorizer()
+            if categorizer:
+                if categorizer.gemini_model:
+                    components["categorizer"] = "healthy"
+                else:
+                    components["categorizer"] = "no_gemini_api"
+        except Exception as cat_error:
+            components["categorizer"] = f"error: {str(cat_error)}"
         
         return {
             "status": "ok",
             "timestamp": datetime.now().isoformat(),
-            "components": {
-                "gemini": gemini_status,
-                "database": "healthy"  # Assuming database is healthy
-            }
+            "components": components
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}", exc_info=True)
@@ -289,7 +375,8 @@ async def clear_user_search_cache(
             f"user_search:{user_id}:*",        # Search results
             f"query_prediction:{user_id}:*",    # Query predictions
             f"expert_search:{user_id}:*",       # Expert search results
-            f"personalization:{user_id}:*"      # User personalization data
+            f"personalization:{user_id}:*",     # User personalization data
+            f"category:{user_id}:*"             # Category cache for user queries
         ]
         
         total_deleted = 0
@@ -323,7 +410,8 @@ async def clear_all_search_cache(
             "user_search:*",        # All search results
             "query_prediction:*",    # All query predictions
             "expert_search:*",       # All expert search results
-            "personalization:*"      # All personalization data
+            "personalization:*",     # All personalization data
+            "category:*"             # All category cache
         ]
         
         total_deleted = 0
@@ -431,4 +519,144 @@ async def predict_query_flexible(
         raise HTTPException(
             status_code=500, 
             detail=f"An error occurred while generating predictions: {str(e)}"
+        )
+
+# New endpoint to get categories for multiple queries in batch
+@router.post("/experts/categorize-queries")
+async def categorize_queries(
+    request: Request,
+    queries: List[str] = Body(...),
+    user_id: str = Depends(get_user_id)
+):
+    """
+    Categorize multiple queries in batch.
+    
+    This is useful for analyzing search patterns or pre-categorizing a set of queries.
+    """
+    try:
+        categorizer = await get_search_categorizer()
+        if not categorizer:
+            raise HTTPException(
+                status_code=503,
+                detail="Categorizer service is not available"
+            )
+        
+        results = {}
+        for query in queries:
+            if not query or not query.strip():
+                results[query] = {"category": "general", "confidence": 0.0}
+                continue
+                
+            category_info = await categorizer.categorize_query(query, user_id)
+            results[query] = category_info
+        
+        return {
+            "status": "success",
+            "results": results,
+            "total": len(results)
+        }
+    
+    except Exception as e:
+        logger.error(f"Error categorizing queries: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"An error occurred while categorizing queries: {str(e)}"
+        )
+
+# New endpoint to get category statistics
+@router.get("/experts/category-stats")
+async def get_category_stats(
+    request: Request,
+    user_id: Optional[str] = None,
+    days: int = 30
+):
+    """
+    Get statistics about query categories.
+    
+    Args:
+        user_id: Optional user ID to filter stats for a specific user
+        days: Number of days to include in stats (default: 30)
+    """
+    try:
+        from ai_services_api.services.message.core.database import get_db_connection
+        
+        conn = None
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cur:
+                # Check if search_categories table exists
+                cur.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_name = 'search_categories'
+                    );
+                """)
+                
+                if not cur.fetchone()[0]:
+                    return {
+                        "status": "error",
+                        "message": "Category statistics not available",
+                        "categories": {}
+                    }
+                
+                # Build query based on filters
+                query = """
+                    SELECT 
+                        category,
+                        COUNT(*) as count,
+                        AVG(confidence) as avg_confidence
+                    FROM search_categories
+                    WHERE created_at >= NOW() - INTERVAL %s DAY
+                """
+                params = [days]
+                
+                # Add user filter if provided
+                if user_id:
+                    query += " AND user_id = %s"
+                    params.append(user_id)
+                
+                # Group by category
+                query += " GROUP BY category ORDER BY count DESC"
+                
+                # Execute query
+                cur.execute(query, params)
+                rows = cur.fetchall()
+                
+                # Process results
+                categories = {}
+                total = 0
+                for category, count, avg_confidence in rows:
+                    categories[category] = {
+                        "count": count,
+                        "avg_confidence": float(avg_confidence)
+                    }
+                    total += count
+                
+                # Add percentages
+                for category in categories:
+                    categories[category]["percentage"] = categories[category]["count"] / total if total > 0 else 0
+                
+                return {
+                    "status": "success",
+                    "total_queries": total,
+                    "days": days,
+                    "user_id": user_id,
+                    "categories": categories
+                }
+                
+        except Exception as db_error:
+            logger.error(f"Database error in category stats: {db_error}", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error: {str(db_error)}"
+            )
+        finally:
+            if conn:
+                conn.close()
+    
+    except Exception as e:
+        logger.error(f"Error getting category stats: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"An error occurred while getting category stats: {str(e)}"
         )
