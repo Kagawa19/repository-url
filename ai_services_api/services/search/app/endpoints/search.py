@@ -204,7 +204,7 @@ async def advanced_search(
 
 
 # Replace the advanced_predict endpoint with the simpler 'predict' path
-@router.get("/test/experts/predict/{partial_query}")
+@router.get("/experts/predict/{partial_query}")
 async def predict_query(
     partial_query: str,
     request: Request,
