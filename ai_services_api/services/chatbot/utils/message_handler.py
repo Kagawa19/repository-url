@@ -799,6 +799,49 @@ class MessageHandler:
         enhanced_message = f"{context_summary}\n\nCurrent question: {message}"
         
         return enhanced_message
+    
+    async def _get_conversation_history(self, user_id: str, session_id: str) -> List[Dict]:
+        """
+        Retrieve conversation history for the current session.
+        
+        Args:
+            user_id (str): User identifier
+            session_id (str): Session identifier
+            
+        Returns:
+            List[Dict]: Previous interactions in this conversation
+        """
+        try:
+            # Try to get history from database
+            async with DatabaseConnector.get_connection() as conn:
+                # Get the last 5 interactions for this session, ordered by timestamp
+                history = await conn.fetch("""
+                    SELECT query, response, intent_type, timestamp
+                    FROM chatbot_logs
+                    WHERE user_id = $1 AND session_id = $2
+                    ORDER BY timestamp DESC
+                    LIMIT 5
+                """, user_id, session_id)
+                
+                # Format history as a list of dictionaries
+                conversation = []
+                for item in history:
+                    conversation.append({
+                        'query': item.get('query', ''),
+                        'response': item.get('response', ''),
+                        'intent': item.get('intent_type', 'unknown'),
+                        'timestamp': item.get('timestamp', datetime.now())
+                    })
+                
+                # Return reversed to get chronological order
+                return list(reversed(conversation))
+        
+        except Exception as e:
+            logger.warning(f"Error retrieving conversation history: {e}")
+            # Fall back to any conversation history stored in instance
+            if hasattr(self, 'conversation_cache'):
+                return self.conversation_cache.get(session_id, [])
+            return []
 
     def _analyze_followup(self, message: str, conversation_history: List[Dict]) -> Tuple[bool, Optional[str]]:
         """
