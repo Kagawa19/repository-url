@@ -364,27 +364,35 @@ class DatabaseManager:
             logger.error(f"Error adding query to history: {e}")
             raise
     
-    def record_search_analytics(self, query: str, user_id: str, response_time: float, 
-                            result_count: int, search_type: str = 'general', 
-                            filters: dict = None) -> int:
-        """Record search analytics and return search_id."""
+    async def record_search_analytics(conn, session_id, query, user_id, response_time, result_count, search_type, category=None):
+        """Record search analytics with search_id and category fields."""
         try:
-            result = self.execute("""
-                INSERT INTO search_analytics 
-                (query, user_id, response_time, result_count, search_type)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING id
-            """, (
-                query, 
-                user_id,
-                response_time,  # No need for interval conversion
-                result_count,
-                search_type
-            ))
-            
-            return result[0][0]
+            cur = conn.cursor()
+            try:
+                # Generate a search_id if not provided (can be session_id or a uuid)
+                search_id = int(session_id) if session_id.isdigit() else int(uuid.uuid4().int % 2147483647)
+                
+                cur.execute("""
+                    INSERT INTO search_analytics
+                        (search_id, query, user_id, response_time,
+                        result_count, search_type, timestamp, category)
+                    VALUES
+                        (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, %s)
+                    RETURNING id
+                """, (search_id, query, user_id, response_time, result_count, search_type, category))
+                
+                search_analytics_id = cur.fetchone()[0]
+                conn.commit()
+                return search_analytics_id
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Error recording search analytics: {e}")
+                logger.error(f"DETAIL: {e.diag.message_detail if hasattr(e, 'diag') else ''}")
+                raise
+            finally:
+                cur.close()
         except Exception as e:
-            logger.error(f"Error recording search analytics: {e}")
+            logger.error(f"Error in record_search_analytics: {e}")
             raise
 
     def get_search_metrics(self, start_date: str, end_date: str, 
