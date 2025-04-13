@@ -955,7 +955,422 @@ class GoogleAutocompletePredictor:
             except:
                 return []
 
-    async def predict(self, partial_query: str, limit: int = 10, user_id: str = None) -> List[Dict[str, Any]]:
+    async def _identify_user_preferred_categories(self, user_id: str) -> List[Tuple[str, float]]:
+        """
+        Analyze user's search history to identify preferred categories.
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            List of (category, weight) tuples sorted by weight descending
+        """
+        try:
+            # Default categories with base weights
+            categories = {
+                "person": 0.1,
+                "theme": 0.1,
+                "designation": 0.1,
+                "publication": 0.1,
+                "general": 0.1
+            }
+            
+            # Try to get user's search history
+            try:
+                from ai_services_api.services.search.core.personalization import get_user_search_history
+                history = await get_user_search_history(user_id, limit=50)
+                
+                # Process each search to identify likely categories
+                current_time = time.time()
+                for item in history:
+                    query = item.get("query", "").lower()
+                    timestamp_str = item.get("timestamp")
+                    search_type = item.get("search_type")
+                    
+                    # Skip empty queries
+                    if not query:
+                        continue
+                    
+                    # Calculate recency weight (more recent = higher weight)
+                    recency_factor = 1.0
+                    if timestamp_str:
+                        try:
+                            if isinstance(timestamp_str, str):
+                                timestamp = datetime.fromisoformat(timestamp_str)
+                                # Convert to Unix timestamp
+                                timestamp = timestamp.timestamp()
+                            else:
+                                timestamp = float(timestamp_str)
+                                
+                            # Apply exponential decay based on age in days
+                            age_days = (current_time - timestamp) / (24 * 3600)
+                            recency_factor = math.exp(-age_days / 30)  # 30-day half-life
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    # If search_type is explicitly provided, use it
+                    if search_type in categories:
+                        categories[search_type] += 0.3 * recency_factor
+                        continue
+                    
+                    # Simple rule-based category detection
+                    # Person category indicators
+                    if len(query.split()) <= 3 and all(word.istitle() for word in query.split()):
+                        categories["person"] += 0.2 * recency_factor
+                    
+                    # Theme category indicators
+                    if any(term in query for term in ["research", "study", "field", "area", "domain"]):
+                        categories["theme"] += 0.2 * recency_factor
+                    
+                    # Designation category indicators
+                    if any(term in query for term in ["professor", "director", "researcher", "scientist", "lead"]):
+                        categories["designation"] += 0.2 * recency_factor
+                    
+                    # Publication category indicators
+                    if any(term in query for term in ["paper", "journal", "publication", "article", "study"]):
+                        categories["publication"] += 0.2 * recency_factor
+                        
+                    # If no specific category detected, increase general
+                    if not any(term in query for term in [
+                        "professor", "director", "researcher", "scientist", "lead",
+                        "paper", "journal", "publication", "article", "study",
+                        "research", "study", "field", "area", "domain"
+                    ]) and not (len(query.split()) <= 3 and all(word.istitle() for word in query.split())):
+                        categories["general"] += 0.1 * recency_factor
+                    
+            except Exception as history_error:
+                self.logger.warning(f"Error processing search history for categories: {history_error}")
+            
+            # Convert to sorted list
+            sorted_categories = sorted(
+                [(category, weight) for category, weight in categories.items()],
+                key=lambda x: x[1],
+                reverse=True
+            )
+            
+            return sorted_categories
+            
+        except Exception as e:
+            self.logger.error(f"Error identifying user preferred categories: {e}")
+            # Return default categories
+            return [
+                ("general", 0.5),
+                ("person", 0.3),
+                ("theme", 0.2),
+                ("publication", 0.1),
+                ("designation", 0.1)
+            ]
+
+    async def _get_category_based_suggestions(self, user_id: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Generate suggestions based on user's preferred search categories.
+        
+        Analyzes user's search history to identify preferred categories,
+        then generates relevant suggestions within those categories.
+        
+        Args:
+            user_id: User identifier
+            limit: Maximum number of suggestions to return
+            
+        Returns:
+            List of category-based suggestion dictionaries
+        """
+        try:
+            # Try to determine user's preferred categories from search history
+            preferred_categories = await self._identify_user_preferred_categories(user_id)
+            
+            if not preferred_categories:
+                return []
+                
+            # Generate suggestions for each preferred category
+            suggestions = []
+            
+            for i, (category, weight) in enumerate(preferred_categories[:3]):  # Use top 3 categories
+                # Skip categories with very low weights
+                if weight < 0.2:
+                    continue
+                    
+                # Different handling based on category type
+                if category == "person":
+                    # For person category, suggest common name-related queries
+                    person_suggestions = [
+                        "Professor of Research",
+                        "Research Director",
+                        "Lead Scientist",
+                        "Data Science Expert",
+                        "Research Fellow"
+                    ]
+                    
+                    # Add with appropriate scores based on category weight
+                    for j, text in enumerate(person_suggestions[:2]):  # Add top 2 from each category
+                        suggestions.append({
+                            "text": text,
+                            "source": "category_person",
+                            "score": max(0.3, weight - (j * 0.05)),
+                            "type": "category_suggestion",
+                            "category": "person"
+                        })
+                        
+                elif category == "theme":
+                    # For theme category, suggest research themes
+                    theme_suggestions = [
+                        "Public Health Research",
+                        "Data Science Methods",
+                        "Clinical Research Studies",
+                        "Epidemiology Analysis",
+                        "Health Policy Framework"
+                    ]
+                    
+                    for j, text in enumerate(theme_suggestions[:2]):
+                        suggestions.append({
+                            "text": text,
+                            "source": "category_theme",
+                            "score": max(0.3, weight - (j * 0.05)),
+                            "type": "category_suggestion",
+                            "category": "theme"
+                        })
+                        
+                elif category == "publication":
+                    # For publication category, suggest publication-related queries
+                    publication_suggestions = [
+                        "Recent Research Papers",
+                        "Journal Publications",
+                        "Published Study Results",
+                        "Literature Review",
+                        "Case Study Publications"
+                    ]
+                    
+                    for j, text in enumerate(publication_suggestions[:2]):
+                        suggestions.append({
+                            "text": text,
+                            "source": "category_publication",
+                            "score": max(0.3, weight - (j * 0.05)),
+                            "type": "category_suggestion",
+                            "category": "publication"
+                        })
+                        
+                elif category == "designation":
+                    # For designation category, suggest role-related queries
+                    designation_suggestions = [
+                        "Research Professor",
+                        "Department Director",
+                        "Project Lead",
+                        "Principal Investigator",
+                        "Research Coordinator"
+                    ]
+                    
+                    for j, text in enumerate(designation_suggestions[:2]):
+                        suggestions.append({
+                            "text": text,
+                            "source": "category_designation",
+                            "score": max(0.3, weight - (j * 0.05)),
+                            "type": "category_suggestion",
+                            "category": "designation"
+                        })
+                        
+                else:
+                    # For other/general categories, suggest general research queries
+                    general_suggestions = [
+                        "Research Methods",
+                        "Data Analysis",
+                        "Clinical Studies",
+                        "Health Outcomes",
+                        "Policy Framework"
+                    ]
+                    
+                    for j, text in enumerate(general_suggestions[:2]):
+                        suggestions.append({
+                            "text": text,
+                            "source": "category_general",
+                            "score": max(0.3, weight - (j * 0.05)),
+                            "type": "category_suggestion",
+                            "category": "general"
+                        })
+                        
+            # Sort by score and return
+            suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+            return suggestions[:limit]
+                    
+        except Exception as e:
+            self.logger.error(f"Error generating category-based suggestions: {e}")
+            return []
+        
+    def _ensure_category_diversity(self, suggestions: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+        """
+        Ensure diversity of categories in suggestions.
+        
+        Args:
+            suggestions: List of suggestions with optional category information
+            limit: Maximum number of suggestions to return
+            
+        Returns:
+            Diversified list of suggestions
+        """
+        if not suggestions or len(suggestions) <= 3:
+            return suggestions
+        
+        # Group suggestions by category
+        categorized = {}
+        uncategorized = []
+        
+        for suggestion in suggestions:
+            # Check if suggestion has category information
+            category = suggestion.get("category", suggestion.get("type", None))
+            
+            if category:
+                if category not in categorized:
+                    categorized[category] = []
+                categorized[category].append(suggestion)
+            else:
+                uncategorized.append(suggestion)
+        
+        # If we have multiple categories, ensure diversity
+        if len(categorized) > 1:
+            result = []
+            remaining = limit
+            
+            # Take top item from each category first
+            for category in sorted(categorized.keys()):
+                if categorized[category] and remaining > 0:
+                    result.append(categorized[category][0])
+                    categorized[category] = categorized[category][1:]
+                    remaining -= 1
+            
+            # Then take second items if we still have room
+            if remaining > 0:
+                for category in sorted(categorized.keys()):
+                    if categorized[category] and remaining > 0:
+                        result.append(categorized[category][0])
+                        categorized[category] = categorized[category][1:]
+                        remaining -= 1
+            
+            # Flatten remaining items
+            remaining_items = []
+            for category in categorized:
+                remaining_items.extend(categorized[category])
+            
+            # Add uncategorized items
+            remaining_items.extend(uncategorized)
+            
+            # Sort by score
+            remaining_items.sort(key=lambda x: x.get("score", 0), reverse=True)
+            
+            # Fill remaining slots
+            result.extend(remaining_items[:remaining])
+            
+            return result
+        
+        # If only one category or none, just return original list limited to limit
+        return suggestions[:limit]
+
+    async def _generate_focus_state_suggestions(self, user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Generate suggestions for focus state (when search bar is focused but empty).
+        
+        Combines:
+        1. User's recent searches
+        2. Popular/trending searches
+        3. Categorized suggestions based on user's search patterns
+        
+        Args:
+            user_id: User identifier for personalized suggestions
+            limit: Maximum number of suggestions to return
+            
+        Returns:
+            List of suggestion dictionaries
+        """
+        all_suggestions = []
+        seen_texts = set()  # For deduplication
+        
+        try:
+            # First get user's recent searches (highest priority)
+            try:
+                from ai_services_api.services.search.core.personalization import get_user_search_history
+                recent_searches = await get_user_search_history(user_id, limit=limit)
+                
+                for i, search_item in enumerate(recent_searches):
+                    query = search_item.get("query", "")
+                    if not query or query.lower() in seen_texts:
+                        continue
+                    
+                    seen_texts.add(query.lower())
+                    all_suggestions.append({
+                        "text": query,
+                        "source": "history",
+                        "score": max(0.3, 0.95 - (i * 0.03)),  # Higher scores for more recent searches
+                        "type": "recent_search",
+                        "timestamp": search_item.get("timestamp")
+                    })
+            except Exception as history_error:
+                self.logger.warning(f"Error getting user search history: {history_error}")
+            
+            # Then get user's previously selected suggestions
+            try:
+                from ai_services_api.services.search.core.personalization import get_selected_suggestions
+                selected_suggestions = await get_selected_suggestions(user_id, limit=limit)
+                
+                for i, suggestion in enumerate(selected_suggestions):
+                    if not suggestion or suggestion.lower() in seen_texts:
+                        continue
+                    
+                    seen_texts.add(suggestion.lower())
+                    all_suggestions.append({
+                        "text": suggestion,
+                        "source": "selected",
+                        "score": max(0.3, 0.9 - (i * 0.03)),  # Slightly lower than recent searches
+                        "type": "selected_suggestion"
+                    })
+            except Exception as selected_error:
+                self.logger.warning(f"Error getting selected suggestions: {selected_error}")
+            
+            # Get trending/popular searches
+            try:
+                from ai_services_api.services.search.core.personalization import get_trending_suggestions
+                trending = await get_trending_suggestions("", limit=limit)
+                
+                for i, trend_item in enumerate(trending):
+                    trend_text = trend_item.get("text", "")
+                    if not trend_text or trend_text.lower() in seen_texts:
+                        continue
+                    
+                    seen_texts.add(trend_text.lower())
+                    all_suggestions.append({
+                        "text": trend_text,
+                        "source": "trending",
+                        "score": max(0.3, 0.85 - (i * 0.03)),  # Lower priority than user's own history
+                        "type": "trending"
+                    })
+            except Exception as trending_error:
+                self.logger.warning(f"Error getting trending suggestions: {trending_error}")
+                
+            # If we have very few suggestions, try to get category-based suggestions
+            if len(all_suggestions) < limit / 2:
+                try:
+                    # Try to determine user's preferred categories from history
+                    category_suggestions = await self._get_category_based_suggestions(user_id, limit)
+                    
+                    for suggestion in category_suggestions:
+                        if suggestion["text"].lower() not in seen_texts:
+                            seen_texts.add(suggestion["text"].lower())
+                            all_suggestions.append(suggestion)
+                except Exception as category_error:
+                    self.logger.warning(f"Error getting category suggestions: {category_error}")
+            
+            # Sort all suggestions by score
+            all_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+            
+            # Try to ensure diversity by category if we have category info
+            categorized_results = self._ensure_category_diversity(all_suggestions, limit)
+            
+            # Return final suggestions
+            return categorized_results if categorized_results else all_suggestions[:limit]
+            
+        except Exception as e:
+            self.logger.error(f"Error in focus state suggestions: {e}")
+            # Return whatever suggestions we managed to gather
+            return all_suggestions[:limit]
+
+    async def predict(self, partial_query: str, limit: int = 10, user_id: str = None, is_focus_state: bool = False) -> List[Dict[str, Any]]:
         """
         Generate search suggestions with optimized parallel processing, 
         database-driven suggestion generation, and adaptive response strategies.
@@ -964,17 +1379,34 @@ class GoogleAutocompletePredictor:
             partial_query: The partial query to get suggestions for
             limit: Maximum number of suggestions to return
             user_id: Optional user ID for personalized suggestions
+            is_focus_state: Whether the search bar is in focus state (but empty)
             
         Returns:
             List of dictionaries containing suggestion text and metadata
         """
+        # Track performance metrics
+        start_time = time.time()
+        self.metrics["total_requests"] += 1
+        
+        # Handle focus state (empty search, just focused) - new functionality
+        if is_focus_state and not partial_query and user_id:
+            try:
+                focus_suggestions = await self._generate_focus_state_suggestions(user_id, limit)
+                processing_time = time.time() - start_time
+                self._update_latency_metric(processing_time)
+                self.logger.info(
+                    f"Generated {len(focus_suggestions)} focus-state suggestions for user {user_id} ({processing_time:.3f}s)"
+                )
+                return focus_suggestions
+            except Exception as e:
+                self.logger.error(f"Error generating focus-state suggestions: {e}")
+                # Fall through to standard prediction logic if focus suggestions fail
+
+        # Original logic for when user is typing something
         if not partial_query:
             return []
         
-        # Track performance metrics
-        start_time = time.time()
         normalized_query = self._normalize_text(partial_query)
-        self.metrics["total_requests"] += 1
         
         # For very short queries, limit processing to improve responsiveness
         is_short_query = len(normalized_query) <= 2
@@ -2079,10 +2511,804 @@ class GoogleAutocompletePredictor:
         
         return query_prefix.strip(), partial_word.strip()
 
+    async def _personalize_suggestions_async(self, suggestions, user_id, query):
+        """
+        Enhanced personalization with category awareness and weighted history.
+        
+        Args:
+            suggestions: List of suggestion dictionaries
+            user_id: User identifier
+            query: Current partial query
+            
+        Returns:
+            List of personalized suggestions
+        """
+        try:
+            from ai_services_api.services.search.core.personalization import get_user_search_history, personalize_suggestions
+            
+            # Get user's search history
+            history = await get_user_search_history(user_id, limit=50)
+            
+            # Extract search terms and categories from history with weighting
+            term_weights = {}
+            category_weights = {}
+            
+            # Get current time for temporal weighting
+            current_time = datetime.now()
+            
+            # Process history items with temporal decay
+            for item in history:
+                query_text = item.get("query", "").lower()
+                timestamp_str = item.get("timestamp")
+                category = item.get("category", "general")
+                
+                # Calculate recency weight based on timestamp
+                recency_weight = 1.0  # Default weight
+                if timestamp_str:
+                    try:
+                        timestamp = datetime.fromisoformat(timestamp_str)
+                        # Calculate days difference
+                        days_diff = (current_time - timestamp).days
+                        # Apply exponential decay: weight = exp(-days/30)
+                        recency_weight = math.exp(-days_diff/30)
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Split into words and apply weighted counting
+                words = query_text.split()
+                for word in words:
+                    if len(word) >= 3:  # Only consider significant words
+                        current_weight = term_weights.get(word, 0)
+                        # Add recency-weighted value
+                        term_weights[word] = current_weight + recency_weight
+                
+                # Update category weights
+                current_cat_weight = category_weights.get(category, 0)
+                category_weights[category] = current_cat_weight + recency_weight
+            
+            # Get user's selection history for direct matching
+            from ai_services_api.services.search.core.personalization import get_selection_history
+            selection_history = await get_selection_history(user_id, limit=20)
+            
+            # Extract selected suggestions with weights
+            selection_weights = {}
+            for item in selection_history:
+                selection = item.get("selection", "").lower()
+                timestamp_str = item.get("timestamp")
+                
+                if not selection:
+                    continue
+                    
+                # Calculate recency weight
+                recency_weight = 1.0
+                if timestamp_str:
+                    try:
+                        timestamp = datetime.fromisoformat(timestamp_str)
+                        days_diff = (current_time - timestamp).days
+                        recency_weight = math.exp(-days_diff/14)  # 14-day half-life
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Update selection weight
+                current_weight = selection_weights.get(selection, 0)
+                selection_weights[selection] = current_weight + recency_weight
+            
+            # Try to get category for current query
+            query_category = "general"
+            try:
+                # Import search categorizer
+                from ai_services_api.services.search.app.endpoints.process_functions import get_search_categorizer
+                
+                # Get categorizer
+                categorizer = await get_search_categorizer()
+                
+                # Get category for current query
+                if categorizer and query:
+                    category_info = await categorizer.categorize_query(query, user_id)
+                    query_category = category_info.get("category", "general")
+            except Exception as e:
+                self.logger.warning(f"Error getting query category: {e}")
+            
+            # Apply personalization boosting to suggestions
+            personalized_suggestions = []
+            for suggestion in suggestions:
+                text = suggestion.get("text", "").lower()
+                base_score = suggestion.get("score", 0.5)
+                
+                # Try to get suggestion category
+                suggestion_category = suggestion.get("category", query_category)
+                
+                # Calculate term frequency boost
+                term_boost = 0.0
+                for term, weight in term_weights.items():
+                    if term in text:
+                        # Apply diminishing returns
+                        term_boost += min(0.15, math.sqrt(weight) * 0.05)
+                
+                # Calculate category boost
+                category_boost = 0.0
+                if suggestion_category in category_weights:
+                    category_weight = category_weights[suggestion_category]
+                    category_boost = min(0.2, math.sqrt(category_weight) * 0.07)
+                
+                # Calculate direct selection boost
+                selection_boost = 0.0
+                if text in selection_weights:
+                    selection_boost = min(0.25, selection_weights[text] * 0.1)
+                
+                # Calculate query similarity boost
+                similarity_boost = 0.0
+                if query:
+                    similarity = self._text_similarity(query, text)
+                    similarity_boost = similarity * 0.1
+                
+                # Apply all boosts
+                personalized_score = min(
+                    1.0, 
+                    base_score + term_boost + category_boost + selection_boost + similarity_boost
+                )
+                
+                personalized_suggestion = suggestion.copy()
+                personalized_suggestion["score"] = personalized_score
+                personalized_suggestion["personalized"] = True
+                
+                # Add debug info if in debug mode
+                if self.logger.level <= logging.DEBUG:
+                    personalized_suggestion["_personalization_factors"] = {
+                        "base_score": base_score,
+                        "term_boost": term_boost,
+                        "category_boost": category_boost,
+                        "selection_boost": selection_boost,
+                        "similarity_boost": similarity_boost
+                    }
+                
+                personalized_suggestions.append(personalized_suggestion)
+            
+            # Sort by personalized score
+            personalized_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+            
+            return personalized_suggestions
+            
+        except Exception as e:
+            self.logger.error(f"Error in async personalization: {e}")
+            return suggestions  # Return original suggestions if personalization fails
+    
+    async def track_selection(self, partial_query: str, selected_suggestion: str, user_id: str = None, category: str = None):
+        """
+        Track which suggestion was selected to improve future predictions.
+        Enhanced with category tracking for better personalization.
+        
+        Args:
+            partial_query: The partial query that was typed
+            selected_suggestion: The suggestion that was selected
+            user_id: Optional user identifier for personalization
+            category: Optional category of the selected suggestion
+        """
+        try:
+            # Try to get category if not provided
+            if not category and selected_suggestion:
+                try:
+                    # Import search categorizer
+                    from ai_services_api.services.search.app.endpoints.process_functions import get_search_categorizer
+                    
+                    # Get categorizer
+                    categorizer = await get_search_categorizer()
+                    
+                    # Get category
+                    if categorizer:
+                        category_info = await categorizer.categorize_query(selected_suggestion, user_id)
+                        category = category_info.get("category", "general")
+                except Exception as e:
+                    self.logger.warning(f"Error getting category: {e}")
+                    # Default category
+                    category = "general"
+            
+            # First, update local trie if it exists
+            if hasattr(self, 'suggestion_trie'):
+                self.suggestion_trie.insert(selected_suggestion, frequency=2, timestamp=time.time())
+            
+            # Then, update Redis statistics if available
+            if self.redis_client:
+                try:
+                    # Increment selection counter
+                    selection_key = f"selection:{selected_suggestion.lower()}"
+                    self.redis_client.zincrby("suggestion_selections", 1, selection_key)
+                    
+                    # Update query-specific selections
+                    if partial_query:
+                        query_key = f"query_selections:{partial_query.lower()}"
+                        self.redis_client.zincrby(query_key, 1, selected_suggestion.lower())
+                        self.redis_client.expire(query_key, 86400 * 7)  # 1 week expiry
+                    
+                    # Add to trending suggestions with timestamp
+                    current_hour = int(time.time() / 3600)
+                    trending_key = f"trending:{current_hour}"
+                    self.redis_client.zincrby(trending_key, 1, selected_suggestion.lower())
+                    self.redis_client.expire(trending_key, 86400)  # 24 hour expiry
+                    
+                    # Track by category if available
+                    if category:
+                        category_trending_key = f"trending_category:{category}"
+                        self.redis_client.zincrby(category_trending_key, 1, selected_suggestion.lower())
+                        self.redis_client.expire(category_trending_key, 86400 * 7)  # 7 day expiry
+                except Exception as redis_error:
+                    self.logger.warning(f"Redis tracking error: {redis_error}")
+            
+            # Record in database asynchronously if function exists
+            try:
+                from ai_services_api.services.search.core.personalization import track_selected_suggestion
+                if user_id:
+                    # Enhanced tracking with category
+                    asyncio.create_task(track_selected_suggestion(
+                        user_id, 
+                        partial_query, 
+                        selected_suggestion, 
+                        category
+                    ))
+            except ImportError:
+                # If the function doesn't exist, log selection locally
+                if not hasattr(self, '_selection_log'):
+                    self._selection_log = []
+                self._selection_log.append({
+                    'user_id': user_id,
+                    'query': partial_query,
+                    'selection': selected_suggestion,
+                    'category': category,
+                    'timestamp': time.time()
+                })
+                # Limit log size
+                if len(self._selection_log) > 1000:
+                    self._selection_log = self._selection_log[-1000:]
+            
+            self.logger.info(f"Tracked selection: '{selected_suggestion}' (category: {category}) for query '{partial_query}'")
+        except Exception as e:
+            self.logger.error(f"Error tracking selection: {e}")
+
+    def _calculate_lexical_match_score(self, query: str, text: str) -> float:
+        """
+        Calculate lexical match score for boosting hybrid search results.
+        
+        Args:
+            query: User's query
+            text: Text to match against
+            
+        Returns:
+            Lexical match score (0 to 1)
+        """
+        if not query or not text:
+            return 0.0
+        
+        # Normalize inputs
+        query_lower = query.lower()
+        text_lower = text.lower()
+        
+        # Check for exact match (highest boost)
+        if query_lower == text_lower:
+            return 1.0
+        
+        # Check for prefix match (high boost)
+        if text_lower.startswith(query_lower):
+            return 0.8
+        
+        # Check for word prefix match (medium boost)
+        words = text_lower.split()
+        for word in words:
+            if word.startswith(query_lower):
+                return 0.6
+        
+        # Check for contains match (lower boost)
+        if query_lower in text_lower:
+            # Check if it's at a word boundary for higher boost
+            for word in words:
+                if query_lower in word:
+                    return 0.4
+            return 0.3
+        
+        # Check for fuzzy prefix match (lowest boost)
+        # Only for queries longer than 3 characters
+        if len(query_lower) >= 3:
+            for word in words:
+                if len(word) >= 3 and self._calculate_prefix_similarity(query_lower, word[:len(query_lower)]) > 0.7:
+                    return 0.2
+        
+        return 0.0
+
+    async def _execute_hybrid_faiss_search(
+        self, 
+        partial_query: str, 
+        embedding: np.ndarray, 
+        top_k: int = 20, 
+        min_score: float = 0.1
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute a hybrid search strategy combining semantic and lexical matching.
+        
+        This approach:
+        1. Uses FAISS for semantic similarity
+        2. Applies lexical filtering for prefix/exact matches
+        3. Combines results with intelligent ranking
+        
+        Args:
+            partial_query: User's partial query
+            embedding: Query embedding for semantic search
+            top_k: Maximum number of results to return
+            min_score: Minimum score threshold
+            
+        Returns:
+            List of search results with scores
+        """
+        if not self.index or not self.id_mapping or embedding is None:
+            return []
+        
+        try:
+            # Start with semantic search
+            semantic_results = await asyncio.to_thread(
+                self._execute_faiss_search_with_tuning,
+                embedding,
+                top_k * 2,  # Get more results for better hybrid filtering
+                partial_query
+            )
+            
+            if not semantic_results:
+                return []
+            
+            # Convert to dictionary for easier lookup
+            semantic_map = {
+                self.id_mapping[idx]: {
+                    "score": 1.0 - min(1.0, float(score)),  # Convert distance to similarity
+                    "rank": i
+                }
+                for i, (idx, score) in enumerate(semantic_results)
+                if idx >= 0 and idx < len(self.id_mapping)
+            }
+            
+            # Now get expert data for all matching IDs
+            results = []
+            
+            for expert_id in semantic_map:
+                try:
+                    # Get expert data from Redis
+                    expert_data = self.redis_binary.hgetall(f"expert:{expert_id}")
+                    
+                    if not expert_data:
+                        continue
+                        
+                    metadata = json.loads(expert_data[b'metadata'].decode())
+                    
+                    # Base score from semantic similarity
+                    base_score = semantic_map[expert_id]["score"]
+                    
+                    # Prepare text for lexical matching
+                    full_name = ""
+                    if 'first_name' in metadata and 'last_name' in metadata:
+                        full_name = f"{metadata.get('first_name', '')} {metadata.get('last_name', '')}".strip()
+                    
+                    designation = metadata.get('designation', '')
+                    theme = metadata.get('theme', '')
+                    search_text = full_name + " " + designation + " " + theme
+                    
+                    # Apply lexical matching boost
+                    lexical_boost = self._calculate_lexical_match_score(
+                        partial_query,
+                        search_text
+                    )
+                    
+                    # Combined score with lexical boost
+                    final_score = base_score * (1.0 + lexical_boost)
+                    
+                    # Add to results if above threshold
+                    if final_score >= min_score:
+                        results.append({
+                            "id": expert_id,
+                            "score": final_score,
+                            "semantic_score": base_score,
+                            "lexical_boost": lexical_boost,
+                            "original_rank": semantic_map[expert_id]["rank"],
+                            **metadata
+                        })
+                
+                except Exception as e:
+                    self.logger.error(f"Error processing expert {expert_id}: {e}")
+                    continue
+            
+            # Sort by final score
+            results.sort(key=lambda x: x.get("score", 0), reverse=True)
+            
+            return results[:top_k]
+        
+        except Exception as e:
+            self.logger.error(f"Error in hybrid FAISS search: {e}")
+            return []
+    
+    async def _get_user_selection_weights(self, user_id: str) -> Dict[str, float]:
+        """
+        Get weights for user's previously selected suggestions.
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            Dictionary mapping suggestion text to weight
+        """
+        try:
+            weights = {}
+            
+            # Try to get user's selected suggestions
+            try:
+                from ai_services_api.services.search.core.personalization import get_selection_history
+                selection_history = await get_selection_history(user_id, limit=50)
+                
+                # Process selection history
+                current_time = time.time()
+                for item in selection_history:
+                    suggestion = item.get("selection", "").lower()
+                    timestamp = item.get("timestamp")
+                    
+                    if not suggestion:
+                        continue
+                    
+                    # Calculate base weight
+                    current_weight = weights.get(suggestion, 0.0)
+                    
+                    # Apply recency weighting if timestamp available
+                    recency_factor = 1.0
+                    if timestamp:
+                        try:
+                            # Parse timestamp
+                            if isinstance(timestamp, str):
+                                timestamp = datetime.fromisoformat(timestamp)
+                                # Convert to Unix timestamp
+                                timestamp = timestamp.timestamp()
+                            else:
+                                timestamp = float(timestamp)
+                                
+                            # Calculate age in days
+                            age_days = (current_time - timestamp) / (24 * 3600)
+                            
+                            # Apply exponential decay
+                            recency_factor = math.exp(-age_days / 14)  # 14-day half-life
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    # Update weight with recency factor
+                    weights[suggestion] = current_weight + (0.2 * recency_factor)
+            except Exception as e:
+                self.logger.warning(f"Error getting selection history: {e}")
+                
+                # Fall back to local selection log if available
+                if hasattr(self, '_selection_log'):
+                    for entry in self._selection_log:
+                        if entry.get('user_id') == user_id:
+                            suggestion = entry.get('selection', '').lower()
+                            if suggestion:
+                                weights[suggestion] = weights.get(suggestion, 0.0) + 0.1
+            
+            return weights
+            
+        except Exception as e:
+            self.logger.error(f"Error getting user selection weights: {e}")
+            return {}
+    
+    async def _hybrid_rank_suggestions(
+        self, suggestions: List[Dict[str, Any]], 
+        query: str, 
+        user_id: str = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Apply hybrid ranking to suggestions using multiple sophisticated factors.
+        
+        Args:
+            suggestions: List of suggestion dictionaries
+            query: Original query for relevance calculation
+            user_id: Optional user ID for personalization
+            
+        Returns:
+            Ranked list of suggestion dictionaries
+        """
+        if not suggestions:
+            return []
+        
+        # Normalize query for comparison
+        query_lower = query.lower() if query else ""
+        query_terms = set(query_lower.split()) if query_lower else set()
+        
+        # Prepare for TF-IDF style scoring
+        # Get document frequency information (how common each term is)
+        term_frequencies = {}
+        
+        # First pass: collect term frequencies across all suggestions
+        all_terms = set()
+        for suggestion in suggestions:
+            text = suggestion.get("text", "").lower()
+            terms = set(text.split())
+            all_terms.update(terms)
+            
+            # Count term occurrences
+            for term in terms:
+                term_frequencies[term] = term_frequencies.get(term, 0) + 1
+        
+        # Calculate inverse document frequency (IDF) for each term
+        total_docs = len(suggestions)
+        term_idf = {}
+        for term in all_terms:
+            # IDF = log(total_docs / term_doc_count)
+            term_idf[term] = math.log(total_docs / term_frequencies.get(term, 1)) 
+        
+        # Try to get personalization data for this user
+        user_selection_weights = {}
+        user_category_weights = {}
+        
+        if user_id:
+            try:
+                # Try to get user's selection history
+                user_selection_weights = await self._get_user_selection_weights(user_id)
+                
+                # Try to get user's category preferences
+                preferred_categories = await self._identify_user_preferred_categories(user_id)
+                user_category_weights = {cat: weight for cat, weight in preferred_categories}
+                
+            except Exception as personalize_error:
+                self.logger.warning(f"Error getting personalization data: {personalize_error}")
+        
+        # Second pass: calculate ranking scores
+        ranked_suggestions = []
+        
+        for suggestion in suggestions:
+            text = suggestion.get("text", "").lower()
+            base_score = suggestion.get("score", 0.5)
+            source = suggestion.get("source", "unknown")
+            suggestion_category = suggestion.get("category", "general")
+            suggestion_terms = text.split()
+            
+            # 1. Calculate TF-IDF relevance score
+            tfidf_score = 0.0
+            for term in query_terms:
+                if term in suggestion_terms:
+                    # Term frequency in this suggestion
+                    tf = suggestion_terms.count(term) / len(suggestion_terms)
+                    # IDF value
+                    idf = term_idf.get(term, 0.0)
+                    # Add to score
+                    tfidf_score += tf * idf
+            
+            # Normalize TF-IDF score to [0, 1] range
+            max_possible_tfidf = sum([term_idf.get(term, 0.0) for term in query_terms]) if query_terms else 1.0
+            tfidf_score = tfidf_score / max_possible_tfidf if max_possible_tfidf > 0 else 0.0
+            
+            # 2. Calculate exact, prefix, and substring matching scores
+            exact_match_score = 1.0 if text == query_lower else 0.0
+            prefix_match_score = 0.8 if text.startswith(query_lower) else 0.0
+            
+            # More nuanced substring matching - check if query is a whole word in suggestion
+            substring_match_score = 0.0
+            if query_lower in text:
+                # Check if it's a whole word match
+                word_boundaries = [''] + [' '] * len(text.split())
+                if query_lower in [' '.join(suggestion_terms[i:i+len(query_terms)]) 
+                                for i in range(len(suggestion_terms) - len(query_terms) + 1)]:
+                    substring_match_score = 0.6
+                else:
+                    # Partial word match
+                    substring_match_score = 0.3
+            
+            # 3. Calculate semantic similarity (if query is non-trivial)
+            semantic_score = 0.0
+            if query and len(query) > 2:
+                try:
+                    # Use precalculated semantic score if available
+                    semantic_score = suggestion.get("semantic_score", 0.0)
+                    
+                    # If not available, estimate based on word overlap
+                    if semantic_score == 0.0 and query_terms:
+                        overlap = len(query_terms.intersection(set(suggestion_terms)))
+                        semantic_score = overlap / max(len(query_terms), 1)
+                except Exception as sem_error:
+                    self.logger.debug(f"Error calculating semantic score: {sem_error}")
+            
+            # 4. Apply source-based priority adjustments
+            source_priority = {
+                "user_history": 1.3,   # User's own history gets highest priority
+                "selected": 1.25,      # Previously selected suggestions
+                "trending": 1.2,       # Trending searches
+                "gemini": 1.15,        # Gemini-generated suggestions
+                "faiss": 1.1,          # FAISS-based suggestions
+                "db_history": 1.05,    # Database history
+                "trie": 1.05,          # Trie-based suggestions
+                "pattern": 0.95,       # Pattern-based
+                "fallback": 0.9        # Fallback suggestions
+            }.get(source, 1.0)
+            
+            # 5. Apply personalization boost based on user selection history
+            personalization_boost = 1.0
+            if user_id:
+                # Check user's selection history for this specific suggestion
+                selection_weight = user_selection_weights.get(text, 0.0)
+                personalization_boost += min(0.3, selection_weight)
+                
+                # Apply category preference boost
+                category_weight = user_category_weights.get(suggestion_category, 0.0)
+                personalization_boost += min(0.2, category_weight / 2)
+            
+            # 6. Apply length normalization (slightly prefer shorter suggestions)
+            length_penalty = max(0.0, min(0.2, (len(text.split()) - 3) * 0.05))
+            
+            # 7. Apply recency boost if timestamp available
+            recency_boost = 1.0
+            if 'timestamp' in suggestion:
+                try:
+                    timestamp = suggestion['timestamp']
+                    if timestamp:
+                        # Parse timestamp to get age in days
+                        if isinstance(timestamp, str):
+                            timestamp = datetime.fromisoformat(timestamp)
+                            age_days = (datetime.now() - timestamp).days
+                        else:
+                            current_time = time.time()
+                            age_days = (current_time - timestamp) / (24 * 3600)
+                        
+                        # Apply exponential decay
+                        recency_boost = 1.0 + (0.2 * math.exp(-age_days / 7))  # 7-day half-life
+                except (ValueError, TypeError) as e:
+                    pass
+            
+            # Calculate final score with appropriate weights
+            final_score = (
+                base_score * 0.25 +                 # Base relevance score (25%)
+                tfidf_score * 0.15 +                # TF-IDF relevance (15%)
+                exact_match_score * 0.15 +          # Exact match bonus (15%)
+                prefix_match_score * 0.15 +         # Prefix match (15%)
+                substring_match_score * 0.05 +      # Contains query (5%)
+                semantic_score * 0.05 +             # Semantic similarity (5%)
+                (source_priority - 0.8) * 0.1       # Source priority (10%)
+            ) * personalization_boost * recency_boost - length_penalty
+            
+            # Ensure score is in [0, 1] range
+            final_score = max(0.0, min(1.0, final_score))
+            
+            # Create a copy with updated score
+            ranked_suggestion = suggestion.copy()
+            ranked_suggestion["score"] = final_score
+            ranked_suggestion["original_score"] = base_score
+            
+            # Add additional ranking factors for debugging/analysis
+            if self.logger.level <= logging.DEBUG:
+                ranked_suggestion["_ranking_factors"] = {
+                    "base_score": base_score,
+                    "tfidf_score": tfidf_score,
+                    "exact_match": exact_match_score,
+                    "prefix_match": prefix_match_score,
+                    "substring_match": substring_match_score,
+                    "semantic_score": semantic_score,
+                    "source_priority": source_priority,
+                    "personalization_boost": personalization_boost,
+                    "recency_boost": recency_boost,
+                    "length_penalty": length_penalty
+                }
+            
+            ranked_suggestions.append(ranked_suggestion)
+        
+        # Sort by final score
+        ranked_suggestions.sort(key=lambda x: x.get("score", 0), reverse=True)
+        
+        # Apply diversity to ensure top results aren't all the same
+        return self._ensure_diversity(ranked_suggestions)
+
+    def _calculate_prefix_similarity(self, prefix: str, word_start: str) -> float:
+        """
+        Calculate similarity specifically for prefix matching.
+        Optimized for comparing the beginning of words.
+        
+        Args:
+            prefix: The prefix being typed by the user
+            word_start: The beginning of a word to compare against
+            
+        Returns:
+            Similarity score between 0-1 (1 being identical)
+        """
+        if not prefix or not word_start:
+            return 0.0
+            
+        # Normalize inputs
+        prefix = prefix.lower()
+        word_start = word_start.lower()
+        
+        # Exact match is best
+        if prefix == word_start:
+            return 1.0
+        
+        # If first character doesn't match, it's likely not a good prefix match
+        if prefix[0] != word_start[0]:
+            return 0.1
+        
+        # Count matching characters at the beginning
+        match_length = 0
+        for i in range(min(len(prefix), len(word_start))):
+            if prefix[i] == word_start[i]:
+                match_length += 1
+            else:
+                break
+        
+        # Calculate match percentage based on prefix length
+        match_percentage = match_length / len(prefix)
+        
+        # Additional penalty for each mismatched character
+        mismatch_count = abs(len(prefix) - match_length)
+        mismatch_penalty = 0.1 * mismatch_count
+        
+        # Calculate final similarity score
+        similarity = match_percentage - mismatch_penalty
+        
+        # Ensure the score is within [0, 1]
+        return max(0.0, min(1.0, similarity))
+
+    def _calculate_word_similarity(self, word1: str, word2: str) -> float:
+        """
+        Calculate similarity between two words for fuzzy matching.
+        Uses a combination of character overlap and edit distance.
+        
+        Args:
+            word1: First word
+            word2: Second word
+            
+        Returns:
+            Similarity score between 0-1 (1 being identical)
+        """
+        if not word1 or not word2:
+            return 0.0
+            
+        # Normalize both words
+        word1 = word1.lower()
+        word2 = word2.lower()
+        
+        # If words are identical, return 1.0
+        if word1 == word2:
+            return 1.0
+            
+        # If length difference is too large, they're probably not similar
+        if abs(len(word1) - len(word2)) > max(3, min(len(word1), len(word2)) // 2):
+            return 0.0
+        
+        # Calculate character overlap ratio
+        chars1 = set(word1)
+        chars2 = set(word2)
+        overlap = len(chars1.intersection(chars2))
+        union = len(chars1.union(chars2))
+        
+        char_similarity = overlap / union if union > 0 else 0
+        
+        # Calculate edit distance-based similarity
+        max_distance = max(len(word1), len(word2))
+        
+        # Simple Levenshtein distance calculation
+        # Initialize matrix of size (len(word1)+1) x (len(word2)+1)
+        distance = [[0 for _ in range(len(word2) + 1)] for _ in range(len(word1) + 1)]
+        
+        # Fill the first row and column
+        for i in range(len(word1) + 1):
+            distance[i][0] = i
+        for j in range(len(word2) + 1):
+            distance[0][j] = j
+        
+        # Fill the rest of the matrix
+        for i in range(1, len(word1) + 1):
+            for j in range(1, len(word2) + 1):
+                cost = 0 if word1[i-1] == word2[j-1] else 1
+                distance[i][j] = min(
+                    distance[i-1][j] + 1,      # deletion
+                    distance[i][j-1] + 1,      # insertion
+                    distance[i-1][j-1] + cost  # substitution
+                )
+        
+        # Calculate edit distance similarity (1 - normalized distance)
+        edit_similarity = 1 - (distance[len(word1)][len(word2)] / max_distance)
+        
+        # Combine the two measures (weighted toward edit distance)
+        return (edit_similarity * 0.7) + (char_similarity * 0.3)
+
     def _is_prefix_match(self, suggestion: str, partial_query: str) -> bool:
         """
-        Check if suggestion matches the partial query with proper prefix matching
-        and typo tolerance.
+        Enhanced check if suggestion matches the partial query with proper 
+        prefix matching and improved typo tolerance.
         
         Args:
             suggestion: The suggestion text to check
@@ -2091,45 +3317,95 @@ class GoogleAutocompletePredictor:
         Returns:
             Boolean indicating if the suggestion is a valid prefix match
         """
-        # Get the query prefix and the partial word being typed
-        query_prefix, partial_word = self._extract_partial_word(partial_query)
+        # Handle empty inputs
+        if not partial_query:
+            return True
+            
+        if not suggestion:
+            return False
         
-        # If the partial word is empty, any suggestion is valid
-        if not partial_word:
+        # Normalize inputs
+        suggestion_lower = suggestion.lower()
+        partial_query_lower = partial_query.lower()
+        
+        # Case 1: Direct prefix match (most common case, handle first for performance)
+        if suggestion_lower.startswith(partial_query_lower):
             return True
         
-        # Extract words from the suggestion
-        suggestion_words = suggestion.lower().split()
+        # Get the query prefix and the partial word being typed
+        query_words = partial_query_lower.split()
+        suggestion_words = suggestion_lower.split()
         
-        # If query has a prefix (multiple words), make sure they match in the suggestion
-        if query_prefix:
-            # Create a prefix pattern to match
-            prefix_pattern = query_prefix.lower()
-            suggestion_prefix = " ".join(suggestion_words[:len(prefix_pattern.split())])
+        # Case 2: Multi-word query where all but last word match exactly
+        if len(query_words) > 1:
+            # Check if all complete words match exactly
+            prefix_words = query_words[:-1]  # All but last word
+            last_word = query_words[-1]      # Last (possibly partial) word
             
-            # If the prefix doesn't match, reject the suggestion
-            # Allow for typo tolerance in longer prefixes
-            if len(prefix_pattern) > 5:
-                # For longer prefixes, use edit distance
-                if not self._fuzzy_match(suggestion_prefix, prefix_pattern, max_distance=1):
+            # First check if the number of words is sufficient
+            if len(suggestion_words) < len(prefix_words):
+                return False
+                
+            # Check if all complete words match
+            for i, word in enumerate(prefix_words):
+                if i >= len(suggestion_words) or word != suggestion_words[i]:
+                    # Try fuzzy matching for longer words
+                    if len(word) > 3 and self._calculate_word_similarity(word, suggestion_words[i]) > 0.7:
+                        continue
                     return False
-            else:
-                # For shorter prefixes, require exact match
-                if not suggestion_prefix.startswith(prefix_pattern):
-                    return False
-        
-        # Find the word in the suggestion that should complete the partial word
-        # This handles cases where suggestion might have a different word structure
-        for suggestion_word in suggestion_words:
-            # Check exact prefix match first (most common case)
-            if suggestion_word.startswith(partial_word.lower()):
+            
+            # If we get here, all prefix words match, now check last partial word
+            remaining_idx = len(prefix_words)
+            
+            # Try to match the last word as a prefix to the corresponding word
+            if remaining_idx < len(suggestion_words) and suggestion_words[remaining_idx].startswith(last_word):
                 return True
                 
-            # For longer partial words (>3 chars), allow for typo tolerance
-            if len(partial_word) >= 3 and self._fuzzy_match(suggestion_word, partial_word, max_distance=1):
+            # Allow for word boundary errors by checking if the last word is a prefix
+            # of the combined remaining words in the suggestion
+            remaining_suggestion = ' '.join(suggestion_words[remaining_idx:])
+            if remaining_suggestion.startswith(last_word):
                 return True
+                
+            # For longer last words (3+ chars), allow fuzzy prefix matching
+            if len(last_word) >= 3:
+                for i in range(remaining_idx, len(suggestion_words)):
+                    # Check if this word might be what user is starting to type with a typo
+                    if len(suggestion_words[i]) >= len(last_word) and self._calculate_prefix_similarity(
+                        last_word, suggestion_words[i][:len(last_word)]
+                    ) > 0.7:
+                        return True
         
-        # No matching prefix found
+        # Case 3: Single word query with typo tolerance
+        else:
+            single_word = partial_query_lower
+            
+            # For short queries (1-2 chars), require exact prefix match
+            if len(single_word) <= 2:
+                for word in suggestion_words:
+                    if word.startswith(single_word):
+                        return True
+            # For longer queries, allow fuzzy matching with longer words
+            else:
+                for word in suggestion_words:
+                    # Exact prefix match
+                    if word.startswith(single_word):
+                        return True
+                        
+                    # Fuzzy prefix match for longer words
+                    if len(word) > 3 and len(single_word) > 2:
+                        # Check similarity between the query and the same-length prefix of this word
+                        prefix = word[:min(len(word), len(single_word))]
+                        if self._calculate_word_similarity(single_word, prefix) > 0.7:
+                            return True
+        
+        # Case 4: Check if query might be in the middle of a word (less common)
+        # Only do this for queries of 3+ chars to avoid false positives
+        if len(partial_query_lower) >= 3:
+            for word in suggestion_words:
+                if len(word) > len(partial_query_lower) and partial_query_lower in word:
+                    return True
+        
         return False
 
 

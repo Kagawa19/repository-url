@@ -27,6 +27,44 @@ _predictor = None
 # Global Redis instance
 _redis = None
 
+# In ai_services_api/services/search/app/endpoints/process_functions.py
+
+# Initialize global categorizer instance
+_categorizer = None
+
+async def get_search_categorizer():
+    """
+    Get or create a singleton instance of the SearchCategorizer.
+    
+    Returns:
+        SearchCategorizer instance or None if not available
+    """
+    global _categorizer
+    
+    if _categorizer is None:
+        try:
+            # Get Redis client for caching
+            redis_client = await get_redis()
+            
+            # Import the SearchCategorizer
+            from ai_services_api.services.search.gemini.search_categorizer import SearchCategorizer
+            
+            # Create categorizer instance
+            _categorizer = SearchCategorizer(redis_client=redis_client)
+            
+            # Start background worker
+            await _categorizer.start_background_worker()
+            
+            logger.info("Search categorizer initialized successfully")
+        except ImportError:
+            logger.warning("SearchCategorizer module not available")
+            return None
+        except Exception as e:
+            logger.error(f"Error initializing search categorizer: {e}")
+            return None
+    
+    return _categorizer
+
 
 
 
@@ -711,7 +749,7 @@ async def process_advanced_query_prediction(
 ) -> PredictionResponse:
     """
     Process advanced query prediction with context-specific suggestions using FAISS indexes.
-    Enhanced to support dynamic filtering and initial suggestions.
+    Enhanced with automatic categorization support.
     
     Args:
         partial_query: Partial query to predict (may be empty string for initial suggestions)
@@ -720,7 +758,7 @@ async def process_advanced_query_prediction(
         limit: Maximum number of predictions
     
     Returns:
-        PredictionResponse with dynamically filtered predictions
+        PredictionResponse with dynamically filtered predictions and category information
     """
     logger.info(f"Processing advanced query prediction - Query: '{partial_query}', Context: {context}")
     
@@ -730,6 +768,9 @@ async def process_advanced_query_prediction(
         if context and context not in valid_contexts[:-1]:
             raise ValueError(f"Invalid context. Must be one of {', '.join(valid_contexts[:-1])}")
         
+        # Initialize the categorizer singleton if needed
+        categorizer = await get_search_categorizer()
+        
         conn = None
         session_id = str(uuid.uuid4())[:8]
         redis = await get_redis()
@@ -737,6 +778,7 @@ async def process_advanced_query_prediction(
         # Initialize empty prediction lists
         predictions = []
         confidence_scores = []
+        category_info = {}
         
         # Different handling based on whether we have input or not
         if not partial_query:
@@ -759,28 +801,52 @@ async def process_advanced_query_prediction(
                 # Add history with source tag
                 for query in history_queries:
                     if query and query.strip():
+                        # Get category info for this history item
+                        if categorizer:
+                            item_category = await categorizer.categorize_query(query, user_id)
+                            category = item_category.get("category", "general")
+                        else:
+                            category = "general"
+                            
                         all_suggestions.append({
                             "text": query,
                             "source": "history",
-                            "score": 0.9  # High score for history items
+                            "score": 0.9,  # High score for history items
+                            "category": category
                         })
                 
                 # Add selected suggestions with source tag
                 for suggestion in selected_suggestions:
                     if suggestion and suggestion.strip() and suggestion not in history_queries:
+                        # Get category for this suggestion
+                        if categorizer:
+                            item_category = await categorizer.categorize_query(suggestion, user_id)
+                            category = item_category.get("category", "general")
+                        else:
+                            category = "general"
+                            
                         all_suggestions.append({
                             "text": suggestion,
                             "source": "selected",
-                            "score": 0.95  # Higher score for explicitly selected items
+                            "score": 0.95,  # Higher score for explicitly selected items
+                            "category": category
                         })
                 
                 # Add trending with source tag
                 for query in trending_queries:
                     if query and query.strip() and query not in history_queries and query not in selected_suggestions:
+                        # Get category for this trending item
+                        if categorizer:
+                            item_category = await categorizer.categorize_query(query)
+                            category = item_category.get("category", "general")
+                        else:
+                            category = "general"
+                            
                         all_suggestions.append({
                             "text": query,
                             "source": "trending",
-                            "score": 0.8  # Slightly lower score for trending
+                            "score": 0.8,  # Slightly lower score for trending
+                            "category": category
                         })
                 
                 # Add context-specific popular queries if context is provided
@@ -791,7 +857,8 @@ async def process_advanced_query_prediction(
                             all_suggestions.append({
                                 "text": query,
                                 "source": f"{context}_popular",
-                                "score": 0.85
+                                "score": 0.85,
+                                "category": context  # Use the context as category
                             })
                 
                 # Sort by score and deduplicate
@@ -807,13 +874,28 @@ async def process_advanced_query_prediction(
                 predictions = [item.get("text", "") for item in filtered_suggestions[:limit]]
                 confidence_scores = [item.get("score", 0.5) for item in filtered_suggestions[:limit]]
                 
+                # Collect category information
+                category_counts = {}
+                for item in filtered_suggestions[:limit]:
+                    category = item.get("category", "general")
+                    category_counts[category] = category_counts.get(category, 0) + 1
+                
+                # Add category distribution to response
+                total_items = len(filtered_suggestions[:limit])
+                category_info = {
+                    "distribution": {
+                        category: count / total_items
+                        for category, count in category_counts.items()
+                    },
+                    "dominant_category": max(category_counts.items(), key=lambda x: x[1])[0] if category_counts else "general"
+                }
+                
             except Exception as initial_error:
                 logger.error(f"Error getting initial suggestions: {initial_error}", exc_info=True)
         else:
             # Case: User is typing - get filtered suggestions
             # Try to get from cache first
             cache_key = f"advanced_idx_predict:{context or ''}:{partial_query}"
-            error_occurred = False
             
             if redis:
                 try:
@@ -824,203 +906,115 @@ async def process_advanced_query_prediction(
                         cached_data = json.loads(cached_result)
                         predictions = cached_data.get("predictions", [])
                         confidence_scores = cached_data.get("confidence_scores", [])
+                        category_info = cached_data.get("category_info", {})
                 except Exception as cache_error:
                     logger.error(f"Cache retrieval error: {cache_error}", exc_info=True)
             
-            # If not in cache, use the ExpertSearchIndexManager to get predictions
+            # If not in cache, get predictions
             if not predictions:
+                # Get predictions using existing logic
+                predictor = await get_predictor()
+                is_focus_state = not partial_query
+                
+                # Get suggestions - pass is_focus_state flag for empty queries
+                suggestion_objects = await predictor.predict(
+                    partial_query, 
+                    limit=limit*2,
+                    user_id=user_id,
+                    is_focus_state=is_focus_state
+                )
+                
+                # Extract predictions and scores
+                predictions = [s.get("text", "") for s in suggestion_objects]
+                confidence_scores = [s.get("score", 0.5) for s in suggestion_objects]
+                
+                # Categorize the partial query
+                if categorizer and partial_query:
+                    try:
+                        query_category = await categorizer.categorize_query(partial_query, user_id)
+                        
+                        # If context is provided, it overrides the detected category
+                        dominant_category = context or query_category.get("category", "general")
+                        
+                        # Initialize with the query's category
+                        category_info = {
+                            "query_category": query_category.get("category", "general"),
+                            "confidence": query_category.get("confidence", 0.5),
+                            "dominant_category": dominant_category
+                        }
+                        
+                        # Categorize each suggestion for distribution
+                        categories = {}
+                        total = 0
+                        
+                        # Limit to 5 suggestions for categorization to minimize performance impact
+                        for suggestion in suggestion_objects[:5]:
+                            suggestion_text = suggestion.get("text", "")
+                            
+                            # Skip categorization for very similar suggestions to save API calls
+                            skip = False
+                            for previous in categories.keys():
+                                if previous in suggestion_text or suggestion_text in previous:
+                                    skip = True
+                                    break
+                            
+                            if not skip:
+                                # Get category for this suggestion
+                                suggestion_category = await categorizer.categorize_query(suggestion_text)
+                                category = suggestion_category.get("category", "general")
+                                
+                                categories[category] = categories.get(category, 0) + 1
+                                total += 1
+                        
+                        # Calculate distribution
+                        if total > 0:
+                            category_info["distribution"] = {
+                                category: count / total
+                                for category, count in categories.items()
+                            }
+                        
+                    except Exception as category_error:
+                        logger.warning(f"Error categorizing query: {category_error}")
+                
+                # Apply personalization
                 try:
-                    # Create search manager
-                    from ai_services_api.services.search.indexing.index_creator import ExpertSearchIndexManager
-                    search_manager = ExpertSearchIndexManager()
+                    personalized_suggestions = await personalize_suggestions(
+                        [{"text": pred, "score": score} for pred, score in zip(predictions, confidence_scores)],
+                        user_id, 
+                        partial_query
+                    )
                     
-                    # Use the appropriate index-based search method based on context
-                    if context == "name":
-                        # Use the name index search
-                        results = search_manager.search_experts_by_name(
-                            partial_query, 
-                            k=limit, 
-                            active_only=True, 
-                            min_score=0.1
-                        )
-                        
-                        # Extract names and scores and ensure they start with the partial query
-                        for result in results:
-                            full_name = f"{result.get('first_name', '')} {result.get('last_name', '')}".strip()
-                            if full_name.lower().startswith(partial_query.lower()):
-                                predictions.append(full_name)
-                                confidence_scores.append(float(result.get('score', 0.5)))
-                    
-                    elif context == "designation":
-                        # Use the designation index search
-                        results = search_manager.search_experts_by_designation(
-                            partial_query, 
-                            k=limit*3, 
-                            active_only=True, 
-                            min_score=0.1
-                        )
-                        
-                        # Extract unique designations with scores and filter by prefix
-                        unique_designations = {}
-                        for result in results:
-                            designation = result.get('designation', '')
-                            if designation and designation.lower().startswith(partial_query.lower()):
-                                unique_designations[designation] = float(result.get('score', 0.5))
-                        
-                        # Convert to lists
-                        predictions = list(unique_designations.keys())
-                        confidence_scores = list(unique_designations.values())
-                        
-                        # Limit to top results
-                        predictions = predictions[:limit]
-                        confidence_scores = confidence_scores[:limit]
-                    
-                    elif context == "theme":
-                        # Use the theme index search
-                        results = search_manager.search_experts_by_theme(
-                            partial_query, 
-                            k=limit*3, 
-                            active_only=True, 
-                            min_score=0.1
-                        )
-                        
-                        # Extract unique themes with scores and filter by prefix
-                        unique_themes = {}
-                        for result in results:
-                            theme = result.get('theme', '')
-                            if theme and theme.lower().startswith(partial_query.lower()):
-                                unique_themes[theme] = float(result.get('score', 0.5))
-                        
-                        # Convert to lists
-                        predictions = list(unique_themes.keys())
-                        confidence_scores = list(unique_themes.values())
-                        
-                        # Limit to top results
-                        predictions = predictions[:limit]
-                        confidence_scores = confidence_scores[:limit]
-                    
-                    elif context == "publication":
-                        # Use publication-specific search
-                        try:
-                            # Use the publication search if available
-                            results = search_manager.search_experts_by_publication(
-                                partial_query,
-                                k=limit*3,
-                                min_score=0.1
-                            )
-                            
-                            # Extract publication titles from matches and filter by prefix
-                            unique_publications = {}
-                            for result in results:
-                                if 'publication_match' in result and result['publication_match']:
-                                    title = result['publication_match'].get('title', '')
-                                    if title and title.lower().startswith(partial_query.lower()):
-                                        unique_publications[title] = float(result.get('score', 0.5))
-                            
-                            # Convert to lists
-                            predictions = list(unique_publications.keys())
-                            confidence_scores = list(unique_publications.values())
-                            
-                            # Limit to top results
-                            predictions = predictions[:limit]
-                            confidence_scores = confidence_scores[:limit]
-                        
-                        except Exception as pub_error:
-                            logger.error(f"Publication search error: {pub_error}", exc_info=True)
-                            error_occurred = True
-                        
-                    else:
-                        # No specific context, use general expert search and filter with prefix
-                        results = search_manager.search_experts(
-                            partial_query, 
-                            k=limit*3, 
-                            active_only=True, 
-                            min_score=0.1
-                        )
-                        
-                        # Collect all types of results
-                        names = {}
-                        designations = {}
-                        themes = {}
-                        
-                        for result in results:
-                            # Add name
-                            full_name = f"{result.get('first_name', '')} {result.get('last_name', '')}".strip()
-                            if full_name and full_name.lower().startswith(partial_query.lower()):
-                                names[full_name] = float(result.get('score', 0.5))
-                                
-                            # Add designation
-                            designation = result.get('designation', '')
-                            if designation and designation.lower().startswith(partial_query.lower()):
-                                designations[designation] = float(result.get('score', 0.5)) * 0.9  # Slightly lower priority
-                                
-                            # Add theme
-                            theme = result.get('theme', '')
-                            if theme and theme.lower().startswith(partial_query.lower()):
-                                themes[theme] = float(result.get('score', 0.5)) * 0.8  # Lower priority
-                        
-                        # Combine all results
-                        combined_items = list(names.items()) + list(designations.items()) + list(themes.items())
-                        
-                        # Sort by score (descending)
-                        combined_items.sort(key=lambda x: x[1], reverse=True)
-                        
-                        # Extract predictions and scores
-                        predictions = [item[0] for item in combined_items[:limit]]
-                        confidence_scores = [item[1] for item in combined_items[:limit]]
-                    
-                    # If not enough prefix matches, try to get Google suggestions and filter them
-                    if len(predictions) < limit // 2:
-                        try:
-                            predictor = await get_predictor()
-                            google_suggestions = await predictor.predict(partial_query, limit=limit*2)
-                            
-                            # Filter Google suggestions by prefix
-                            for suggestion in google_suggestions:
-                                suggestion_text = suggestion.get("text", "")
-                                if suggestion_text and suggestion_text.lower().startswith(partial_query.lower()):
-                                    if suggestion_text not in predictions:
-                                        predictions.append(suggestion_text)
-                                        confidence_scores.append(suggestion.get("score", 0.5) * 0.9)  # Lower confidence for Google
-                        except Exception as google_error:
-                            logger.warning(f"Error getting Google suggestions: {google_error}")
-                    
-                except Exception as idx_error:
-                    logger.error(f"Index search error: {idx_error}", exc_info=True)
-                    error_occurred = True
-                    
-                    # Generic fallback if everything fails - use Google but filter by prefix
-                    predictor = await get_predictor()
-                    suggestion_objects = await predictor.predict(partial_query, limit=limit*2)
-                    
-                    # Only include suggestions that start with the partial query
-                    predictions = []
-                    confidence_scores = []
-                    for suggestion in suggestion_objects:
-                        suggestion_text = suggestion.get("text", "")
-                        if suggestion_text and suggestion_text.lower().startswith(partial_query.lower()):
-                            predictions.append(suggestion_text)
-                            confidence_scores.append(suggestion.get("score", 0.5) * 0.6)  # Very low confidence
+                    # Extract from personalized results
+                    predictions = [s["text"] for s in personalized_suggestions]
+                    confidence_scores = [s.get("score", 0.5) for s in personalized_suggestions]
+                except Exception as personalize_error:
+                    logger.error(f"Personalization error: {personalize_error}", exc_info=True)
+                
+                # Limit to requested number
+                predictions = predictions[:limit]
+                confidence_scores = confidence_scores[:limit]
+                
+                # Cache the results
+                if redis:
+                    try:
+                        cache_data = {
+                            "predictions": predictions,
+                            "confidence_scores": confidence_scores,
+                            "category_info": category_info
+                        }
+                        await redis.setex(cache_key, 900, json.dumps(cache_data))
+                    except Exception as cache_error:
+                        logger.error(f"Cache storage error: {cache_error}", exc_info=True)
         
-        # Generate refinements that match the current query prefix
-        refinements_dict = None
-        try:
-            # Get context-appropriate refinements
-            refinements_dict = await generate_dynamic_refinements(
-                partial_query, 
-                context, 
-                predictions,
-                limit
-            )
-        except Exception as refine_error:
-            logger.error(f"Refinements generation error: {refine_error}", exc_info=True)
-            refinements_dict = {
-                "filters": [],
-                "related_queries": predictions[:5] if predictions else [],
-                "expertise_areas": []
-            }
+        # Generate refinements
+        refinements_dict = await generate_dynamic_refinements(
+            partial_query, 
+            context, 
+            predictions,
+            limit
+        )
         
-        # Convert refinements to a flat list of strings as expected by PredictionResponse
+        # Extract refinements list
         refinements_list = []
         if isinstance(refinements_dict, dict):
             # Extract related queries if they exist
@@ -1059,7 +1053,8 @@ async def process_advanced_query_prediction(
             if conn:
                 conn.close()
         
-        return PredictionResponse(
+        # Create enhanced response with category information
+        response = PredictionResponse(
             predictions=predictions,
             confidence_scores=confidence_scores,
             user_id=user_id,
@@ -1067,6 +1062,12 @@ async def process_advanced_query_prediction(
             total_suggestions=len(predictions),
             search_context=context
         )
+        
+        # Add category info to the response metadata
+        if hasattr(response, "metadata"):
+            response.metadata = {"category_info": category_info}
+        
+        return response
     
     except Exception as e:
         logger.error(f"Error in advanced query prediction: {e}", exc_info=True)
@@ -1082,6 +1083,43 @@ async def process_advanced_query_prediction(
             refinements=refinements_list,
             total_suggestions=len(predictions)
         )
+    
+async def get_search_categorizer():
+    """
+    Get or create a singleton instance of the SearchCategorizer.
+    
+    Returns:
+        SearchCategorizer instance or None if not available
+    """
+    global _categorizer
+    
+    if _categorizer is None:
+        try:
+            # Get Redis client for caching
+            redis_client = await get_redis()
+            
+            # Import the SearchCategorizer
+            from ai_services_api.services.search.gemini.search_categorizer import SearchCategorizer
+            
+            # Create categorizer instance
+            _categorizer = SearchCategorizer(redis_client=redis_client)
+            
+            # Start background worker
+            await _categorizer.start_background_worker()
+            
+            logger.info("Search categorizer initialized successfully")
+        except ImportError:
+            logger.warning("SearchCategorizer module not available")
+            return None
+        except Exception as e:
+            logger.error(f"Error initializing search categorizer: {e}")
+            return None
+    
+    return _categorizer
+
+# Initialize global categorizer instance
+_categorizer = None
+
 def filter_predictions_by_context(
     predictions: List[str], 
     confidence_scores: List[float], 
@@ -1485,4 +1523,3 @@ def generate_advanced_predictive_refinements(
             "related_queries": predictions[:5],
             "expertise_areas": []
         }
-
