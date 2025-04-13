@@ -11,7 +11,7 @@ import asyncio
 from typing import Dict, Any, AsyncGenerator
 from ai_services_api.services.chatbot.utils.db_utils import DatabaseConnector
 import json
-from ai_services_api.services.chatbot.utils import UserInterestTracker
+
 logger = logging.getLogger(__name__)
 
 class MessageHandler:

@@ -1,6 +1,7 @@
 import os
 import logging
 from typing import List, Dict, Any, Tuple, Optional
+import uuid
 from dotenv import load_dotenv
 from ai_services_api.services.centralized_repository.database_setup import get_db_connection
 from psycopg2.extras import DictCursor
