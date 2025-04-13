@@ -622,7 +622,7 @@ class MessageHandler:
         
         return formatted_text
 
-    async def _save_to_conversation_history(self, user_id: str, session_id: str, message: str, intent_type: str):
+    async def _save_to_conversation_history(self, user_id: str, session_id: str, message: str, intent_type):
         """
         Save the current interaction to conversation history.
         
@@ -630,7 +630,7 @@ class MessageHandler:
             user_id (str): User identifier
             session_id (str): Session identifier
             message (str): The user's query
-            intent_type (str): Detected intent type
+            intent_type: Detected intent type (will be converted to string)
         """
         try:
             # Initialize conversation cache if it doesn't exist
@@ -641,10 +641,16 @@ class MessageHandler:
             if session_id not in self.conversation_cache:
                 self.conversation_cache[session_id] = []
             
+            # Convert intent_type to string if it's an enum
+            if hasattr(intent_type, 'value'):
+                intent_type_str = intent_type.value
+            else:
+                intent_type_str = str(intent_type)
+            
             # Add current message to history (in-memory cache)
             self.conversation_cache[session_id].append({
                 'query': message,
-                'intent': intent_type,
+                'intent': intent_type_str,
                 'timestamp': datetime.now()
             })
             
@@ -664,7 +670,7 @@ class MessageHandler:
                             FROM chatbot_logs 
                             WHERE user_id = $3 AND query = $4
                         )
-                    """, intent_type, session_id, user_id, message)
+                    """, intent_type_str, session_id, user_id, message)
             except Exception as db_error:
                 logger.warning(f"Error updating conversation history in database: {db_error}")
                 # Continue even if database update fails - we still have memory cache
@@ -918,69 +924,7 @@ class MessageHandler:
         
         return False, None
     
-    def _analyze_message_style(self, message: str) -> str:
-        """
-        Analyze the user's message to determine the appropriate response style.
-        
-        Args:
-            message (str): The user's query
-            
-        Returns:
-            str: The detected communication style
-        """
-        # Convert to lowercase for analysis
-        message_lower = message.lower()
-        
-        # Check for technical/academic indicators
-        technical_indicators = [
-            'methodology', 'study design', 'statistical', 'analysis', 
-            'literature review', 'theoretical', 'framework', 'evidence-based',
-            'quantitative', 'qualitative', 'research', 'findings', 'publication',
-            'citations', 'references', 'peer-reviewed', 'journal', 'paper'
-        ]
-        
-        # Check for formal tone indicators
-        formal_indicators = [
-            'would you please', 'I would like to', 'could you provide',
-            'I am interested in', 'I request', 'kindly', 'formal', 'official',
-            'the organization', 'professionals', 'documentation'
-        ]
-        
-        # Check for conversational tone indicators
-        conversational_indicators = [
-            'hi', 'hello', 'hey', 'thanks', 'thank you', 'appreciate',
-            'can you help', 'tell me about', 'what\'s', 'how about',
-            'wondering', 'curious', 'question for you', 'quick question'
-        ]
-        
-        # Count indicators
-        technical_score = sum(1 for term in technical_indicators if term in message_lower)
-        formal_score = sum(1 for term in formal_indicators if term in message_lower)
-        conversational_score = sum(1 for term in conversational_indicators if term in message_lower)
-        
-        # Add score for sentence structure formality
-        sentences = re.split(r'[.!?]', message)
-        avg_words_per_sentence = sum(len(s.split()) for s in sentences if s.strip()) / max(1, len([s for s in sentences if s.strip()]))
-        
-        # Longer sentences tend to be more formal
-        if avg_words_per_sentence > 15:
-            formal_score += 2
-        elif avg_words_per_sentence > 10:
-            formal_score += 1
-        elif avg_words_per_sentence < 6:
-            conversational_score += 1
-        
-        # Questions with question marks are often conversational
-        if '?' in message:
-            conversational_score += 1
-        
-        # Determine style based on scores
-        if technical_score > max(formal_score, conversational_score):
-            return "technical"
-        elif formal_score > conversational_score:
-            return "formal"
-        else:
-            return "conversational"
+    
     
     def _get_random_transition(self, transition_type: str) -> str:
         """

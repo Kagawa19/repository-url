@@ -279,7 +279,7 @@ class SchemaManager:
                         UNIQUE(expert_id, resource_id)
                     )
                 """,
-                'chatbot_logs': """
+                '_logs': """
                     CREATE TABLE IF NOT EXISTS chatbot_logs (
                         id SERIAL PRIMARY KEY,
                         user_id VARCHAR(255) NOT NULL,
@@ -287,7 +287,7 @@ class SchemaManager:
                         response TEXT NOT NULL,
                         response_time FLOAT NOT NULL,
                         timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                    )
+                    )chatbot
                 """
             },
             'analytics_tables': {
