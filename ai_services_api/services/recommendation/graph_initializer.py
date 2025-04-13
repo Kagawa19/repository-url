@@ -153,7 +153,8 @@ class GraphDatabaseInitializer:
         while retries <= max_retries:
             try:
                 logger.info(f"Calling Gemini API (attempt {retries+1}/{max_retries+1})")
-                response = model.generate_content(prompt, timeout=timeout)
+                # Remove the timeout parameter since it's not supported
+                response = model.generate_content(prompt)
                 # Success, reset failure counter
                 self._gemini_failures = 0
                 return response
@@ -170,7 +171,6 @@ class GraphDatabaseInitializer:
                     raise
                 time.sleep(2 * retries)  # Exponential backoff
         return None
-
     def _create_indexes(self):
         """Create enhanced indexes in Neo4j"""
         index_queries = [
