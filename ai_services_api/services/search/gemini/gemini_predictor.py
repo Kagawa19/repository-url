@@ -28,6 +28,29 @@ from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_chain, wait_fixed
+
+class GeminiAPIError(Exception):
+    def __init__(self, message, retry_after=None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+@retry(
+    retry=retry_if_exception(lambda e: isinstance(e, GeminiAPIError)),
+    stop=stop_after_attempt(2),
+    wait=wait_chain(*[wait_fixed(21), wait_fixed(42)]),  # Gemini-specific delays
+    reraise=True
+)
+async def _execute_gemini_request(self, prompt):
+    try:
+        response = await self.model.generate_content_async(prompt)
+        return response
+    except Exception as e:
+        if "429" in str(e):
+            retry_after = self._extract_retry_delay(e)  # Implement parsing from error
+            raise GeminiAPIError(f"Rate limited - retry after {retry_after}s", retry_after)
+        raise
+
 # Load environment variables
 load_dotenv()
 
@@ -39,91 +62,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class CircuitBreaker:
-    """
-    Implements circuit breaker pattern for external API calls.
-    
-    This prevents unnecessary calls to failing services and allows
-    the system to recover gracefully.
-    """
-    
-    def __init__(self, name, failure_threshold=5, recovery_timeout=30, 
-                 retry_timeout=60):
-        """
-        Initialize circuit breaker.
-        
-        Args:
-            name: Name of the service protected by this circuit breaker
-            failure_threshold: Number of failures before opening the circuit
-            recovery_timeout: Time in seconds to wait before attempting recovery
-            retry_timeout: Time in seconds before resetting failure count
-        """
-        self.name = name
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
-        self.retry_timeout = retry_timeout
-        
-        self.failures = 0
-        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
-        self.last_failure_time = 0
-        self.last_attempt_time = 0
-    
+    def __init__(self, name, failure_threshold=3, recovery_timeout=30):
+        self.adaptive_timeout = recovery_timeout  # Start with default
+        self.retry_after = None  # Track API-specified delays
+
     async def execute(self, func, *args, **kwargs):
-        """
-        Execute the function with circuit breaker protection.
-        
-        Args:
-            func: Async function to execute
-            *args, **kwargs: Arguments to pass to the function
-            
-        Returns:
-            Result of the function or None if circuit is open
-        """
-        current_time = time.time()
-        
-        # Check if we should reset failure count
-        if current_time - self.last_failure_time > self.retry_timeout:
-            if self.failures > 0:
-                logger.info(f"Circuit breaker '{self.name}': Resetting failure count")
-                self.failures = 0
-        
-        # Check circuit state
-        if self.state == "OPEN":
-            # Check if recovery timeout has elapsed
-            if current_time - self.last_failure_time > self.recovery_timeout:
-                logger.info(f"Circuit breaker '{self.name}': Transitioning to HALF-OPEN")
-                self.state = "HALF-OPEN"
-            else:
-                logger.warning(f"Circuit breaker '{self.name}': Circuit OPEN, request rejected")
+        if self.state == "OPEN" and self.retry_after:
+            remaining = time.time() - self.last_failure_time
+            if remaining < self.retry_after:
                 return None
         
-        # Try to execute the function
         try:
-            self.last_attempt_time = current_time
-            result = await func(*args, **kwargs)
-            
-            # If we got here in HALF-OPEN, close the circuit
-            if self.state == "HALF-OPEN":
-                logger.info(f"Circuit breaker '{self.name}': Closing circuit after successful execution")
-                self.state = "CLOSED"
-                self.failures = 0
-            
-            return result
-            
-        except Exception as e:
-            # Record the failure
-            self.failures += 1
-            self.last_failure_time = current_time
-            
-            # Check if we should open the circuit
-            if self.failures >= self.failure_threshold:
-                if self.state != "OPEN":
-                    logger.warning(
-                        f"Circuit breaker '{self.name}': Opening circuit after {self.failures} failures"
-                    )
-                    self.state = "OPEN"
-            
-            # Re-raise the exception
-            raise e
+            return await func(*args, **kwargs)
+        except GeminiAPIError as e:
+            self.retry_after = e.retry_after or self.adaptive_timeout
+            self._handle_failure()
 
 class GoogleAutocompletePredictor:
     """
@@ -176,6 +129,11 @@ class GoogleAutocompletePredictor:
             
             # Load FAISS index and mapping
             self._load_faiss_index()
+
+            self.gemini_quota = {
+                'remaining': 1000,  # Sync with actual quota
+                'reset_time': None
+            }
             
             # Initialize prediction trie
             self.suggestion_trie = PrefixTrie()
@@ -226,110 +184,75 @@ class GoogleAutocompletePredictor:
             self.logger.error(f"Failed to initialize predictor: {e}")
             raise
 
-    @retry(
-    retry=retry_if_exception_type((asyncio.TimeoutError, ConnectionError)),
-    stop=stop_after_attempt(2),
-    wait=wait_exponential(multiplier=0.5, min=0.5, max=1.5)
-    )
+ 
     async def _generate_simplified_gemini_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
-        """
-        Generate simplified Gemini suggestions with query intent classification.
-        Adds fallback to FAISS before using pattern suggestions.
-        
-        Args:
-            partial_query: Partial query to get suggestions for
-            limit: Maximum number of suggestions
-            
-        Returns:
-            List of suggestion dictionaries
-        """
-        self.metrics["api_calls"] += 1
-        
+        await self._check_quota()
+
         try:
-            # First detect query intent
+            self.gemini_quota['remaining'] -= 1
+        except GeminiAPIError as e:
+            self.gemini_quota['remaining'] = 0
+            self.gemini_quota['reset_time'] = time.time() + (e.retry_after or 60)
+
+        self.metrics["api_calls"] += 1
+
+        try:
             query_intent = await self._detect_query_intent(partial_query)
-            
-            # Use circuit breaker
+
             suggestions = await self.generation_circuit.execute(
                 self._execute_gemini_suggestion_request,
                 partial_query,
                 query_intent,
                 limit
             )
-            
-            if suggestions is None:
-                self.logger.warning("Circuit breaker open, attempting FAISS fallback")
-                # Try FAISS before pattern suggestions
-                try:
-                    faiss_suggestions = await self._generate_faiss_suggestions(partial_query, limit)
-                    if faiss_suggestions and len(faiss_suggestions) > 0:
-                        self.logger.info("Using FAISS fallback suggestions")
-                        return faiss_suggestions
-                except Exception as faiss_error:
-                    self.logger.error(f"FAISS fallback error: {faiss_error}")
-                    
-                # Try Trie-based suggestions before using pattern suggestions
-                if hasattr(self, 'suggestion_trie'):
-                    try:
-                        trie_results = self.suggestion_trie.search(partial_query, limit=limit*2)
-                        if trie_results and len(trie_results) > 0:
-                            trie_suggestions = []
-                            for suggestion, frequency, timestamp in trie_results:
-                                trie_suggestions.append({
-                                    "text": suggestion,
-                                    "source": "trie",
-                                    "score": min(0.85, 0.6 + (frequency / 20))
-                                })
-                            self.logger.info(f"Using trie fallback suggestions: {len(trie_suggestions)} results")
-                            return trie_suggestions
-                    except Exception as trie_error:
-                        self.logger.error(f"Trie fallback error: {trie_error}")
-                
-                # If both FAISS and Trie failed, fall back to pattern suggestions
-                self.logger.warning("All fallbacks failed, using pattern suggestions")
-                return await self._generate_pattern_suggestions(partial_query, limit)
-            
-            return suggestions
-            
+
+            if suggestions:
+                return suggestions
+
+            self.logger.warning("Circuit breaker open, Gemini returned no suggestions. Trying FAISS fallback.")
+
+        except GeminiAPIError as e:
+            self.logger.warning(f"Gemini API error: {e}. Circuit state: {self.generation_circuit.state}")
         except Exception as e:
-            self.logger.error(f"Error generating Gemini suggestions after retries: {e}")
-            self.metrics["fallbacks_used"] += 1
-            
-            # Try FAISS first as a fallback
+            self.logger.error(f"Unhandled Gemini suggestion error: {e}")
+        
+        self.metrics["fallbacks_used"] += 1
+
+        # FAISS fallback
+        try:
+            faiss_suggestions = await self._generate_faiss_suggestions(partial_query, limit)
+            if faiss_suggestions:
+                self.logger.info("Using FAISS fallback suggestions")
+                return faiss_suggestions
+        except Exception as faiss_error:
+            self.logger.error(f"FAISS fallback error: {faiss_error}")
+
+        # Trie fallback
+        if hasattr(self, 'suggestion_trie'):
             try:
-                faiss_suggestions = await self._generate_faiss_suggestions(partial_query, limit)
-                if faiss_suggestions and len(faiss_suggestions) > 0:
-                    self.logger.info("Using FAISS fallback after Gemini error")
-                    return faiss_suggestions
-            except Exception as faiss_error:
-                self.logger.error(f"FAISS fallback also failed: {faiss_error}")
-            
-            # Try Trie-based suggestions as second fallback
-            if hasattr(self, 'suggestion_trie'):
-                try:
-                    trie_results = self.suggestion_trie.search(partial_query, limit=limit*2)
-                    if trie_results and len(trie_results) > 0:
-                        trie_suggestions = []
-                        current_time = time.time()
-                        for suggestion, frequency, timestamp in trie_results:
-                            # Apply recency boosting
-                            recency_factor = 1.0
-                            if timestamp:
-                                age_hours = (current_time - timestamp) / 3600
-                                recency_factor = math.exp(-age_hours / 72)  # 3-day half-life
-                                
-                            trie_suggestions.append({
-                                "text": suggestion,
-                                "source": "trie",
-                                "score": min(0.85, (0.6 + (frequency / 20)) * recency_factor)
-                            })
-                        self.logger.info(f"Using trie fallback after Gemini & FAISS errors: {len(trie_suggestions)} results")
-                        return trie_suggestions
-                except Exception as trie_error:
-                    self.logger.error(f"Trie fallback also failed: {trie_error}")
-            
-            # If all else fails, use pattern suggestions
-            return await self._generate_pattern_suggestions(partial_query, limit)
+                trie_results = self.suggestion_trie.search(partial_query, limit=limit*2)
+                if trie_results:
+                    current_time = time.time()
+                    trie_suggestions = []
+                    for suggestion, frequency, timestamp in trie_results:
+                        recency_factor = 1.0
+                        if timestamp:
+                            age_hours = (current_time - timestamp) / 3600
+                            recency_factor = math.exp(-age_hours / 72)
+                        trie_suggestions.append({
+                            "text": suggestion,
+                            "source": "trie",
+                            "score": min(0.85, (0.6 + (frequency / 20)) * recency_factor)
+                        })
+                    self.logger.info(f"Using trie fallback suggestions: {len(trie_suggestions)}")
+                    return trie_suggestions
+            except Exception as trie_error:
+                self.logger.error(f"Trie fallback error: {trie_error}")
+
+        # Final fallback to pattern suggestions
+        self.logger.warning("All fallbacks failed, using pattern suggestions")
+        return await self._generate_pattern_suggestions(partial_query, limit)
+
     async def _generate_pattern_suggestions(self, partial_query: str, limit: int) -> List[Dict[str, Any]]:
         """
         Generate data-driven suggestions based on user behavior and trending queries.
