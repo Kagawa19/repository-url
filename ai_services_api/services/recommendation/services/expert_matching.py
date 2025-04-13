@@ -67,6 +67,163 @@ class ExpertMatchingService:
             self.logger.error("Failed to initialize ExpertMatchingService", exc_info=True)
             raise
 
+    async def _log_recommendation_interaction(self, user_id: str, expert_ids: List[str]) -> None:
+        """
+        Log when experts are recommended to a user for future reference.
+        
+        Args:
+            user_id: The user's identifier
+            expert_ids: List of expert IDs that were recommended
+        """
+        if not expert_ids:
+            return
+            
+        try:
+            # Define connection parameters
+            conn_params = {}
+            database_url = os.getenv('DATABASE_URL')
+            
+            if database_url:
+                parsed_url = urlparse(database_url)
+                conn_params = {
+                    'host': parsed_url.hostname,
+                    'port': parsed_url.port,
+                    'dbname': parsed_url.path[1:],
+                    'user': parsed_url.username,
+                    'password': parsed_url.password
+                }
+            else:
+                conn_params = {
+                    'host': os.getenv('POSTGRES_HOST', 'postgres'),
+                    'port': os.getenv('POSTGRES_PORT', '5432'),
+                    'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
+                    'user': os.getenv('POSTGRES_USER', 'postgres'),
+                    'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres')
+                }
+            
+            # Connect to database and log interactions
+            conn = None
+            try:
+                conn = psycopg2.connect(**conn_params)
+                with conn.cursor() as cur:
+                    # Use interaction_type 'expert' for recommendation interactions
+                    for i, expert_id in enumerate(expert_ids):
+                        # Log each recommendation with position information
+                        position = i + 1  # 1-based position
+                        
+                        cur.execute("""
+                            INSERT INTO user_interest_logs 
+                                (user_id, session_id, query, interaction_type, content_id, response_quality, timestamp)
+                            VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        """, (
+                            user_id,
+                            f"recommendation_{int(time.time())}",  # Generate a session ID
+                            f"recommendation_position_{position}",  # Store position information
+                            'expert',
+                            expert_id,
+                            0.5  # Neutral initial quality score
+                        ))
+                    
+                    conn.commit()
+                    self.logger.debug(f"Logged {len(expert_ids)} recommendation interactions for user {user_id}")
+                    
+            except Exception as db_error:
+                self.logger.error(f"Database error logging recommendation interactions: {db_error}")
+            finally:
+                if conn:
+                    conn.close()
+                    
+        except Exception as e:
+            self.logger.error(f"Error logging recommendation interactions: {e}")
+
+    async def _get_user_interests(self, user_id: str, limit: int = 5) -> Dict[str, List[str]]:
+        """
+        Retrieve a user's top interests across different categories.
+        
+        Args:
+            user_id: The user's identifier
+            limit: Maximum number of interests per category
+            
+        Returns:
+            Dict mapping interest types to lists of interest topics
+        """
+        try:
+            # Define connection parameters
+            conn_params = {}
+            database_url = os.getenv('DATABASE_URL')
+            
+            if database_url:
+                parsed_url = urlparse(database_url)
+                conn_params = {
+                    'host': parsed_url.hostname,
+                    'port': parsed_url.port,
+                    'dbname': parsed_url.path[1:],
+                    'user': parsed_url.username,
+                    'password': parsed_url.password
+                }
+            else:
+                conn_params = {
+                    'host': os.getenv('POSTGRES_HOST', 'postgres'),
+                    'port': os.getenv('POSTGRES_PORT', '5432'),
+                    'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
+                    'user': os.getenv('POSTGRES_USER', 'postgres'),
+                    'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres')
+                }
+            
+            # Initialize empty result
+            interests = {
+                'publication_topic': [],
+                'publication_domain': [],
+                'expert_expertise': []
+            }
+            
+            # Connect to database and fetch interests
+            conn = None
+            try:
+                conn = psycopg2.connect(**conn_params)
+                with conn.cursor() as cur:
+                    # Time-weighted query - more recent and higher engagement scores rank higher
+                    query = """
+                    SELECT 
+                        topic_key, 
+                        topic_type,
+                        engagement_score * (1.0 / (1 + EXTRACT(EPOCH FROM (NOW() - last_interaction)) / 86400.0)) 
+                            AS recency_score
+                    FROM user_topic_interests
+                    WHERE user_id = %s AND topic_type = %s
+                    ORDER BY recency_score DESC, interaction_count DESC
+                    LIMIT %s
+                    """
+                    
+                    # Execute for each interest type
+                    for topic_type in interests.keys():
+                        cur.execute(query, (user_id, topic_type, limit))
+                        results = cur.fetchall()
+                        
+                        # Extract topic keys
+                        interests[topic_type] = [row[0] for row in results]
+                        
+                        self.logger.debug(
+                            f"Retrieved {len(interests[topic_type])} {topic_type} interests for user {user_id}"
+                        )
+                
+                return interests
+                
+            except Exception as db_error:
+                self.logger.error(f"Database error retrieving user interests: {db_error}")
+                return interests
+            finally:
+                if conn:
+                    conn.close()
+                    
+        except Exception as e:
+            self.logger.error(f"Error retrieving user interests: {e}")
+            return {
+                'publication_topic': [],
+                'publication_domain': [],
+                'expert_expertise': []
+            }
+
     async def get_recommendations_for_user(
         self, 
         user_id: str, 
@@ -74,7 +231,7 @@ class ExpertMatchingService:
     ) -> List[Dict[str, Any]]:
         """
         Find top similar experts using balanced multi-factor matching with adaptive patterns
-        based on search history and interactions
+        based on search history, interactions, and user interests
         
         :param user_id: ID of the expert to find recommendations for
         :param limit: Maximum number of recommendations to return
@@ -86,6 +243,11 @@ class ExpertMatchingService:
         self.logger.info(f"Generating recommendations for user ID: {user_id}, limit: {limit}")
         
         try:
+            # ---- NEW ADDITION: Get user interests from user_topic_interests table ----
+            user_interests = await self._get_user_interests(user_id)
+            self.logger.info(f"Retrieved {len(user_interests)} interests for user {user_id}")
+            
+            # ---- UNCHANGED: Session creation and debug info ----
             with self._neo4j_driver.session() as session:
                 # Verify expert exists and get baseline information
                 debug_query = """
@@ -117,12 +279,14 @@ class ExpertMatchingService:
                 has_fields = debug_record.get("field_count", 0) > 0
                 has_domains = debug_record.get("domain_count", 0) > 0
                 
+                # ---- MODIFIED: Dynamic weights with user interest integration ----
                 # Initialize weights with default values
                 concept_weight = 0.0
                 domain_weight = 0.0
                 field_weight = 0.0
-                org_weight = 0.3  # Reduced slightly to make room for search weight
+                org_weight = 0.3  # Reduced slightly to make room for other weights
                 search_weight = 0.2  # Add weight for search patterns
+                interest_weight = 0.3  # New weight for user interests
                 
                 # Dynamic weights based on data availability
                 if has_concepts:
@@ -138,14 +302,75 @@ class ExpertMatchingService:
                 # If few features available, increase weight of organizational and behavioral factors
                 if available_features <= 1:
                     org_weight = 0.3
-                    search_weight = 0.3
+                    search_weight = 0.2
+                    interest_weight = 0.3
                 else:
                     org_weight = 0.1
-                    search_weight = 0.2
+                    search_weight = 0.1
+                    interest_weight = 0.2
                 
-                # Fixed query that properly handles DISTINCT while still allowing ORDER BY
-                query = """
-                MATCH (e1:Expert {id: $expert_id})
+                # ---- MODIFIED: Enhanced query with user interest integration ----
+                interest_clause = ""
+                interest_match = ""
+                interests_param = {}
+                
+                # Add interest-based matching if user has interests
+                if user_interests:
+                    # Build clause for publication topics
+                    if user_interests.get('publication_topic'):
+                        interest_match += """
+                        // Match with user's publication topic interests
+                        OPTIONAL MATCH (e2)-[:HAS_CONCEPT]->(tc:Concept)
+                        WHERE tc.name IN $publication_topics
+                        """
+                        interests_param['publication_topics'] = user_interests.get('publication_topic', [])
+                        interest_clause += """
+                        // Calculate interest overlap with publication topics
+                        COUNT(DISTINCT CASE WHEN tc.name IN $publication_topics THEN tc ELSE NULL END) 
+                            * $interest_weight as publication_topic_score,
+                        """
+                    
+                    # Build clause for domain interests
+                    if user_interests.get('publication_domain'):
+                        interest_match += """
+                        // Match with user's domain interests
+                        OPTIONAL MATCH (e2)-[:WORKS_IN_DOMAIN]->(td:Domain)
+                        WHERE td.name IN $publication_domains
+                        """
+                        interests_param['publication_domains'] = user_interests.get('publication_domain', [])
+                        interest_clause += """
+                        // Calculate interest overlap with publication domains
+                        COUNT(DISTINCT CASE WHEN td.name IN $publication_domains THEN td ELSE NULL END) 
+                            * $interest_weight as publication_domain_score,
+                        """
+                    
+                    # Build clause for expertise interests
+                    if user_interests.get('expert_expertise'):
+                        interest_match += """
+                        // Match with user's expertise interests
+                        OPTIONAL MATCH (e2)-[:SPECIALIZES_IN]->(te:Field)
+                        WHERE te.name IN $expert_expertise
+                        """
+                        interests_param['expert_expertise'] = user_interests.get('expert_expertise', [])
+                        interest_clause += """
+                        // Calculate interest overlap with expertise
+                        COUNT(DISTINCT CASE WHEN te.name IN $expert_expertise THEN te ELSE NULL END) 
+                            * $interest_weight as expertise_score,
+                        """
+                
+                # Combine interest score into final similarity calculation
+                interest_total_score = ""
+                if interest_clause:
+                    interest_total_score = """
+                    // Add interest-based scores to total
+                    + publication_topic_score 
+                    + publication_domain_score
+                    + expertise_score
+                    """
+                
+                # Main recommendation query with interest integration
+                query = f"""
+                MATCH (e1:Expert {{id: $expert_id}})
                 MATCH (e2:Expert)
                 WHERE e1 <> e2
                 AND e2.is_active = true  // Only return active experts
@@ -169,9 +394,12 @@ class ExpertMatchingService:
                 // Direct interactions
                 OPTIONAL MATCH (e1)-[int:INTERACTS_WITH]->(e2)
                 
+                {interest_match}
+                
                 WITH e1, e2, c, d, f, ra, m, fsc, int,
                     CASE WHEN e1.theme IS NOT NULL AND e1.theme = e2.theme THEN 1.0 ELSE 0.0 END as same_theme,
                     CASE WHEN e1.unit IS NOT NULL AND e1.unit = e2.unit THEN 1.0 ELSE 0.0 END as same_unit
+                    {", tc, td, te" if interest_match else ""}
                 
                 // Collect all relevant data
                 WITH e1, e2, 
@@ -191,6 +419,8 @@ class ExpertMatchingService:
                     // Interaction patterns
                     COALESCE(int.weight, 0.0) * $search_weight as interaction_similarity,
                     
+                    {interest_clause if interest_clause else ""}
+                    
                     // Collect details for explanation
                     COLLECT(DISTINCT COALESCE(c.name, '')) as shared_concepts,
                     COLLECT(DISTINCT COALESCE(d.name, '')) as shared_domains,
@@ -208,7 +438,8 @@ class ExpertMatchingService:
                     same_theme * $org_weight + 
                     same_unit * $org_weight +
                     search_similarity +
-                    interaction_similarity) as similarity_score,
+                    interaction_similarity
+                    {interest_total_score}) as similarity_score,
                     
                     // Include search pattern strength
                     search_similarity,
@@ -225,34 +456,34 @@ class ExpertMatchingService:
                 
                 // Calculate result data for each expert
                 WITH e2, similarity_score, search_similarity, interaction_similarity,
-                     shared_concepts, shared_domains, shared_fields, shared_areas, shared_methods, 
-                     same_theme, same_unit
+                    shared_concepts, shared_domains, shared_fields, shared_areas, shared_methods, 
+                    same_theme, same_unit
                 
                 // Fix to ensure uniqueness by ID
                 WITH DISTINCT e2.id as expert_id, 
-                     e2.name as expert_name,
-                     e2.designation as expert_designation,
-                     e2.theme as expert_theme,
-                     e2.unit as expert_unit,
-                     similarity_score,
-                     search_similarity, interaction_similarity,
-                     shared_concepts, shared_domains, shared_fields, shared_areas, shared_methods,
-                     same_theme, same_unit
+                    e2.name as expert_name,
+                    e2.designation as expert_designation,
+                    e2.theme as expert_theme,
+                    e2.unit as expert_unit,
+                    similarity_score,
+                    search_similarity, interaction_similarity,
+                    shared_concepts, shared_domains, shared_fields, shared_areas, shared_methods,
+                    same_theme, same_unit
                 
                 // Put the results in the expected format with ordering
-                RETURN {
+                RETURN {{
                     id: expert_id,
                     name: expert_name,
                     designation: expert_designation,
                     theme: expert_theme,
                     unit: expert_unit,
-                    match_details: {
+                    match_details: {{
                         shared_concepts: [c IN shared_concepts WHERE c <> ''],
                         shared_domains: [d IN shared_domains WHERE d <> ''],
                         shared_fields: [f IN shared_fields WHERE f <> ''],
                         shared_research_areas: [ra IN shared_areas WHERE ra <> ''],
                         shared_methods: [m IN shared_methods WHERE m <> '']
-                    },
+                    }},
                     match_reason: CASE 
                         WHEN search_similarity > 0 THEN 'Frequently searched together'
                         WHEN interaction_similarity > 0 THEN 'Previous interaction'
@@ -265,7 +496,7 @@ class ExpertMatchingService:
                         ELSE 'Potential collaboration'
                     END,
                     similarity_score: similarity_score
-                } as result
+                }} as result
                 ORDER BY similarity_score DESC
                 LIMIT $limit
                 """
@@ -278,7 +509,9 @@ class ExpertMatchingService:
                     "domain_weight": domain_weight,
                     "field_weight": field_weight,
                     "org_weight": org_weight,
-                    "search_weight": search_weight
+                    "search_weight": search_weight,
+                    "interest_weight": interest_weight,
+                    **interests_param  # Add the interest parameters if they exist
                 }
                 
                 # Run recommendations with the appropriate parameters
@@ -286,7 +519,6 @@ class ExpertMatchingService:
                 similar_experts = [record["result"] for record in result]
                 
                 # Additional deduplication step - ensure unique expert IDs in the result
-                # This should be unnecessary with the fixed query, but included as a safeguard
                 unique_experts = []
                 seen_ids = set()
                 
@@ -305,6 +537,10 @@ class ExpertMatchingService:
                 # Limit to the requested number if we have more after deduplication
                 unique_experts = unique_experts[:limit]
                 
+                # ---- NEW ADDITION: Log interactions after getting recommendations ----
+                # Log this recommendation interaction for future reference
+                await self._log_recommendation_interaction(user_id, [expert['id'] for expert in unique_experts])
+                
                 # Performance and result logging
                 end_time = datetime.utcnow()
                 process_time = (end_time - start_time).total_seconds()
@@ -319,11 +555,12 @@ class ExpertMatchingService:
                 self.logger.debug(
                     f"Match weights: concepts={concept_weight}, domains={domain_weight}, "
                     f"fields={field_weight}, org={org_weight}, search={search_weight}, "
+                    f"interest={interest_weight}, "
                     f"available_features={available_features}"
                 )
                 
                 return unique_experts
-                
+                    
         except Exception as e:
             self.logger.error(
                 f"Error finding similar experts for user {user_id}: {str(e)}", 

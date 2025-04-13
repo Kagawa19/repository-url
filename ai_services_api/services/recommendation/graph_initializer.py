@@ -190,6 +190,7 @@ class GraphDatabaseInitializer:
             "CREATE INDEX area_name IF NOT EXISTS FOR (ra:ResearchArea) ON (ra.name)",
             "CREATE INDEX method_name IF NOT EXISTS FOR (m:Method) ON (m.name)",
             "CREATE INDEX related_name IF NOT EXISTS FOR (r:RelatedArea) ON (r.name)",
+            "CREATE INDEX interest_related IF NOT EXISTS FOR ()-[r:INTEREST_RELATED]-() ON (r.weight)",
             
             # Fulltext indexes
             """CREATE FULLTEXT INDEX expert_fulltext IF NOT EXISTS 
@@ -590,17 +591,17 @@ class GraphDatabaseInitializer:
     async def initialize_graph(self):
         """Initialize the graph with experts and their relationships"""
         try:
-            # Create indexes first
+            # Create indexes first (unchanged)
             self._create_indexes()
             
-            # Fetch experts data
+            # Fetch experts data (unchanged)
             experts_data = self._fetch_experts_data()
             
             if not experts_data:
                 logger.warning("No experts data found to process")
                 return False
 
-            # Process each expert
+            # Process each expert (unchanged)
             with self._neo4j_driver.session() as session:
                 for expert_data in experts_data:
                     try:
@@ -609,32 +610,149 @@ class GraphDatabaseInitializer:
                         logger.error(f"Error processing expert data: {e}")
                         continue
 
-                # Add adaptive relationships based on historical data
+                # Add adaptive relationships based on historical data (unchanged)
                 search_patterns, message_patterns = self._process_historical_data()
                 self._create_adaptive_relationships(session, search_patterns, message_patterns)
+                
+                # NEW: Create interest-based relationships from user_topic_interests
+                try:
+                    interest_relationships = self._fetch_user_interest_relationships()
+                    self._create_interest_relationships(session, interest_relationships)
+                    logger.info("Added interest-based relationships from user topic interactions")
+                except Exception as e:
+                    logger.error(f"Error creating interest relationships: {e}")
 
-            logger.info("Graph initialization complete with adaptive relationships!")
+            logger.info("Graph initialization complete with adaptive and interest-based relationships!")
             return True
 
         except Exception as e:
             logger.error(f"Graph initialization failed: {e}")
             return False
+                
+
+    def _fetch_user_interest_relationships(self):
+        """
+        Fetch interest relationship patterns from user_topic_interests table.
+        This helps build connections between experts based on user interest patterns.
+        """
+        conn = None
+        try:
+            conn = DatabaseConnectionManager.get_postgres_connection()
+            cur = conn.cursor()
+            
+            # Query to find experts that share similar interests based on user interaction patterns
+            cur.execute("""
+                WITH user_topics AS (
+                    -- Get users with their top topics by interaction count
+                    SELECT 
+                        user_id, 
+                        topic_key, 
+                        topic_type,
+                        interaction_count,
+                        ROW_NUMBER() OVER(PARTITION BY user_id, topic_type ORDER BY interaction_count DESC) as rank
+                    FROM user_topic_interests
+                    WHERE topic_type IN ('expert_expertise', 'publication_domain')
+                ),
+                user_interests AS (
+                    -- Select only top 5 interests per user and type
+                    SELECT * FROM user_topics WHERE rank <= 5
+                ),
+                expert_interactions AS (
+                    -- Get experts that users have interacted with
+                    SELECT 
+                        user_id, 
+                        content_id as expert_id,
+                        COUNT(*) as interaction_count
+                    FROM user_interest_logs
+                    WHERE interaction_type = 'expert' AND content_id IS NOT NULL
+                    GROUP BY user_id, content_id
+                ),
+                co_occurrence AS (
+                    -- Find experts that appear together in user interests
+                    SELECT 
+                        e1.expert_id as expert1_id,
+                        e2.expert_id as expert2_id,
+                        COUNT(DISTINCT e1.user_id) as shared_users,
+                        SUM(e1.interaction_count + e2.interaction_count) as total_interactions
+                    FROM expert_interactions e1
+                    JOIN expert_interactions e2 
+                        ON e1.user_id = e2.user_id 
+                        AND e1.expert_id < e2.expert_id
+                    GROUP BY e1.expert_id, e2.expert_id
+                    HAVING COUNT(DISTINCT e1.user_id) > 1
+                )
+                -- Return the final relationship data
+                SELECT 
+                    expert1_id,
+                    expert2_id,
+                    shared_users,
+                    total_interactions,
+                    total_interactions::float / shared_users as avg_interaction_strength
+                FROM co_occurrence
+                ORDER BY shared_users DESC, total_interactions DESC
+                LIMIT 500
+            """)
+            
+            interest_relationships = cur.fetchall()
+            logger.info(f"Fetched {len(interest_relationships)} interest-based relationships")
+            return interest_relationships
+            
+        except Exception as e:
+            logger.error(f"Error fetching interest relationships: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
+    def _create_interest_relationships(self, session, relationships):
+        """
+        Create relationships between experts based on user interest patterns.
+        """
+        if not relationships:
+            logger.info("No interest relationships to create")
+            return
+            
+        try:
+            for expert1_id, expert2_id, shared_users, total_interactions, avg_strength in relationships:
+                # Calculate relationship weight - normalize to 0-1 range
+                weight = min(avg_strength / 10.0, 1.0)
+                
+                # Create bidirectional relationship
+                session.run("""
+                    MATCH (e1:Expert {id: $expert1_id})
+                    MATCH (e2:Expert {id: $expert2_id})
+                    MERGE (e1)-[r:INTEREST_RELATED]-(e2)
+                    SET r.weight = $weight,
+                        r.shared_users = $shared_users,
+                        r.total_interactions = $total_interactions,
+                        r.last_updated = datetime()
+                """, {
+                    "expert1_id": str(expert1_id),
+                    "expert2_id": str(expert2_id),
+                    "weight": weight,
+                    "shared_users": shared_users,
+                    "total_interactions": total_interactions
+                })
+            
+            logger.info(f"Created {len(relationships)} interest-based relationships")
+        except Exception as e:
+            logger.error(f"Error creating interest relationships: {e}")
 
     # Non-async version for direct calls
-    def initialize_graph_sync(self):
-        """Initialize the graph with experts and their relationships - synchronous version"""
+    async def initialize_graph(self):
+        """Initialize the graph with experts and their relationships"""
         try:
-            # Create indexes first
+            # Create indexes first (unchanged)
             self._create_indexes()
             
-            # Fetch experts data
+            # Fetch experts data (unchanged)
             experts_data = self._fetch_experts_data()
             
             if not experts_data:
                 logger.warning("No experts data found to process")
                 return False
 
-            # Process each expert
+            # Process each expert (unchanged)
             with self._neo4j_driver.session() as session:
                 for expert_data in experts_data:
                     try:
@@ -643,11 +761,19 @@ class GraphDatabaseInitializer:
                         logger.error(f"Error processing expert data: {e}")
                         continue
 
-                # Add adaptive relationships based on historical data
+                # Add adaptive relationships based on historical data (unchanged)
                 search_patterns, message_patterns = self._process_historical_data()
                 self._create_adaptive_relationships(session, search_patterns, message_patterns)
+                
+                # NEW: Create interest-based relationships from user_topic_interests
+                try:
+                    interest_relationships = self._fetch_user_interest_relationships()
+                    self._create_interest_relationships(session, interest_relationships)
+                    logger.info("Added interest-based relationships from user topic interactions")
+                except Exception as e:
+                    logger.error(f"Error creating interest relationships: {e}")
 
-            logger.info("Graph initialization complete with adaptive relationships!")
+            logger.info("Graph initialization complete with adaptive and interest-based relationships!")
             return True
 
         except Exception as e:
