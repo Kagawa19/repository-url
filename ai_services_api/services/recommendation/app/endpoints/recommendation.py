@@ -11,6 +11,17 @@ import psycopg2
 from redis.asyncio import Redis
 from ai_services_api.services.recommendation.services.expert_matching import ExpertMatchingService
 from ai_services_api.services.message.core.database import get_db_connection
+from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel
+import json
+import os
+import psycopg2
+from urllib.parse import urlparse
+import logging
+
+
+
+
 
 router = APIRouter()
 
@@ -420,23 +431,7 @@ async def get_expert_recommendations(
     
     return recommendations
 
-from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel
-import json
-import os
-import psycopg2
-from urllib.parse import urlparse
-import logging
 
-# Assuming get_user_id and get_redis are defined elsewhere
-# from dependencies import get_user_id, get_redis
-
-router = APIRouter()
-logger = logging.getLogger(__name__)
-
-class RecommendationClick(BaseModel):
-    view_id: str
-    expert_id: str
 
 @router.post("/recommend/track")
 async def track_recommendation_click(
