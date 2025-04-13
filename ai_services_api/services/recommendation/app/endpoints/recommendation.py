@@ -1,3 +1,7 @@
+import os
+import re
+import time
+from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Request, Depends
 from typing import List, Dict, Any
 from datetime import datetime
@@ -416,46 +420,65 @@ async def get_expert_recommendations(
     
     return recommendations
 
+from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel
+import json
+import os
+import psycopg2
+from urllib.parse import urlparse
+import logging
+
+# Assuming get_user_id and get_redis are defined elsewhere
+# from dependencies import get_user_id, get_redis
+
+router = APIRouter()
+logger = logging.getLogger(__name__)
+
+class RecommendationClick(BaseModel):
+    view_id: str
+    expert_id: str
+
 @router.post("/recommend/track")
 async def track_recommendation_click(
     request: Request,
-    view_id: str = Body(...),
-    expert_id: str = Body(...),
+    payload: RecommendationClick,
     user_id: str = Depends(get_user_id),
-    redis_client: Redis = Depends(get_redis)
+    redis_client = Depends(get_redis)
 ):
     """
     Track when a user clicks on a recommended expert.
-    
     This creates a feedback loop for the recommendation system.
     """
+    view_id = payload.view_id
+    expert_id = payload.expert_id
+
     logger.info(f"Tracking recommendation click - User: {user_id}, Expert: {expert_id}, View: {view_id}")
-    
+
     try:
         # Verify this was a valid recommendation
         view_key = f"rec_view:{view_id}"
         view_data = await redis_client.get(view_key)
-        
+
         if not view_data:
             logger.warning(f"Invalid view ID: {view_id}")
             return {"status": "error", "message": "Invalid view ID"}
-            
+
         try:
             view_info = json.loads(view_data)
-            
+
             # Verify expert was in this recommendation set
             if expert_id not in view_info.get('experts', []):
                 logger.warning(f"Expert {expert_id} not in recommendation view {view_id}")
                 return {"status": "error", "message": "Expert not in recommendation set"}
-                
+
             # Calculate position in recommendations (1-based)
             position = view_info.get('experts', []).index(expert_id) + 1
-                
+
             # Log this click in user_interest_logs with high quality score
             # Connect to database
             conn_params = {}
             database_url = os.getenv('DATABASE_URL')
-            
+
             if database_url:
                 parsed_url = urlparse(database_url)
                 conn_params = {
@@ -473,7 +496,7 @@ async def track_recommendation_click(
                     'user': os.getenv('POSTGRES_USER', 'postgres'),
                     'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres')
                 }
-            
+
             conn = None
             try:
                 conn = psycopg2.connect(**conn_params)
@@ -491,24 +514,24 @@ async def track_recommendation_click(
                         expert_id,
                         0.9  # High quality score for explicit clicks
                     ))
-                    
+
                     # Also update the topic interests based on this expert's expertise
                     cur.execute("""
                         SELECT knowledge_expertise, fields, domains
                         FROM experts_expert
                         WHERE id = %s
                     """, (expert_id,))
-                    
+
                     expert_data = cur.fetchone()
                     if expert_data:
                         knowledge_expertise, fields, domains = expert_data
-                        
+
                         # Track expertise as interests
                         if knowledge_expertise:
                             for expertise in knowledge_expertise:
                                 if not expertise:
                                     continue
-                                    
+
                                 cur.execute("""
                                     INSERT INTO user_topic_interests 
                                         (user_id, topic_key, topic_type, interaction_count, last_interaction)
@@ -519,13 +542,13 @@ async def track_recommendation_click(
                                         last_interaction = CURRENT_TIMESTAMP,
                                         engagement_score = user_topic_interests.engagement_score * 0.9 + 1.0
                                 """, (user_id, expertise.lower(), 'expert_expertise'))
-                        
+
                         # Track fields as interests
                         if fields:
                             for field in fields:
                                 if not field:
                                     continue
-                                    
+
                                 cur.execute("""
                                     INSERT INTO user_topic_interests 
                                         (user_id, topic_key, topic_type, interaction_count, last_interaction)
@@ -536,13 +559,13 @@ async def track_recommendation_click(
                                         last_interaction = CURRENT_TIMESTAMP,
                                         engagement_score = user_topic_interests.engagement_score * 0.9 + 1.0
                                 """, (user_id, field.lower(), 'expert_expertise'))
-                        
+
                         # Track domains as interests
                         if domains:
                             for domain in domains:
                                 if not domain:
                                     continue
-                                    
+
                                 cur.execute("""
                                     INSERT INTO user_topic_interests 
                                         (user_id, topic_key, topic_type, interaction_count, last_interaction)
@@ -553,10 +576,10 @@ async def track_recommendation_click(
                                         last_interaction = CURRENT_TIMESTAMP,
                                         engagement_score = user_topic_interests.engagement_score * 0.9 + 1.0
                                 """, (user_id, domain.lower(), 'publication_domain'))
-                    
-                    conn.commit()
-                    logger.info(f"Recorded recommendation click for user {user_id} on expert {expert_id}")
-                    
+
+                conn.commit()
+                logger.info(f"Recorded recommendation click for user {user_id} on expert {expert_id}")
+
             except Exception as db_error:
                 logger.error(f"Database error recording recommendation click: {db_error}")
                 if conn:
@@ -564,7 +587,7 @@ async def track_recommendation_click(
             finally:
                 if conn:
                     conn.close()
-            
+
             return {
                 "status": "success",
                 "message": "Click tracked successfully",
@@ -575,14 +598,16 @@ async def track_recommendation_click(
                     "position": position
                 }
             }
-            
+
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding view data: {e}")
             return {"status": "error", "message": "Invalid view data format"}
-            
+
     except Exception as e:
         logger.error(f"Error tracking recommendation click: {e}")
         return {"status": "error", "message": f"Internal error: {str(e)}"}
+
+ 
 
 @router.get("/test/recommend")
 async def test_get_expert_recommendations(
