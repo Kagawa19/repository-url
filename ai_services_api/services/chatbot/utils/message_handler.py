@@ -1,8 +1,9 @@
 import asyncio
 import logging
+import random
 import re
 import time
-from typing import AsyncIterable, Optional, Dict
+from typing import AsyncIterable, List, Optional, Dict, Tuple
 from datetime import datetime
 from .llm_manager import GeminiLLMManager
 from ai_services_api.services.message.core.database import get_db_connection
