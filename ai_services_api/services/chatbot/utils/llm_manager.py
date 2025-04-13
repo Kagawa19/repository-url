@@ -847,25 +847,26 @@ class GeminiLLMManager:
         else:
             return "conversational"
         
-    async def generate_async_response(self, message: str) -> AsyncGenerator[str, None]:
+    async def generate_async_response(self, message: str, user_interests: str = "") -> AsyncGenerator[str, None]:
         """
         Generates a response with enhanced prompting strategies tailored to detected intent,
-        improved context handling, and tone guidance for more natural, engaging interactions.
+        improved context handling, tone guidance for more natural, engaging interactions,
+        and personalization based on user interests.
         """
         try:
-            # Step 1: Intent Detection
+            # Step 1: Intent Detection (unchanged)
             intent_result = await self.detect_intent(message)
             intent = intent_result['intent']
             confidence = intent_result.get('confidence', 0.0)
             
-            # Determine conversation style based on message analysis
+            # Determine conversation style based on message analysis (unchanged)
             message_style = self._analyze_message_style(message)
             
-            # Step 2: Context preparation based on intent
+            # Step 2: Context preparation based on intent (unchanged)
             context = ""
             context_type = "general"
             
-            # Handle EXPERT Intent
+            # Handle EXPERT Intent (unchanged)
             if intent == QueryIntent.EXPERT:
                 experts, error = await self.get_experts(message, limit=5)
                 if experts:
@@ -895,7 +896,7 @@ class GeminiLLMManager:
                     context = "No matching experts found, but I can still try to help with your query."
                     context_type = "no_experts"
             
-            # Handle PUBLICATION Intent
+            # Handle PUBLICATION Intent (unchanged)
             elif intent == QueryIntent.PUBLICATION:
                 publications, error = await self.get_publications(message, limit=3)
                 if publications:
@@ -905,26 +906,26 @@ class GeminiLLMManager:
                     context = "No matching publications found, but I can still provide general information."
                     context_type = "no_publications"
             
-            # Handle NAVIGATION Intent
+            # Handle NAVIGATION Intent (unchanged)
             elif intent == QueryIntent.NAVIGATION:
                 context = "I can help you navigate APHRC resources and website sections."
                 context_type = "navigation"
             
-            # Default context for GENERAL Intent
+            # Default context for GENERAL Intent (unchanged)
             else:
                 context = "How can I assist you with APHRC research today?"
                 context_type = "general"
             
-            # Step 3: Stream Metadata
+            # Step 3: Stream Metadata (unchanged)
             yield json.dumps({'is_metadata': True, 'metadata': {'intent': intent.value, 'style': message_style}})
             
-            # Step 4: Create tailored prompt with tone and style guidance
-            system_message = self._create_tailored_prompt(intent, context_type, message_style)
+            # Step 4: Create tailored prompt with tone, style guidance, and user interests
+            system_message = self._create_tailored_prompt(intent, context_type, message_style, user_interests)
             
-            # Step 5: Prepare the full context with system guidance and user query
+            # Step 5: Prepare the full context with system guidance and user query (unchanged)
             full_prompt = f"{system_message}\n\nContext:\n{context}\n\nUser Query: {message}"
             
-            # Step 6: Stream Enhanced Response from Gemini
+            # Step 6: Stream Enhanced Response from Gemini (unchanged)
             model = self._setup_gemini()
             response = model.generate_content(full_prompt, stream=True)
             
@@ -939,6 +940,135 @@ class GeminiLLMManager:
             logger.error(f"Error generating response: {e}")
             yield "I apologize, but I encountered an issue while processing your request. Could you please rephrase your question or try again later?"
 
+    def _create_tailored_prompt(self, intent, context_type: str, message_style: str, user_interests: str = "") -> str:
+        """
+        Create a tailored system prompt based on detected intent, context type, message style,
+        and user interests when available.
+        
+        Args:
+            intent: The detected intent from QueryIntent enum
+            context_type (str): The type of context being provided
+            message_style (str): The communication style detected in the user's message
+            user_interests (str): Optional string describing user's previous interests
+                
+        Returns:
+            str: A specialized system prompt for the LLM
+        """
+        # Base instructions for all responses (unchanged)
+        base_instructions = """
+        You are an assistant for the African Population and Health Research Center (APHRC).
+        Your role is to provide helpful, accurate information about APHRC research, 
+        publications, experts, and resources. Maintain a professional, supportive tone
+        while being conversational and engaging.
+        """
+        
+        # Style-specific tone guidance (unchanged)
+        tone_guidance = {
+            "technical": """
+            Use precise language and academic terminology appropriate for researchers and professionals.
+            Provide detailed information with proper citations when possible.
+            Maintain clarity and accuracy while demonstrating deep subject matter expertise.
+            """,
+            
+            "formal": """
+            Use professional language with moderate formality.
+            Be thorough and precise while remaining accessible to non-specialists.
+            Maintain a respectful, informed tone appropriate for official communication.
+            """,
+            
+            "conversational": """
+            Use natural, engaging language that balances professionalism with approachability.
+            Create a dialogue-like experience using conversational transitions.
+            Be friendly and helpful while maintaining APHRC's professional authority.
+            """
+        }
+        
+        # Intent-specific response structures (unchanged)
+        intent_guidance = {
+            QueryIntent.PUBLICATION: """
+            When discussing publications:
+            - Highlight key findings and their significance
+            - Explain the research context and relevance
+            - Connect publications to broader themes in APHRC's work
+            - Use natural transitions between publications
+            - Suggest related publications when appropriate
+            """,
+            
+            QueryIntent.EXPERT: """
+            When discussing experts:
+            - Emphasize their specific areas of expertise and contributions
+            - Make connections between their work and the user's query
+            - Provide context about their role at APHRC
+            - Highlight notable publications or projects
+            - Suggest how their expertise might be relevant to the user's interests
+            """,
+            
+            QueryIntent.NAVIGATION: """
+            When providing navigation assistance:
+            - Give clear, step-by-step guidance
+            - Explain what the user will find in each section
+            - Provide context about why certain resources might be useful
+            - Anticipate related information needs
+            - Offer suggestions for exploring related content
+            """,
+            
+            QueryIntent.GENERAL: """
+            For general information about APHRC:
+            - Provide balanced, comprehensive overviews
+            - Highlight APHRC's mission and impact when relevant
+            - Connect information to broader themes in public health and population research
+            - Anticipate follow-up questions
+            - Provide examples and context to make information accessible
+            """
+        }
+        
+        # Context-specific guidance for empty results (unchanged)
+        context_specific = ""
+        if context_type == "no_experts":
+            context_specific = """
+            Although no specific experts were found, provide helpful general information
+            about APHRC's work in the relevant domain. Suggest broader research areas
+            the user might explore and mention that you can help find information about
+            specific experts if they provide more details.
+            """
+        elif context_type == "no_publications":
+            context_specific = """
+            Although no specific publications were found, provide helpful general information
+            about APHRC's research in the relevant domain. Suggest broader topics
+            the user might explore and mention that you can help find specific publications
+            if they provide more details about their interests.
+            """
+        
+        # NEW: Add user interest guidance if provided
+        user_interest_guidance = ""
+        if user_interests:
+            user_interest_guidance = f"""
+            This user has previously shown interest in:
+            {user_interests}
+            
+            When appropriate, consider connecting your response to these interests.
+            If you find related publications or experts that align with these interests,
+            highlight those connections. However, always prioritize directly answering
+            their current question.
+            """
+        
+        # Combine appropriate guidance elements (modified to include user interests)
+        selected_tone = tone_guidance.get(message_style, tone_guidance["conversational"])
+        selected_intent = intent_guidance.get(intent, intent_guidance[QueryIntent.GENERAL])
+        
+        full_prompt = f"{base_instructions}\n\n{selected_tone}\n\n{selected_intent}\n\n{context_specific}\n\n{user_interest_guidance}"
+        
+        # Add guidance on structuring the response (unchanged)
+        full_prompt += """
+        Structure your response for clarity:
+        - Begin with a direct, helpful answer to the query
+        - Provide context and details in a logical flow
+        - Use natural transitions between topics
+        - Include specific examples when helpful
+        - End with a courteous closing that invites further engagement
+        """
+        
+        return full_prompt.strip()
 
     def _load_embedding_model(self):
         """Try loading embedding model from various locations."""

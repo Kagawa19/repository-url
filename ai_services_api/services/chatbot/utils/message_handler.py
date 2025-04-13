@@ -11,7 +11,7 @@ import asyncio
 from typing import Dict, Any, AsyncGenerator
 from ai_services_api.services.chatbot.utils.db_utils import DatabaseConnector
 import json
-
+from ai_services_api.services.chatbot.utils import UserInterestTracker
 logger = logging.getLogger(__name__)
 
 class MessageHandler:
@@ -443,6 +443,187 @@ class MessageHandler:
         cleaned = re.sub(r'\s{2,}', ' ', cleaned)
         
         return cleaned
+    
+    async def send_message_async(self, message: str, user_id: str, session_id: str) -> AsyncGenerator:
+        """
+        Stream messages with enhanced conversation awareness, contextual references,
+        improved flow between multiple interactions, and user interest tracking.
+        """
+        logger.info(f"Starting send_message_async - User: {user_id}, Session: {session_id}")
+        logger.info(f"Message content: {message[:50]}... (truncated)")
+        
+        try:
+            # Retrieve conversation history for this session
+            conversation_history = await self._get_conversation_history(user_id, session_id)
+            logger.info(f"Retrieved conversation history with {len(conversation_history)} previous turns")
+            
+            # Analyze if this is a follow-up question
+            is_followup, previous_topic = self._analyze_followup(message, conversation_history)
+            if is_followup:
+                logger.info(f"Detected follow-up question about: {previous_topic}")
+            
+            # Log intent detection start
+            logger.info("Detecting message intent")
+            intent_result = await self.llm_manager.detect_intent(message)
+            intent_type = intent_result.get('intent', 'unknown')
+            logger.info(f"Detected intent: {intent_type}, confidence: {intent_result.get('confidence', 0)}")
+            
+            # Determine interaction category for logging
+            interaction_category = 'general'
+            if hasattr(intent_type, 'value'):  # Handle enum type
+                intent_value = intent_type.value
+                if intent_value == 'publication':
+                    interaction_category = 'publication'
+                elif intent_value == 'expert':
+                    interaction_category = 'expert'
+            else:  # Handle string type
+                if str(intent_type).lower() == 'publication':
+                    interaction_category = 'publication'
+                elif str(intent_type).lower() == 'expert':
+                    interaction_category = 'expert'
+            
+            # Get the interest tracker
+            interest_tracker = self._get_interest_tracker()
+            
+            # Use it for logging
+            await interest_tracker.log_interaction(
+                user_id=user_id,
+                session_id=session_id,
+                query=message,
+                interaction_type=interaction_category
+            )
+            
+            # Special handling for publication and expert list requests
+            if "list" in message.lower() and "publication" in message.lower():
+                logger.info("Detected publication list request - will apply special formatting")
+            elif "list" in message.lower() and ("expert" in message.lower() or "researcher" in message.lower()):
+                logger.info("Detected expert list request - will apply special formatting")
+            
+            # Enhance the message with conversation context if this is a follow-up
+            enhanced_message = message
+            if is_followup and previous_topic and conversation_history:
+                enhanced_message = self._enhance_message_with_context(message, previous_topic, conversation_history)
+                logger.info(f"Enhanced message with conversation context: {enhanced_message[:50]}... (truncated)")
+            
+            # Use the interest tracker to build context
+            user_interests = await interest_tracker.build_user_interest_context(user_id)
+            if user_interests:
+                # Only add interests context for relevant intents
+                if interaction_category != 'general':
+                    enhanced_message = f"{user_interests}\n\n{enhanced_message}"
+                    logger.info("Enhanced message with user interest context")
+            
+            # Create a tracker for content shown to the user
+            content_tracker = {
+                'publications': [],
+                'experts': [],
+                'topics': [],
+                'domains': [],
+                'expertise': []
+            }
+            
+            # Start the async response generator
+            logger.info("Starting async response generation")
+            response_generator = self.llm_manager.generate_async_response(enhanced_message)
+            
+            # Add conversation-aware introduction for follow-ups if appropriate
+            if is_followup and len(conversation_history) > 0:
+                intro = self._get_followup_introduction(previous_topic)
+                if intro:
+                    yield intro
+            
+            # Process and yield the main response
+            async for part in self.process_stream_response(response_generator):
+                # Extract any content information from the response metadata
+                if isinstance(part, dict) and not part.get('is_metadata', False):
+                    # Check for publication data
+                    if 'publications' in part:
+                        content_tracker['publications'].extend(part['publications'])
+                    # Check for expert data
+                    if 'experts' in part:
+                        content_tracker['experts'].extend(part['experts'])
+                
+                # Check metadata in self.metadata if set by process_stream_response
+                if hasattr(self, 'metadata') and self.metadata:
+                    # This could contain information about shown content
+                    meta = self.metadata
+                    if isinstance(meta, dict):
+                        if 'publications' in meta:
+                            content_tracker['publications'].extend(meta['publications'])
+                        if 'experts' in meta:
+                            content_tracker['experts'].extend(meta['experts'])
+                
+                # Log the type and partial content of each processed part
+                part_type = type(part).__name__
+                if isinstance(part, dict):
+                    logger.info(f"Yielding processed dictionary part type: {part_type}")
+                    logger.debug(f"Dictionary content: {str(part)[:100]}... (truncated)")
+                elif isinstance(part, bytes):
+                    logger.info(f"Yielding processed bytes part, length: {len(part)}")
+                elif isinstance(part, str):
+                    logger.info(f"Yielding processed string part, length: {len(part)}")
+                    logger.debug(f"String content: {part[:50]}... (truncated)")
+                else:
+                    logger.warning(f"Unexpected processed part type: {part_type}")
+                    logger.debug(f"Content representation: {str(part)[:100]}")
+                    
+                # Yield the cleaned part
+                yield part
+            
+            # Process any tracked content after response is complete
+            if content_tracker['publications']:
+                # Extract topics and domains from publications
+                topics, domains = await interest_tracker.extract_topics_from_publications(
+                    content_tracker['publications']
+                )
+                
+                # Track these as user interests
+                if topics:
+                    await interest_tracker.track_topic_interests(
+                        user_id, topics, 'publication_topic'
+                    )
+                    content_tracker['topics'] = topics
+                    
+                if domains:
+                    await interest_tracker.track_topic_interests(
+                        user_id, domains, 'publication_domain'
+                    )
+                    content_tracker['domains'] = domains
+            
+            if content_tracker['experts']:
+                # Extract expertise areas from experts
+                expertise = await interest_tracker.extract_expertise_from_experts(
+                    content_tracker['experts']
+                )
+                
+                # Track these as user interests
+                if expertise:
+                    await interest_tracker.track_topic_interests(
+                        user_id, expertise, 'expert_expertise'
+                    )
+                    content_tracker['expertise'] = expertise
+            
+            # Add a coherent closing based on conversation context if appropriate
+            if random.random() < 0.3:  # Only add this sometimes to avoid being repetitive
+                yield self._get_conversation_closing(intent_type, len(conversation_history))
+                
+            # Save this interaction to conversation history
+            await self._save_to_conversation_history(user_id, session_id, message, intent_type)
+                
+            logger.info("Completed send_message_async stream generation")
+            
+        except Exception as e:
+            logger.error(f"Error in send_message_async: {e}", exc_info=True)
+            yield "I apologize, but I encountered an issue processing your request. Could you please try again or rephrase your question?"
+    
+    def _get_interest_tracker(self):
+        """Lazy initialization of the interest tracker."""
+        if not hasattr(self, 'interest_tracker'):
+            from ai_services_api.services.chatbot.utils.db_utils import DatabaseConnector
+            from ai_services_api.services.chatbot.utils.interest_tracker import UserInterestTracker
+            self.interest_tracker = UserInterestTracker(DatabaseConnector)
+            logger.info("Initialized user interest tracker")
+        return self.interest_tracker
 
     def _extract_metadata(self, chunk):
         """
@@ -1076,90 +1257,55 @@ class MessageHandler:
         # Return a random introduction
         return random.choice(intros)
 
-    async def send_message_async(self, message: str, user_id: str, session_id: str) -> AsyncGenerator:
+    
+
+    async def get_user_interests_for_response(self, user_id: str) -> str:
         """
-        Stream messages with enhanced conversation awareness, contextual references,
-        and improved flow between multiple interactions.
-        """
-        logger.info(f"Starting send_message_async - User: {user_id}, Session: {session_id}")
-        logger.info(f"Message content: {message[:50]}... (truncated)")
+        Retrieve user interests formatted for inclusion in response generation.
         
+        Args:
+            user_id (str): Unique identifier for the user
+            
+        Returns:
+            str: Formatted user interests for inclusion in LLM context
+        """
         try:
-            # Retrieve conversation history for this session
-            conversation_history = await self._get_conversation_history(user_id, session_id)
-            logger.info(f"Retrieved conversation history with {len(conversation_history)} previous turns")
-            
-            # Analyze if this is a follow-up question
-            is_followup, previous_topic = self._analyze_followup(message, conversation_history)
-            if is_followup:
-                logger.info(f"Detected follow-up question about: {previous_topic}")
-            
-            # Log intent detection start
-            logger.info("Detecting message intent")
-            intent_result = await self.llm_manager.detect_intent(message)
-            intent_type = intent_result.get('intent', 'unknown')
-            logger.info(f"Detected intent: {intent_type}, confidence: {intent_result.get('confidence', 0)}")
-            
-            # Special handling for publication and expert list requests
-            if "list" in message.lower() and "publication" in message.lower():
-                logger.info("Detected publication list request - will apply special formatting")
-            elif "list" in message.lower() and ("expert" in message.lower() or "researcher" in message.lower()):
-                logger.info("Detected expert list request - will apply special formatting")
-            
-            # Enhance the message with conversation context if this is a follow-up
-            enhanced_message = message
-            if is_followup and previous_topic and conversation_history:
-                enhanced_message = self._enhance_message_with_context(message, previous_topic, conversation_history)
-                logger.info(f"Enhanced message with conversation context: {enhanced_message[:50]}... (truncated)")
-            
-            # Start the async response generator
-            logger.info("Starting async response generation")
-            response_generator = self.llm_manager.generate_async_response(enhanced_message)
-            
-            # Process the response through process_stream_response
-            logger.info("Processing response through cleaning pipeline")
-            
-            # Add conversation-aware introduction for follow-ups if appropriate
-            if is_followup and len(conversation_history) > 0:
-                intro = self._get_followup_introduction(previous_topic)
-                if intro:
-                    yield intro
-            
-            # Process and yield the main response
-            async for part in self.process_stream_response(response_generator):
-                # The part is now cleaned by process_stream_response
+            # Skip if interest tracker is not available
+            if not hasattr(self, 'interest_tracker'):
+                return ""
                 
-                # Log the type and partial content of each processed part
-                part_type = type(part).__name__
-                
-                if isinstance(part, dict):
-                    # This should rarely happen now as metadata is filtered by process_stream_response
-                    logger.info(f"Yielding processed dictionary part type: {part_type}")
-                    logger.debug(f"Dictionary content: {str(part)[:100]}... (truncated)")
-                elif isinstance(part, bytes):
-                    logger.info(f"Yielding processed bytes part, length: {len(part)}")
-                elif isinstance(part, str):
-                    logger.info(f"Yielding processed string part, length: {len(part)}")
-                    logger.debug(f"String content: {part[:50]}... (truncated)")
-                else:
-                    logger.warning(f"Unexpected processed part type: {part_type}")
-                    logger.debug(f"Content representation: {str(part)[:100]}")
-                    
-                # Yield the cleaned part
-                yield part
+            # Get user interests from tracker
+            interests = await self.interest_tracker.get_user_interests(user_id)
             
-            # Add a coherent closing based on conversation context if appropriate
-            if random.random() < 0.3:  # Only add this sometimes to avoid being repetitive
-                yield self._get_conversation_closing(intent_type, len(conversation_history))
+            if not any(interests.values()):
+                return ""
                 
-            # Save this interaction to conversation history
-            await self._save_to_conversation_history(user_id, session_id, message, intent_type)
+            # Format interests for the response context
+            context_parts = []
+            
+            # Add publication topics if available
+            if interests.get('publication_topic', []):
+                topics_str = ", ".join(interests['publication_topic'][:3])
+                context_parts.append(f"Research topics: {topics_str}")
                 
-            logger.info("Completed send_message_async stream generation")
+            # Add publication domains if available
+            if interests.get('publication_domain', []):
+                domains_str = ", ".join(interests['publication_domain'][:3])
+                context_parts.append(f"Research domains: {domains_str}")
+                
+            # Add expert expertise if available
+            if interests.get('expert_expertise', []):
+                expertise_str = ", ".join(interests['expert_expertise'][:3])
+                context_parts.append(f"Expert areas: {expertise_str}")
+                
+            if not context_parts:
+                return ""
+                
+            return "\n".join(context_parts)
             
         except Exception as e:
-            logger.error(f"Error in send_message_async: {e}", exc_info=True)
-            yield "I apologize, but I encountered an issue processing your request. Could you please try again or rephrase your question?"
+            logger.error(f"Error retrieving user interests for response: {e}")
+            return ""
     async def _cache_response(self, message: str, user_id: str, response: str):
         """Cache response for future use during rate limiting."""
         try:

@@ -52,9 +52,8 @@ async def get_user_id(request: Request) -> str:
     return user_id
 
 @DatabaseConnector.retry_on_failure(max_retries=3)
-# Enhanced logging for process_chat_request function
 async def process_chat_request(query: str, user_id: str, redis_client) -> ChatResponse:
-    """Handle chat request with enhanced logging for debugging."""
+    """Handle chat request with enhanced logging for debugging and interest tracking."""
     # Capture overall start time
     overall_start_time = datetime.utcnow()
     logger.info(f"Starting process_chat_request")
@@ -79,6 +78,30 @@ async def process_chat_request(query: str, user_id: str, redis_client) -> ChatRe
         # Check cache hit
         if cache_check:
             logger.info(f"Cache hit detected for query")
+            # Update interest tracking even for cached responses if possible
+            try:
+                # We can't easily track content for cached responses,
+                # but we can at least log the basic interaction
+                if hasattr(message_handler, 'interest_tracker'):
+                    cached_data = json.loads(cache_check)
+                    # Extract intent from cached data if available
+                    intent_type = 'general'
+                    if 'metadata' in cached_data and 'intent' in cached_data['metadata']:
+                        intent_type = cached_data['metadata']['intent']
+                    
+                    # Log basic interaction
+                    await message_handler.interest_tracker.log_interaction(
+                        user_id=user_id,
+                        session_id=session_id,
+                        query=query,
+                        interaction_type=intent_type,
+                        response_quality=0.8  # Assume good quality for cached responses
+                    )
+                    
+                    logger.info("Added interest tracking for cached response")
+            except Exception as tracking_error:
+                logger.warning(f"Non-critical error in interest tracking for cached response: {tracking_error}")
+                
             return ChatResponse(**json.loads(cache_check))
 
         # Initialize response collection
@@ -140,6 +163,20 @@ async def process_chat_request(query: str, user_id: str, redis_client) -> ChatRe
         # Handle error scenario
         if error_response:
             logger.info("Generating error response")
+            
+            # Log failed interaction if interest tracking is available
+            try:
+                if hasattr(message_handler, 'interest_tracker'):
+                    await message_handler.interest_tracker.log_interaction(
+                        user_id=user_id,
+                        session_id=session_id,
+                        query=query,
+                        interaction_type='error',
+                        response_quality=0.0
+                    )
+            except Exception as tracking_error:
+                logger.warning(f"Non-critical error in interest tracking for error response: {tracking_error}")
+                
             chat_data = {
                 "response": error_response,
                 "timestamp": datetime.utcnow().isoformat(),
@@ -166,12 +203,19 @@ async def process_chat_request(query: str, user_id: str, redis_client) -> ChatRe
         
         logger.info(f"Successfully processed chat request")
         
-        # Prepare chat data
+        # Get intent metadata for tracking quality if available
+        intent_metadata = {}
+        if hasattr(message_handler, 'metadata') and message_handler.metadata:
+            intent_metadata = message_handler.metadata
+            logger.debug(f"Retrieved metadata from message handler: {intent_metadata}")
+            
+        # Prepare chat data with metadata
         chat_data = {
             "response": complete_response,
             "timestamp": datetime.utcnow().isoformat(),
             "user_id": user_id,
-            "response_time": response_time
+            "response_time": response_time,
+            "metadata": intent_metadata  # Include metadata for future retrieval
         }
 
         # Save to cache and database
@@ -187,6 +231,32 @@ async def process_chat_request(query: str, user_id: str, redis_client) -> ChatRe
                 )
             )
             logger.info("Successfully saved to cache and database")
+            
+            # Record interaction quality if available
+            if hasattr(message_handler, 'record_interaction'):
+                try:
+                    # Add metadata about the response for quality tracking
+                    await message_handler.record_interaction(
+                        session_id=session_id,
+                        user_id=user_id,
+                        query=query,
+                        response_data={
+                            'response': complete_response,
+                            'metrics': {
+                                'response_time': response_time,
+                                'intent': intent_metadata.get('intent', 'general'),
+                                'quality': {
+                                    'helpfulness_score': 0.8,  # Default good score
+                                    'hallucination_risk': 0.2,  # Default low risk
+                                    'factual_grounding_score': 0.7  # Default good grounding
+                                }
+                            }
+                        }
+                    )
+                    logger.info("Recorded interaction quality metrics")
+                except Exception as quality_error:
+                    logger.warning(f"Non-critical error recording quality metrics: {quality_error}")
+                    
         except Exception as save_error:
             logger.error(f"Error in cache/DB save: {save_error}", exc_info=True)
 
