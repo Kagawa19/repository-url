@@ -666,16 +666,185 @@ class GeminiLLMManager:
             logger.error(f"Error in semantic search: {e}")
             return []
         
+    async def _get_conversation_history(self, user_id: str, session_id: str) -> List[Dict]:
+        """
+        Retrieve conversation history for the current session.
+        
+        Args:
+            user_id (str): User identifier
+            session_id (str): Session identifier
+            
+        Returns:
+            List[Dict]: Previous interactions in this conversation
+        """
+        try:
+            # Try to get history from database
+            async with DatabaseConnector.get_connection() as conn:
+                # Get the last 5 interactions for this session, ordered by timestamp
+                history = await conn.fetch("""
+                    SELECT query, response, intent_type, timestamp
+                    FROM chatbot_logs
+                    WHERE user_id = $1 AND session_id = $2
+                    ORDER BY timestamp DESC
+                    LIMIT 5
+                """, user_id, session_id)
+                
+                # Format history as a list of dictionaries
+                conversation = []
+                for item in history:
+                    conversation.append({
+                        'query': item.get('query', ''),
+                        'response': item.get('response', ''),
+                        'intent': item.get('intent_type', 'unknown'),
+                        'timestamp': item.get('timestamp', datetime.now())
+                    })
+                
+                # Return reversed to get chronological order
+                return list(reversed(conversation))
+        
+        except Exception as e:
+            logger.warning(f"Error retrieving conversation history: {e}")
+            # Fall back to any conversation history stored in instance
+            if hasattr(self, 'conversation_cache'):
+                return self.conversation_cache.get(session_id, [])
+            return []
+            
+    def _create_tailored_prompt(self, intent, context_type: str, message_style: str) -> str:
+        """
+        Create a tailored system prompt based on detected intent, context type, and message style.
+        
+        Args:
+            intent: The detected intent from QueryIntent enum
+            context_type (str): The type of context being provided
+            message_style (str): The communication style detected in the user's message
+            
+        Returns:
+            str: A specialized system prompt for the LLM
+        """
+        # Base instructions for all responses
+        base_instructions = """
+        You are an assistant for the African Population and Health Research Center (APHRC).
+        Your role is to provide helpful, accurate information about APHRC research, 
+        publications, experts, and resources. Maintain a professional, supportive tone
+        while being conversational and engaging.
+        """
+        
+        # Style-specific tone guidance
+        tone_guidance = {
+            "technical": """
+            Use precise language and academic terminology appropriate for researchers and professionals.
+            Provide detailed information with proper citations when possible.
+            Maintain clarity and accuracy while demonstrating deep subject matter expertise.
+            """,
+            
+            "formal": """
+            Use professional language with moderate formality.
+            Be thorough and precise while remaining accessible to non-specialists.
+            Maintain a respectful, informed tone appropriate for official communication.
+            """,
+            
+            "conversational": """
+            Use natural, engaging language that balances professionalism with approachability.
+            Create a dialogue-like experience using conversational transitions.
+            Be friendly and helpful while maintaining APHRC's professional authority.
+            """
+        }
+        
+        # Intent-specific response structures
+        intent_guidance = {
+            QueryIntent.PUBLICATION: """
+            When discussing publications:
+            - Highlight key findings and their significance
+            - Explain the research context and relevance
+            - Connect publications to broader themes in APHRC's work
+            - Use natural transitions between publications
+            - Suggest related publications when appropriate
+            """,
+            
+            QueryIntent.EXPERT: """
+            When discussing experts:
+            - Emphasize their specific areas of expertise and contributions
+            - Make connections between their work and the user's query
+            - Provide context about their role at APHRC
+            - Highlight notable publications or projects
+            - Suggest how their expertise might be relevant to the user's interests
+            """,
+            
+            QueryIntent.NAVIGATION: """
+            When providing navigation assistance:
+            - Give clear, step-by-step guidance
+            - Explain what the user will find in each section
+            - Provide context about why certain resources might be useful
+            - Anticipate related information needs
+            - Offer suggestions for exploring related content
+            """,
+            
+            QueryIntent.GENERAL: """
+            For general information about APHRC:
+            - Provide balanced, comprehensive overviews
+            - Highlight APHRC's mission and impact when relevant
+            - Connect information to broader themes in public health and population research
+            - Anticipate follow-up questions
+            - Provide examples and context to make information accessible
+            """
+        }
+        
+        # Context-specific guidance for empty results
+        context_specific = ""
+        if context_type == "no_experts":
+            context_specific = """
+            Although no specific experts were found, provide helpful general information
+            about APHRC's work in the relevant domain. Suggest broader research areas
+            the user might explore and mention that you can help find information about
+            specific experts if they provide more details.
+            """
+        elif context_type == "no_publications":
+            context_specific = """
+            Although no specific publications were found, provide helpful general information
+            about APHRC's research in the relevant domain. Suggest broader topics
+            the user might explore and mention that you can help find specific publications
+            if they provide more details about their interests.
+            """
+        
+        # Combine appropriate guidance elements
+        selected_tone = tone_guidance.get(message_style, tone_guidance["conversational"])
+        selected_intent = intent_guidance.get(intent, intent_guidance[QueryIntent.GENERAL])
+        
+        full_prompt = f"{base_instructions}\n\n{selected_tone}\n\n{selected_intent}\n\n{context_specific}"
+        
+        # Add guidance on structuring the response
+        full_prompt += """
+        Structure your response for clarity:
+        - Begin with a direct, helpful answer to the query
+        - Provide context and details in a logical flow
+        - Use natural transitions between topics
+        - Include specific examples when helpful
+        - End with a courteous closing that invites further engagement
+        """
+        
+        return full_prompt.strip()
+        
     async def generate_async_response(self, message: str) -> AsyncGenerator[str, None]:
-        """Generates a response without mixing expert and publication logic."""
+        """
+        Generates a response with enhanced prompting strategies tailored to detected intent,
+        improved context handling, and tone guidance for more natural, engaging interactions.
+        """
         try:
             # Step 1: Intent Detection
             intent_result = await self.detect_intent(message)
             intent = intent_result['intent']
+            confidence = intent_result.get('confidence', 0.0)
             
-            # Step 2: Handle EXPERT Intent
+            # Determine conversation style based on message analysis
+            message_style = self._analyze_message_style(message)
+            
+            # Step 2: Context preparation based on intent
+            context = ""
+            context_type = "general"
+            
+            # Handle EXPERT Intent
             if intent == QueryIntent.EXPERT:
-                experts, _ = await self.get_experts(message, limit=5)
+                experts, error = await self.get_experts(message, limit=5)
                 if experts:
                     # Check if we have a valid embedding model
                     if self.embedding_model:
@@ -698,35 +867,54 @@ class GeminiLLMManager:
                         ranked_experts = experts
                         
                     context = self.format_expert_context(ranked_experts)
+                    context_type = "expert"
                 else:
-                    context = "No matching experts found."
+                    context = "No matching experts found, but I can still try to help with your query."
+                    context_type = "no_experts"
             
-            # Step 3: Handle PUBLICATION Intent
+            # Handle PUBLICATION Intent
             elif intent == QueryIntent.PUBLICATION:
-                publications, _ = await self.get_publications(message, limit=3)
+                publications, error = await self.get_publications(message, limit=3)
                 if publications:
                     context = self.format_publication_context(publications)
+                    context_type = "publication"
                 else:
-                    context = "No matching publications found."
+                    context = "No matching publications found, but I can still provide general information."
+                    context_type = "no_publications"
             
-            # Step 4: Default Response
+            # Handle NAVIGATION Intent
+            elif intent == QueryIntent.NAVIGATION:
+                context = "I can help you navigate APHRC resources and website sections."
+                context_type = "navigation"
+            
+            # Default context for GENERAL Intent
             else:
-                context = "How can I assist you with APHRC research?"
+                context = "How can I assist you with APHRC research today?"
+                context_type = "general"
             
-            # Step 5: Stream Metadata
-            yield json.dumps({'is_metadata': True, 'metadata': {'intent': intent.value}})
+            # Step 3: Stream Metadata
+            yield json.dumps({'is_metadata': True, 'metadata': {'intent': intent.value, 'style': message_style}})
             
-            # Step 6: Generate Final Response with Gemini
+            # Step 4: Create tailored prompt with tone and style guidance
+            system_message = self._create_tailored_prompt(intent, context_type, message_style)
+            
+            # Step 5: Prepare the full context with system guidance and user query
+            full_prompt = f"{system_message}\n\nContext:\n{context}\n\nUser Query: {message}"
+            
+            # Step 6: Stream Enhanced Response from Gemini
             model = self._setup_gemini()
-            prompt = f"Context:\n{context}\nQuestion: {message}"
-            response = model.generate_content(prompt, stream=True)  # Use generateContent
+            response = model.generate_content(full_prompt, stream=True)
             
             for chunk in response:
                 if hasattr(chunk, 'text') and chunk.text:
                     yield chunk.text
+                elif hasattr(chunk, 'parts') and chunk.parts:
+                    for part in chunk.parts:
+                        if hasattr(part, 'text') and part.text:
+                            yield part.text
         except Exception as e:
             logger.error(f"Error generating response: {e}")
-            yield json.dumps({'error': str(e)})
+            yield "I apologize, but I encountered an issue while processing your request. Could you please rephrase your question or try again later?"
 
 
     def _load_embedding_model(self):
@@ -1155,94 +1343,152 @@ class GeminiLLMManager:
         self._rate_limited = False
         logger.info(f"Rate limit cooldown expired after {seconds} seconds")
 
- 
-
-    
-
-    
-
-
-    
-        
     def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
         """
-        Format expert information into a numbered list with bulleted expertise areas.
+        Format expert information into a rich, conversational presentation with 
+        natural language introductions and transitions between experts.
         
         Args:
             experts: List of expert dictionaries
             
         Returns:
-            Formatted context string with numbered experts and bulleted lists
+            Formatted context string with engaging expert presentations
         """
         if not experts:
-            return "No expert information available."
+            return "I couldn't find any expert information on this topic. Would you like me to help you search for something else?"
         
-        context_parts = ["Here is information about relevant APHRC experts:"]
+        # Create engaging introduction based on number of experts found
+        if len(experts) == 1:
+            context_parts = [f"I found an APHRC expert who specializes in this area:"]
+        elif len(experts) == 2:
+            context_parts = [f"I found two APHRC experts who can provide insights on this topic:"]
+        elif len(experts) <= 5:
+            context_parts = [f"Here are {len(experts)} APHRC experts who specialize in this field:"]
+        else:
+            context_parts = [f"I've identified several APHRC experts in this area. Here are the most relevant ones:"]
         
+        # Add transitions between experts
+        transitions = [
+            "",  # No transition for first expert
+            "Another expert in this field is ",
+            "You might also be interested in the work of ",
+            "Additionally, ",
+            "I should also mention ",
+            "Another researcher with relevant expertise is ",
+            "The research team also includes "
+        ]
+        
+        # Build expert information with better narrative flow
         for idx, expert in enumerate(experts):
             full_name = f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip()
             
-            # Create numbered expert entry with name in bold
-            expert_info = [f"{idx+1}. **{full_name}**"]
+            # Skip if no name available
+            if not full_name:
+                continue
             
-            # Add expertise areas as bullet points
+            # Create expert entry with appropriate transition for position in list
+            if idx == 0:
+                # First expert gets number and bold name
+                expert_info = [f"{idx+1}. **{full_name}**"]
+            else:
+                # Subsequent experts get a transition phrase
+                transition = transitions[min(idx, len(transitions)-1)]
+                expert_info = [f"{idx+1}. {transition}**{full_name}**"]
+            
+            # Add expertise areas with improved formatting
             expertise = expert.get('expertise', [])
-            if expertise and isinstance(expertise, list):
-                for area in expertise:
-                    expert_info.append(f"* {area}")
-            elif expertise:
-                expert_info.append(f"* {expertise}")
+            if expertise:
+                if isinstance(expertise, list) and len(expertise) > 0:
+                    if len(expertise) == 1:
+                        expert_info.append(f"* Specializes in {expertise[0]}")
+                    else:
+                        expert_info.append(f"* Areas of expertise include {', '.join(expertise[:-1])}, and {expertise[-1]}")
+                elif expertise and not isinstance(expertise, list):
+                    expert_info.append(f"* Specializes in {expertise}")
             
-            # Add research interests as bullet points if available
+            # Add research interests with better phrasing
             research_interests = expert.get('research_interests', [])
-            if research_interests and isinstance(research_interests, list):
-                for interest in research_interests:
-                    expert_info.append(f"* {interest}")
+            if research_interests and isinstance(research_interests, list) and len(research_interests) > 0:
+                if len(research_interests) == 1:
+                    expert_info.append(f"* Current research focuses on {research_interests[0]}")
+                else:
+                    expert_info.append(f"* Research interests span {', '.join(research_interests[:-1])}, and {research_interests[-1]}")
             
-            # Add position and department as bullet points if available
+            # Add position and department with more natural phrasing
             position = expert.get('position', '')
-            if position:
-                expert_info.append(f"* Position: {position}")
-                
             department = expert.get('department', '')
-            if department:
-                expert_info.append(f"* Department: {department}")
             
-            # Add contact info as a bullet point if available
+            if position and department:
+                expert_info.append(f"* Serves as {position} in the {department}")
+            elif position:
+                expert_info.append(f"* Current role: {position}")
+            elif department:
+                expert_info.append(f"* Works in the {department}")
+            
+            # Add contact info with more helpful framing
             email = expert.get('email', '')
             if email:
-                expert_info.append(f"* Contact: {email}")
+                expert_info.append(f"* You can reach them at {email}")
             
-            # Add publications as bullet points if available
+            # Add publications with better descriptions
             publications = expert.get('publications', [])
             if publications:
-                expert_info.append("* Notable publications:")
-                for pub in publications[:2]:  # Limit to 2 publications
+                if len(publications) == 1:
+                    pub = publications[0]
                     pub_title = pub.get('title', 'Untitled')
-                    expert_info.append(f"  * {pub_title}")
+                    expert_info.append(f"* Notable publication: \"{pub_title}\"")
+                else:
+                    expert_info.append("* Notable publications include:")
+                    for pub in publications[:2]:  # Limit to 2 publications
+                        pub_title = pub.get('title', 'Untitled')
+                        pub_year = pub.get('publication_year', '')
+                        year_text = f" ({pub_year})" if pub_year else ""
+                        expert_info.append(f"  * \"{pub_title}\"{year_text}")
             
             # Combine all information about this expert with proper line breaks
             context_parts.append("\n".join(expert_info))
         
+        # Add helpful conclusion with follow-up invitation
+        if len(experts) > 1:
+            context_parts.append("Would you like more detailed information about any of these experts or their research areas?")
+        else:
+            context_parts.append("Would you like to know more about this expert's research or publications?")
+        
         return "\n\n".join(context_parts)
     def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
-        Format publication information into a numbered list with bulleted details.
+        Format publication information into a rich, conversational presentation with
+        natural language introductions, transitions, and context.
         
         Args:
             publications: List of publication dictionaries
             
         Returns:
-            Formatted context string with numbered publications and bulleted lists
+            Formatted context string with engaging publication presentations
         """
         logger.info(f"Starting format_publication_context with {len(publications)} publications")
         
         if not publications:
-            logger.info("No publications provided, returning default message")
-            return "No publication information available."
+            logger.info("No publications provided, returning helpful message")
+            return "I couldn't find any publications matching your query. Would you like me to help you search for related topics instead?"
         
         try:
-            context_parts = ["Here is information about relevant APHRC publications:"]
+            # Create engaging introduction based on relevance and number of publications
+            if len(publications) == 1:
+                context_parts = ["I found a relevant APHRC publication that addresses your query:"]
+            elif len(publications) <= 3:
+                context_parts = [f"Here are {len(publications)} relevant APHRC publications on this topic:"]
+            else:
+                context_parts = ["I've found several APHRC publications related to your query. Here are the most relevant ones:"]
+            
+            # Add transitions between publications
+            transitions = [
+                "",  # No transition for first publication
+                "Another important study is ",
+                "Related research includes ",
+                "You might also be interested in ",
+                "Additionally, APHRC researchers published "
+            ]
             
             for idx, pub in enumerate(publications):
                 logger.debug(f"Processing publication {idx+1}")
@@ -1254,18 +1500,27 @@ class GeminiLLMManager:
                     
                 # Extract title
                 title = pub.get('title', 'Untitled')
+                if not title:
+                    title = "Untitled Publication"
+                
                 logger.debug(f"Publication {idx+1} title: {title[:50]}...")
                 
-                # Create numbered publication with title in bold
-                pub_info = [f"{idx+1}. **{title}**"]
+                # Create numbered publication with narrative transition
+                if idx == 0:
+                    # First publication gets number and bold title
+                    pub_info = [f"{idx+1}. **{title}**"]
+                else:
+                    # Subsequent publications get a transition phrase
+                    transition = transitions[min(idx, len(transitions)-1)]
+                    pub_info = [f"{idx+1}. {transition}**{title}**"]
                 
-                # Add year as bullet point
+                # Add year as bullet point with better phrasing
                 pub_year = pub.get('publication_year', '')
                 if pub_year:
                     logger.debug(f"Adding year: {pub_year}")
-                    pub_info.append(f"* Published: {pub_year}")
+                    pub_info.append(f"* Published in {pub_year}")
                 
-                # Add authors with careful handling
+                # Add authors with careful handling and better formatting
                 try:
                     authors = pub.get('authors', [])
                     logger.debug(f"Authors type: {type(authors).__name__}")
@@ -1274,47 +1529,68 @@ class GeminiLLMManager:
                         if isinstance(authors, list):
                             # Format author list with error handling
                             try:
-                                # Format author list, limit to first 3 with "et al." if more
+                                # Format author list with proper Oxford comma and "et al."
                                 if len(authors) > 3:
-                                    author_text = f"{', '.join(str(a) for a in authors[:3])} et al."
+                                    author_text = f"{', '.join(str(a) for a in authors[:2])} et al."
+                                    pub_info.append(f"* Written by {author_text}")
+                                elif len(authors) == 2:
+                                    author_text = f"{authors[0]} and {authors[1]}"
+                                    pub_info.append(f"* Authors: {author_text}")
+                                elif len(authors) == 1:
+                                    pub_info.append(f"* Author: {authors[0]}")
                                 else:
-                                    author_text = f"{', '.join(str(a) for a in authors)}"
-                                pub_info.append(f"* Authors: {author_text}")
+                                    author_text = f"{', '.join(str(a) for a in authors[:-1])}, and {authors[-1]}"
+                                    pub_info.append(f"* Authors: {author_text}")
                             except Exception as author_error:
                                 logger.warning(f"Error formatting authors: {author_error}")
                                 pub_info.append(f"* Authors: {len(authors)} contributors")
                         else:
                             logger.debug(f"Authors not a list: {authors}")
-                            pub_info.append(f"* Authors: {authors}")
+                            pub_info.append(f"* Author(s): {authors}")
                 except Exception as authors_error:
                     logger.error(f"Error processing authors: {authors_error}", exc_info=True)
                 
-                # Add APHRC experts if available
+                # Add APHRC experts with better phrasing if available
                 try:
                     aphrc_experts = pub.get('aphrc_experts', [])
                     if aphrc_experts:
                         if isinstance(aphrc_experts, list):
-                            pub_info.append(f"* APHRC Experts: {', '.join(str(e) for e in aphrc_experts[:3])}")
+                            if len(aphrc_experts) == 1:
+                                pub_info.append(f"* APHRC Expert: {aphrc_experts[0]}")
+                            else:
+                                experts_text = f"{', '.join(str(e) for e in aphrc_experts[:2])}"
+                                if len(aphrc_experts) > 2:
+                                    experts_text += " and others"
+                                pub_info.append(f"* APHRC Experts: {experts_text}")
                         else:
-                            pub_info.append(f"* APHRC Experts: {aphrc_experts}")
+                            pub_info.append(f"* APHRC Expert: {aphrc_experts}")
                 except Exception as experts_error:
                     logger.error(f"Error processing APHRC experts: {experts_error}", exc_info=True)
                 
-                # Add abstract snippet as bullet point
+                # Add abstract snippet with better framing
                 try:
                     abstract = pub.get('abstract', '')
                     if abstract:
-                        # Truncate long abstracts
+                        # Add introductory language and format the abstract better
                         if len(abstract) > 300:
-                            abstract = abstract[:297] + "..."
-                        pub_info.append(f"* Abstract: {abstract}")
+                            abstract_intro = "* Key findings: "
+                            trimmed_abstract = abstract[:297] + "..."
+                            
+                            # Try to end at a sentence boundary
+                            last_period = trimmed_abstract.rfind('.')
+                            if last_period > 150:  # Only trim to sentence if we don't lose too much
+                                trimmed_abstract = abstract[:last_period+1]
+                            
+                            pub_info.append(f"{abstract_intro}{trimmed_abstract}")
+                        else:
+                            pub_info.append(f"* Abstract: {abstract}")
                 except Exception as abstract_error:
                     logger.error(f"Error processing abstract: {abstract_error}", exc_info=True)
                 
-                # Add DOI if available
+                # Add DOI if available with better explanation
                 doi = pub.get('doi', '')
                 if doi:
-                    pub_info.append(f"* DOI: {doi}")
+                    pub_info.append(f"* Access via DOI: {doi}")
                 
                 # Combine all information about this publication
                 logger.debug(f"Completed processing publication {idx+1}, {len(pub_info)} info parts")
@@ -1324,6 +1600,12 @@ class GeminiLLMManager:
                     logger.error(f"Error joining pub_info: {join_error}", exc_info=True)
                     context_parts.append(f"Publication {idx+1}: {title}")
             
+            # Add helpful conclusion with follow-up suggestion
+            if len(publications) > 1:
+                context_parts.append("Would you like more detailed information about any of these publications or related research areas?")
+            else:
+                context_parts.append("Would you like to know more about this research or related publications?")
+            
             # Join all context parts
             logger.info(f"Joining {len(context_parts)} context parts")
             try:
@@ -1332,12 +1614,13 @@ class GeminiLLMManager:
                 return result
             except Exception as final_join_error:
                 logger.error(f"Error in final context join: {final_join_error}", exc_info=True)
-                return "Error formatting publications."
+                return "Error formatting publications. Please try a more specific query."
                 
         except Exception as e:
             logger.error(f"Unhandled error in format_publication_context: {e}", exc_info=True)
-            return f"Error formatting publications: {str(e)}"
-
+            return f"I encountered an issue while preparing publication information. Would you like to try a different search term?"
+                
+                                                        
    
     async def analyze_quality(self, message: str, response: str = "") -> Dict:
         """

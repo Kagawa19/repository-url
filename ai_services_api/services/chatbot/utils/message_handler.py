@@ -35,19 +35,25 @@ class MessageHandler:
     
     async def process_stream_response(self, response_stream):
         """
-        Process the streaming response with enhanced formatting and structure preservation.
+        Process the streaming response with enhanced formatting, structure preservation,
+        and improved natural language elements.
         
         Args:
             response_stream: Async generator of response chunks
             
         Yields:
-            str or dict: Cleaned and formatted response chunks or metadata
+            str or dict: Cleaned and formatted response chunks with natural language improvements
         """
         buffer = ""
         metadata = None
         in_publication_list = False
         list_count = 0
         publication_buffer = ""
+        
+        # Track intent information for content-aware enhancements
+        detected_intent = None
+        is_first_chunk = True
+        transition_inserted = False
         
         try:
             async for chunk in response_stream:
@@ -57,9 +63,13 @@ class MessageHandler:
                     metadata = chunk.get('metadata', chunk)
                     self.metadata = metadata
                     
+                    # Extract intent information if available for content-aware styling
+                    if metadata and 'intent' in metadata:
+                        detected_intent = metadata.get('intent')
+                        logger.debug(f"Detected intent for response styling: {detected_intent}")
+                    
                     # Log metadata capture but don't yield it to user
                     logger.debug(f"Captured metadata: {json.dumps(metadata, default=str) if metadata else 'None'}")
-                    # ⚠️ Changed: Don't yield metadata to user, just store it internally
                     continue
                 
                 # Extract text from chunk with enhanced format handling
@@ -74,7 +84,7 @@ class MessageHandler:
                         # Try to stringify the dict as fallback
                         text = str(chunk)
                 elif isinstance(chunk, (str, bytes)):
-                    text = chunk.decode('utf-8') if isinstance(chunk, bytes) else chunk
+                    text = chunk.decode('utf8') if isinstance(chunk, bytes) else chunk
                 elif hasattr(chunk, 'content'):
                     # Handle AIMessage or similar objects
                     text = chunk.content
@@ -89,6 +99,30 @@ class MessageHandler:
                 # Skip empty chunks
                 if not text:
                     continue
+                
+                # Add natural language improvements for first chunk based on intent
+                if is_first_chunk and detected_intent and not transition_inserted:
+                    # Prepare intent-specific natural introductions
+                    intro_text = ""
+                    if detected_intent == "publication":
+                        intro_prefix = self._get_random_intro("publication")
+                        if intro_prefix and not text.startswith(intro_prefix):
+                            intro_text = intro_prefix
+                    elif detected_intent == "expert":
+                        intro_prefix = self._get_random_intro("expert")
+                        if intro_prefix and not text.startswith(intro_prefix):
+                            intro_text = intro_prefix
+                    elif detected_intent == "navigation":
+                        intro_prefix = self._get_random_intro("navigation")
+                        if intro_prefix and not text.startswith(intro_prefix):
+                            intro_text = intro_prefix
+                    
+                    # Insert introduction if we have one
+                    if intro_text:
+                        yield intro_text
+                        transition_inserted = True
+                    
+                    is_first_chunk = False
                     
                 buffer += text
                 
@@ -96,6 +130,14 @@ class MessageHandler:
                 if re.search(r'\d+\.\s+Title:', buffer) or re.search(r'Title:', buffer):
                     if not in_publication_list:
                         in_publication_list = True
+                        
+                        # Add natural transition for publication lists if not already done
+                        if not transition_inserted and detected_intent == "publication":
+                            transition = self._get_random_transition("publication_list")
+                            if transition:
+                                yield transition
+                                transition_inserted = True
+                        
                         publication_buffer = buffer
                         buffer = ""
                         continue
@@ -110,9 +152,13 @@ class MessageHandler:
                                 # Process all but the last entry
                                 for entry in entries[:-1]:
                                     if entry.strip():
-                                        # ⚠️ Changed: Apply enhanced text cleaning for publication entries
+                                        # Apply enhanced text cleaning for publication entries
                                         cleaned_entry = self._clean_text_for_user(entry)
                                         yield cleaned_entry
+                                        
+                                        # Add transition between publications if appropriate
+                                        if detected_intent == "publication" and random.random() < 0.5:
+                                            yield self._get_random_transition("between_publications")
                                 
                                 # Keep the last entry in the buffer
                                 publication_buffer = entries[-1]
@@ -120,20 +166,29 @@ class MessageHandler:
                         # Check if entry appears complete (has multiple fields and ending line)
                         elif len(re.findall(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', publication_buffer)) >= 3 and '\n\n' in publication_buffer:
                             # This looks like a complete entry
-                            # ⚠️ Changed: Apply enhanced text cleaning
+                            # Apply enhanced text cleaning
                             cleaned_entry = self._clean_text_for_user(publication_buffer)
                             yield cleaned_entry
                             publication_buffer = ""
                             in_publication_list = False
+                            
+                            # Add transition after publication if appropriate
+                            if detected_intent == "publication" and random.random() < 0.3:
+                                yield self._get_random_transition("after_publication")
                             
                         continue
                 
                 # If we were in a publication list but now we're not, yield the publication buffer
                 if in_publication_list and not re.search(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', text):
                     if publication_buffer.strip():
-                        # ⚠️ Changed: Apply enhanced text cleaning
+                        # Apply enhanced text cleaning
                         cleaned_entry = self._clean_text_for_user(publication_buffer)
                         yield cleaned_entry
+                        
+                        # Add appropriate closing transition
+                        if detected_intent == "publication":
+                            yield self._get_random_transition("after_publications")
+                    
                     publication_buffer = ""
                     in_publication_list = False
                 
@@ -145,7 +200,7 @@ class MessageHandler:
                         # Process all but the last sentence
                         for sentence in sentences[:-1]:
                             if sentence.strip():
-                                # ⚠️ Changed: Apply enhanced text cleaning
+                                # Apply enhanced text cleaning
                                 cleaned_sentence = self._clean_text_for_user(sentence)
                                 yield cleaned_sentence
                         
@@ -154,13 +209,21 @@ class MessageHandler:
             
             # Handle any remaining text in buffers
             if publication_buffer.strip():
-                yield self._clean_text_for_user(publication_buffer)
-            elif buffer.strip():
-                yield self._clean_text_for_user(buffer)
-            
-            # ⚠️ Changed: Don't yield metadata to user, it's already been processed internally
-            # Metadata is stored in self.metadata for internal use but not exposed to the user
+                cleaned_text = self._clean_text_for_user(publication_buffer)
+                yield cleaned_text
                 
+                # Add appropriate closing for publication list
+                if detected_intent == "publication":
+                    yield self._get_random_transition("publication_conclusion")
+                    
+            elif buffer.strip():
+                cleaned_text = self._clean_text_for_user(buffer)
+                yield cleaned_text
+                
+                # Add appropriate closing based on intent
+                if detected_intent:
+                    yield self._get_random_transition(f"{detected_intent}_conclusion")
+                    
         except Exception as e:
             logger.error(f"Error processing stream response: {e}", exc_info=True)
             # Yield any remaining buffer to avoid losing content
@@ -173,13 +236,14 @@ class MessageHandler:
     def _clean_text_for_user(text: str) -> str:
         """
         Enhanced text cleaning for user-facing responses.
-        Removes technical artifacts and properly formats markdown.
+        Removes technical artifacts, properly formats markdown, and 
+        improves language quality and readability.
         
         Args:
             text (str): The input text that may contain technical artifacts or raw markdown
             
         Returns:
-            str: Clean, well-formatted text suitable for user display
+            str: Clean, well-formatted text suitable for user display with improved readability
         """
         if not text:
             return ""
@@ -222,7 +286,65 @@ class MessageHandler:
             
             # Clean up extra whitespace while preserving line structure
             lines = [line.strip() for line in cleaned.split('\n')]
-            cleaned = '\n'.join(lines)
+            
+            # Enhance publication formatting for better readability
+            enhanced_lines = []
+            for line in lines:
+                # Improve Title formatting
+                if line.startswith('Title:'):
+                    title_content = line[6:].strip()
+                    if title_content and not title_content.endswith(('.', '?', '!')):
+                        # Add period if title doesn't end with punctuation
+                        title_content += '.'
+                    enhanced_lines.append(f'Title: {title_content}')
+                
+                # Improve Authors formatting with proper joining
+                elif line.startswith('Authors:'):
+                    authors_content = line[8:].strip()
+                    if ',' in authors_content and ' and ' not in authors_content and authors_content.count(',') > 1:
+                        # Fix author lists that have commas but no "and"
+                        last_comma = authors_content.rindex(',')
+                        authors_content = authors_content[:last_comma] + ' and' + authors_content[last_comma+1:]
+                    enhanced_lines.append(f'Authors: {authors_content}')
+                
+                # Improve Abstract for readability
+                elif line.startswith('Abstract:'):
+                    abstract_content = line[9:].strip()
+                    if abstract_content:
+                        # Ensure abstract has proper sentence structure
+                        if not abstract_content.endswith(('.', '?', '!')):
+                            abstract_content += '.'
+                        
+                        # Split overly long abstracts into better formatted paragraphs
+                        if len(abstract_content) > 200:
+                            sentences = re.split(r'(?<=[.!?])\s+', abstract_content)
+                            formatted_abstract = []
+                            current_paragraph = ""
+                            
+                            for sentence in sentences:
+                                if len(current_paragraph) + len(sentence) > 100:
+                                    if current_paragraph:
+                                        formatted_abstract.append(current_paragraph.strip())
+                                    current_paragraph = sentence
+                                else:
+                                    if current_paragraph:
+                                        current_paragraph += " " + sentence
+                                    else:
+                                        current_paragraph = sentence
+                            
+                            if current_paragraph:
+                                formatted_abstract.append(current_paragraph.strip())
+                            
+                            abstract_content = "\n  ".join(formatted_abstract)
+                            enhanced_lines.append(f'Abstract: \n  {abstract_content}')
+                        else:
+                            enhanced_lines.append(f'Abstract: {abstract_content}')
+                    else:
+                        enhanced_lines.append(line)
+                else:
+                    enhanced_lines.append(line)
+            
+            cleaned = '\n'.join(enhanced_lines)
             
             return cleaned
         
@@ -263,11 +385,31 @@ class MessageHandler:
             # Only convert bullets to flowing text outside of structured lists
             if "Title:" not in cleaned and "Authors:" not in cleaned:
                 cleaned = re.sub(r'\*\s*[^*\n]+\n*', '', cleaned)
-                bullet_list = ', '.join(point.strip() for point in bullet_points)
-                if 'Key Findings:' in cleaned:
-                    cleaned = cleaned.replace('Key Findings:', f'Key findings include: {bullet_list}.')
-                else:
-                    cleaned += f" {bullet_list}."
+                bullet_list = []
+                
+                # Improve bullet point formatting
+                for point in bullet_points:
+                    point = point.strip()
+                    if point:
+                        # Ensure proper sentence structure in bullet points
+                        if not point.endswith(('.', '?', '!')):
+                            point += '.'
+                        bullet_list.append(point)
+                
+                # Combine bullet points with better transitions
+                if bullet_list:
+                    if 'Key Findings:' in cleaned:
+                        if len(bullet_list) > 1:
+                            bullet_text = f"Key findings include: {bullet_list[0]} Additionally, {' '.join(bullet_list[1:])}"
+                        else:
+                            bullet_text = f"Key findings include: {bullet_list[0]}"
+                        cleaned = cleaned.replace('Key Findings:', bullet_text)
+                    else:
+                        if len(bullet_list) > 1:
+                            bullet_text = f"{bullet_list[0]} Additionally, {' '.join(bullet_list[1:])}"
+                        else:
+                            bullet_text = bullet_list[0]
+                        cleaned += f" {bullet_text}"
         
         # Fix spacing and formatting
         cleaned = re.sub(r'\s+', ' ', cleaned)
@@ -279,11 +421,25 @@ class MessageHandler:
         
         # Clean up special characters
         cleaned = cleaned.replace('\\n', ' ')
-        cleaned = cleaned.strip()
+        
+        # Improve sentence structures for better readability
+        # Fix sentences that start with lowercase after periods
+        cleaned = re.sub(r'\.\s+([a-z])', lambda m: f". {m.group(1).upper()}", cleaned)
+        
+        # Fix common awkward phrasings
+        cleaned = cleaned.replace(' i.e. ', ', specifically, ')
+        cleaned = cleaned.replace(' e.g. ', ', for example, ')
+        cleaned = cleaned.replace(' etc.', ', and similar resources.')
         
         # Restore DOI URLs
         for placeholder, doi in doi_placeholders.items():
             cleaned = cleaned.replace(placeholder, doi)
+        
+        # Final cleanup
+        cleaned = cleaned.strip()
+        
+        # Fix double spacing
+        cleaned = re.sub(r'\s{2,}', ' ', cleaned)
         
         return cleaned
 
@@ -465,12 +621,491 @@ class MessageHandler:
         
         return formatted_text
 
+    async def _save_to_conversation_history(self, user_id: str, session_id: str, message: str, intent_type: str):
+        """
+        Save the current interaction to conversation history.
+        
+        Args:
+            user_id (str): User identifier
+            session_id (str): Session identifier
+            message (str): The user's query
+            intent_type (str): Detected intent type
+        """
+        try:
+            # Initialize conversation cache if it doesn't exist
+            if not hasattr(self, 'conversation_cache'):
+                self.conversation_cache = {}
+            
+            # Initialize session history if it doesn't exist
+            if session_id not in self.conversation_cache:
+                self.conversation_cache[session_id] = []
+            
+            # Add current message to history (in-memory cache)
+            self.conversation_cache[session_id].append({
+                'query': message,
+                'intent': intent_type,
+                'timestamp': datetime.now()
+            })
+            
+            # Limit history size in memory
+            if len(self.conversation_cache[session_id]) > 10:
+                self.conversation_cache[session_id] = self.conversation_cache[session_id][-10:]
+            
+            # Also update database history if available
+            try:
+                async with DatabaseConnector.get_connection() as conn:
+                    await conn.execute("""
+                        UPDATE chatbot_logs 
+                        SET intent_type = $1, session_id = $2
+                        WHERE user_id = $3 AND query = $4
+                        AND timestamp = (
+                            SELECT MAX(timestamp) 
+                            FROM chatbot_logs 
+                            WHERE user_id = $3 AND query = $4
+                        )
+                    """, intent_type, session_id, user_id, message)
+            except Exception as db_error:
+                logger.warning(f"Error updating conversation history in database: {db_error}")
+                # Continue even if database update fails - we still have memory cache
+        
+        except Exception as e:
+            logger.error(f"Error saving to conversation history: {e}")
+            # Non-critical error, can continue without history
+
+    def _get_conversation_closing(self, intent_type: str, history_length: int) -> str:
+        """
+        Get a contextually appropriate conversation closing based on intent and history.
+        
+        Args:
+            intent_type (str): The type of intent for the current response
+            history_length (int): Number of previous conversation turns
+            
+        Returns:
+            str: A natural language closing appropriate for the context
+        """
+        # General closings for any topic
+        general_closings = [
+            "Is there anything else you'd like to know about APHRC?",
+            "Can I help you with anything else today?",
+            "Would you like more information on this or another topic?",
+            "Do you have any other questions about APHRC's work?"
+        ]
+        
+        # Intent-specific closings
+        publication_closings = [
+            "Would you like me to recommend more publications on this topic?",
+            "Are you interested in other research areas from APHRC?",
+            "Can I help you find more specific research on this subject?",
+            "Would you like details about the researchers behind these publications?"
+        ]
+        
+        expert_closings = [
+            "Would you like more information about any of these experts?",
+            "Are you interested in the specific publications of any of these researchers?",
+            "Would you like to know about other experts in related fields?",
+            "Can I help you connect with any of these APHRC experts?"
+        ]
+        
+        navigation_closings = [
+            "Can I help you navigate to any other sections of our website?",
+            "Is there specific content you're looking for on the APHRC site?",
+            "Would you like information about other APHRC resources?",
+            "Is there anything else I can help you find on our website?"
+        ]
+        
+        # For conversations with history, offer more personalized closings
+        extended_closings = [
+            "Based on our conversation, you might also be interested in APHRC's work on related topics. Would you like me to suggest some?",
+            "Is there a specific aspect of what we've discussed that you'd like to explore further?",
+            "I hope our conversation has been helpful. Is there anything else you'd like to clarify about APHRC?",
+            "Would you like me to summarize the key points we've covered in our discussion?"
+        ]
+        
+        # Select appropriate closings based on intent and conversation history
+        if history_length >= 2:
+            closings = extended_closings
+        elif intent_type == "publication":
+            closings = publication_closings
+        elif intent_type == "expert":
+            closings = expert_closings
+        elif intent_type == "navigation":
+            closings = navigation_closings
+        else:
+            closings = general_closings
+        
+        return random.choice(closings)
+
+    def _get_followup_introduction(self, previous_topic: str) -> str:
+        """
+        Get a natural introduction for a follow-up response.
+        
+        Args:
+            previous_topic (str): The topic from previous conversation
+            
+        Returns:
+            str: A natural language introduction for a follow-up
+        """
+        followup_intros = [
+            f"Regarding {previous_topic}, ",
+            f"Continuing our discussion about {previous_topic}, ",
+            f"To follow up on {previous_topic}, ",
+            f"Building on what we discussed about {previous_topic}, ",
+            f"To address your follow-up question about {previous_topic}, "
+        ]
+        
+        # Only return an intro sometimes to avoid being repetitive
+        if random.random() < 0.7:  # 70% chance
+            return random.choice(followup_intros)
+        else:
+            return ""
+
+    def _enhance_message_with_context(self, message: str, previous_topic: str, conversation_history: List[Dict]) -> str:
+        """
+        Enhance a follow-up message with relevant context from previous conversation.
+        
+        Args:
+            message (str): The current user message
+            previous_topic (str): The identified previous topic
+            conversation_history (List[Dict]): Previous interactions
+            
+        Returns:
+            str: Enhanced message with relevant context
+        """
+        if not conversation_history:
+            return message
+        
+        # Get the last 1-2 turns for relevant context
+        recent_context = conversation_history[-2:] if len(conversation_history) >= 2 else conversation_history
+        
+        # Extract the most relevant previous turn
+        last_turn = recent_context[-1]
+        last_query = last_turn.get('query', '')
+        
+        # Extract key information from previous response
+        last_response = last_turn.get('response', '')
+        
+        # Create a condensed context summary
+        context_summary = f"This question refers to our previous discussion about {previous_topic}. "
+        context_summary += f"Previous question: '{last_query}'. "
+        
+        # Add condensed previous response if not too long
+        # (Just include the beginning to help establish context without overwhelming)
+        if last_response:
+            response_summary = last_response[:200] + "..." if len(last_response) > 200 else last_response
+            context_summary += f"My previous response was about {previous_topic}."
+        
+        # Format the enhanced message
+        enhanced_message = f"{context_summary}\n\nCurrent question: {message}"
+        
+        return enhanced_message
+
+    def _analyze_followup(self, message: str, conversation_history: List[Dict]) -> Tuple[bool, Optional[str]]:
+        """
+        Determine if the current message is a follow-up to previous conversation.
+        
+        Args:
+            message (str): Current user message
+            conversation_history (List[Dict]): Previous interactions
+            
+        Returns:
+            Tuple[bool, Optional[str]]: Whether this is a follow-up and the previous topic
+        """
+        if not conversation_history:
+            return False, None
+        
+        # Convert message to lowercase for analysis
+        message_lower = message.lower().strip()
+        
+        # Check for explicit follow-up indicators
+        followup_indicators = [
+            'more about', 'tell me more', 'elaborate', 'expand', 'additional',
+            'another', 'also', 'what about', 'and', 'further', 'furthermore',
+            'additionally', 'besides', 'next', 'then', 'other', 'related',
+            'similarly', 'likewise', 'too', 'as well', 'them', 'they', 'those',
+            'these', 'that', 'this', 'it', 'he', 'she', 'their', 'this one'
+        ]
+        
+        has_indicator = any(indicator in message_lower for indicator in followup_indicators)
+        
+        # Check for very short queries that likely rely on context
+        is_short_query = len(message.split()) < 5
+        
+        # Check for questions without clear subjects
+        has_dangling_reference = re.search(r'\b(it|they|them|those|these|this|that)\b', message_lower) is not None
+        
+        # Get the most recent conversation turn
+        last_turn = conversation_history[-1] if conversation_history else None
+        if not last_turn:
+            return False, None
+        
+        
+        previous_query = last_turn.get('query', '')
+        previous_response = last_turn.get('response', '')
+        previous_intent = last_turn.get('intent', '')
+        
+        # Extract key terms from previous query using simple NLP
+        previous_terms = set(re.findall(r'\b\w{4,}\b', previous_query.lower()))
+        current_terms = set(re.findall(r'\b\w{4,}\b', message_lower))
+        
+        # Check term overlap for topical continuity
+        common_terms = previous_terms.intersection(current_terms)
+        has_term_overlap = len(common_terms) > 0
+        
+        # Determine if this is likely a follow-up
+        is_followup = (has_indicator or is_short_query or has_dangling_reference) and (has_term_overlap or len(common_terms) > 0)
+        
+        # Extract the probable topic of conversation
+        if is_followup:
+            # Try to extract topic from previous query
+            key_terms = [term for term in previous_terms if len(term) > 5]
+            if key_terms:
+                topic = " and ".join(key_terms[:2])  # Use top 2 key terms
+            else:
+                # Fall back to intent type
+                intent_topics = {
+                    'publication': 'publications',
+                    'expert': 'experts',
+                    'navigation': 'website navigation',
+                    'general': 'general information'
+                }
+                topic = intent_topics.get(previous_intent, 'your previous question')
+            
+            return True, topic
+        
+        return False, None
+    
+    def _analyze_message_style(self, message: str) -> str:
+        """
+        Analyze the user's message to determine the appropriate response style.
+        
+        Args:
+            message (str): The user's query
+            
+        Returns:
+            str: The detected communication style
+        """
+        # Convert to lowercase for analysis
+        message_lower = message.lower()
+        
+        # Check for technical/academic indicators
+        technical_indicators = [
+            'methodology', 'study design', 'statistical', 'analysis', 
+            'literature review', 'theoretical', 'framework', 'evidence-based',
+            'quantitative', 'qualitative', 'research', 'findings', 'publication',
+            'citations', 'references', 'peer-reviewed', 'journal', 'paper'
+        ]
+        
+        # Check for formal tone indicators
+        formal_indicators = [
+            'would you please', 'I would like to', 'could you provide',
+            'I am interested in', 'I request', 'kindly', 'formal', 'official',
+            'the organization', 'professionals', 'documentation'
+        ]
+        
+        # Check for conversational tone indicators
+        conversational_indicators = [
+            'hi', 'hello', 'hey', 'thanks', 'thank you', 'appreciate',
+            'can you help', 'tell me about', 'what\'s', 'how about',
+            'wondering', 'curious', 'question for you', 'quick question'
+        ]
+        
+        # Count indicators
+        technical_score = sum(1 for term in technical_indicators if term in message_lower)
+        formal_score = sum(1 for term in formal_indicators if term in message_lower)
+        conversational_score = sum(1 for term in conversational_indicators if term in message_lower)
+        
+        # Add score for sentence structure formality
+        sentences = re.split(r'[.!?]', message)
+        avg_words_per_sentence = sum(len(s.split()) for s in sentences if s.strip()) / max(1, len([s for s in sentences if s.strip()]))
+        
+        # Longer sentences tend to be more formal
+        if avg_words_per_sentence > 15:
+            formal_score += 2
+        elif avg_words_per_sentence > 10:
+            formal_score += 1
+        elif avg_words_per_sentence < 6:
+            conversational_score += 1
+        
+        # Questions with question marks are often conversational
+        if '?' in message:
+            conversational_score += 1
+        
+        # Determine style based on scores
+        if technical_score > max(formal_score, conversational_score):
+            return "technical"
+        elif formal_score > conversational_score:
+            return "formal"
+        else:
+            return "conversational"
+    
+    def _get_random_transition(self, transition_type: str) -> str:
+        """
+        Get a random, natural-sounding transition phrase based on the transition type.
+        
+        Args:
+            transition_type (str): The type of transition needed
+            
+        Returns:
+            str: A natural language transition appropriate for the context
+        """
+        publication_list_transitions = [
+            "Here are the publications I found: ",
+            "Let me share the relevant publications with you: ",
+            "I've compiled these publications that address your query: ",
+            "Based on your interest, these publications stand out: ",
+            "The following research publications might be helpful: "
+        ]
+        
+        between_publications_transitions = [
+            " Moving on to another relevant publication, ",
+            " Another study you might find valuable is ",
+            " Related to this, researchers also published ",
+            " In a similar vein, ",
+            " Additionally, "
+        ]
+        
+        after_publication_transitions = [
+            " This research provides valuable insights into this topic. ",
+            " These findings have important implications for this field. ",
+            " This work represents a significant contribution to the area. ",
+            " The methodology used in this study was particularly rigorous. ",
+            " The authors drew several important conclusions from this work. "
+        ]
+        
+        after_publications_transitions = [
+            "These publications collectively provide a comprehensive view of the topic. ",
+            "Together, these studies highlight the important work APHRC is doing in this area. ",
+            "This body of research demonstrates APHRC's commitment to evidence-based approaches. ",
+            "These publications showcase the depth of APHRC's expertise in this field. ",
+            "The findings from these studies have informed policy and practice in the region. "
+        ]
+        
+        publication_conclusion_transitions = [
+            "Would you like more specific information about any of these publications? ",
+            "I can provide more details about specific aspects of this research if you're interested. ",
+            "Is there a particular aspect of these publications you'd like to explore further? ",
+            "Would you like to know about other related research from APHRC? ",
+            "I hope these publications are helpful. Let me know if you need more specific information. "
+        ]
+        
+        expert_conclusion_transitions = [
+            "Would you like more information about any of these experts or their work? ",
+            "I can provide more details about specific experts if you're interested. ",
+            "Is there a particular expert whose work you'd like to explore further? ",
+            "Would you like contact information for any of these researchers? ",
+            "I hope this information about our experts is helpful. Let me know if you need anything else. "
+        ]
+        
+        navigation_conclusion_transitions = [
+            "I hope this helps you find what you're looking for on our website. ",
+            "Is there anything specific within these sections you're trying to locate? ",
+            "Would you like more detailed navigation instructions for any of these areas? ",
+            "Let me know if you need help finding anything else on our website. ",
+            "If you have any trouble accessing these resources, please let me know. "
+        ]
+        
+        general_conclusion_transitions = [
+            "Is there anything else you'd like to know about this topic? ",
+            "I hope this information is helpful. Let me know if you have any other questions. ",
+            "Would you like me to elaborate on any part of this response? ",
+            "Is there a specific aspect of this topic you'd like to explore further? ",
+            "Please let me know if you need any clarification or have follow-up questions. "
+        ]
+        
+        # Select appropriate transitions based on type
+        if transition_type == "publication_list":
+            transitions = publication_list_transitions
+        elif transition_type == "between_publications":
+            transitions = between_publications_transitions
+        elif transition_type == "after_publication":
+            transitions = after_publication_transitions
+        elif transition_type == "after_publications":
+            transitions = after_publications_transitions
+        elif transition_type == "publication_conclusion":
+            transitions = publication_conclusion_transitions
+        elif transition_type == "expert_conclusion":
+            transitions = expert_conclusion_transitions
+        elif transition_type == "navigation_conclusion":
+            transitions = navigation_conclusion_transitions
+        else:
+            transitions = general_conclusion_transitions
+        
+        # Return a random transition
+        return random.choice(transitions)
+
+    def _get_random_intro(self, intent_type: str) -> str:
+        """
+        Get a random, natural-sounding introduction based on intent type.
+        
+        Args:
+            intent_type (str): The type of intent detected
+            
+        Returns:
+            str: A natural language introduction appropriate for the intent
+        """
+        publication_intros = [
+            "I've found some relevant publications that might interest you. ",
+            "Here are some APHRC publications related to your query. ",
+            "Based on your question, these publications seem most relevant: ",
+            "APHRC researchers have published several studies on this topic. ",
+            "Let me share some publications that address your question. "
+        ]
+        
+        expert_intros = [
+            "I've identified APHRC experts who specialize in this area. ",
+            "Several researchers at APHRC work on topics related to your question. ",
+            "These APHRC experts might be able to provide insights on your question: ",
+            "Let me introduce you to some APHRC experts in this field. ",
+            "The following researchers at APHRC have expertise in this area: "
+        ]
+        
+        navigation_intros = [
+            "Let me help you find what you're looking for on the APHRC website. ",
+            "I can guide you to the relevant sections of our website. ",
+            "Here's how you can navigate to the information you need: ",
+            "You can find this information in the following sections: ",
+            "Let me point you to the right resources on our website. "
+        ]
+        
+        general_intros = [
+            "I'd be happy to help with that. ",
+            "Let me address your question. ",
+            "That's an interesting question about APHRC's work. ",
+            "I can provide some information on that. ",
+            "Thanks for your question about APHRC. "
+        ]
+        
+        # Select appropriate introductions based on intent
+        if intent_type == "publication":
+            intros = publication_intros
+        elif intent_type == "expert":
+            intros = expert_intros
+        elif intent_type == "navigation":
+            intros = navigation_intros
+        else:
+            intros = general_intros
+        
+        # Return a random introduction
+        return random.choice(intros)
+
     async def send_message_async(self, message: str, user_id: str, session_id: str) -> AsyncGenerator:
-        """Stream messages with enhanced logging for debugging."""
+        """
+        Stream messages with enhanced conversation awareness, contextual references,
+        and improved flow between multiple interactions.
+        """
         logger.info(f"Starting send_message_async - User: {user_id}, Session: {session_id}")
         logger.info(f"Message content: {message[:50]}... (truncated)")
         
         try:
+            # Retrieve conversation history for this session
+            conversation_history = await self._get_conversation_history(user_id, session_id)
+            logger.info(f"Retrieved conversation history with {len(conversation_history)} previous turns")
+            
+            # Analyze if this is a follow-up question
+            is_followup, previous_topic = self._analyze_followup(message, conversation_history)
+            if is_followup:
+                logger.info(f"Detected follow-up question about: {previous_topic}")
+            
             # Log intent detection start
             logger.info("Detecting message intent")
             intent_result = await self.llm_manager.detect_intent(message)
@@ -482,14 +1117,27 @@ class MessageHandler:
                 logger.info("Detected publication list request - will apply special formatting")
             elif "list" in message.lower() and ("expert" in message.lower() or "researcher" in message.lower()):
                 logger.info("Detected expert list request - will apply special formatting")
-                
+            
+            # Enhance the message with conversation context if this is a follow-up
+            enhanced_message = message
+            if is_followup and previous_topic and conversation_history:
+                enhanced_message = self._enhance_message_with_context(message, previous_topic, conversation_history)
+                logger.info(f"Enhanced message with conversation context: {enhanced_message[:50]}... (truncated)")
+            
             # Start the async response generator
             logger.info("Starting async response generation")
-            response_generator = self.llm_manager.generate_async_response(message)
+            response_generator = self.llm_manager.generate_async_response(enhanced_message)
             
-            # ⚠️ CRITICAL CHANGE: Process the response through process_stream_response
-            # This ensures responses are cleaned and formatted properly before being sent to users
+            # Process the response through process_stream_response
             logger.info("Processing response through cleaning pipeline")
+            
+            # Add conversation-aware introduction for follow-ups if appropriate
+            if is_followup and len(conversation_history) > 0:
+                intro = self._get_followup_introduction(previous_topic)
+                if intro:
+                    yield intro
+            
+            # Process and yield the main response
             async for part in self.process_stream_response(response_generator):
                 # The part is now cleaned by process_stream_response
                 
@@ -511,13 +1159,19 @@ class MessageHandler:
                     
                 # Yield the cleaned part
                 yield part
+            
+            # Add a coherent closing based on conversation context if appropriate
+            if random.random() < 0.3:  # Only add this sometimes to avoid being repetitive
+                yield self._get_conversation_closing(intent_type, len(conversation_history))
+                
+            # Save this interaction to conversation history
+            await self._save_to_conversation_history(user_id, session_id, message, intent_type)
                 
             logger.info("Completed send_message_async stream generation")
             
         except Exception as e:
             logger.error(f"Error in send_message_async: {e}", exc_info=True)
-            yield f"Error processing message: {str(e)}"
-
+            yield "I apologize, but I encountered an issue processing your request. Could you please try again or rephrase your question?"
     async def _cache_response(self, message: str, user_id: str, response: str):
         """Cache response for future use during rate limiting."""
         try:
