@@ -228,6 +228,337 @@ class ExpertMatchingService:
                 'expert_expertise': []
             }
 
+    async def _get_additional_recommendations(
+        self,
+        session,
+        user_id: str,
+        count: int,
+        exclude_ids: List[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get additional recommendations when primary methods don't return enough.
+        Uses a broader matching strategy with organizational factors and popularity.
+        
+        Args:
+            session: Neo4j session
+            user_id: User ID to get recommendations for
+            count: Number of additional recommendations needed
+            exclude_ids: List of expert IDs to exclude
+            
+        Returns:
+            List of additional recommended experts
+        """
+        if count <= 0:
+            return []
+            
+        exclude_ids = exclude_ids or []
+        self.logger.info(f"Finding {count} additional recommendations for user {user_id}")
+        
+        try:
+            # Get the user's theme and unit if available
+            user_query = """
+            MATCH (e:Expert {id: $user_id})
+            RETURN e.theme as theme, e.unit as unit
+            """
+            
+            user_result = session.run(user_query, {"user_id": user_id})
+            user_record = user_result.single()
+            
+            theme = user_record.get("theme") if user_record else None
+            unit = user_record.get("unit") if user_record else None
+            
+            # Build a query that prioritizes organizational similarity and popularity
+            query = """
+            MATCH (e:Expert)
+            WHERE e.is_active = true
+            AND NOT e.id IN $exclude_ids
+            AND e.id <> $user_id
+            
+            // Calculate organizational similarity
+            WITH e, 
+                CASE 
+                    WHEN e.theme = $theme AND e.unit = $unit THEN 1.0
+                    WHEN e.theme = $theme THEN 0.7
+                    WHEN e.unit = $unit THEN 0.6
+                    ELSE 0.0
+                END as org_similarity
+            
+            // Get connection count as popularity measure
+            OPTIONAL MATCH (e)-[r]-(other)
+            WITH e, org_similarity, COUNT(r) as connection_count
+            
+            // Get expertise for diversity
+            OPTIONAL MATCH (e)-[:HAS_CONCEPT]->(c:Concept)
+            OPTIONAL MATCH (e)-[:SPECIALIZES_IN]->(f:Field)
+            OPTIONAL MATCH (e)-[:WORKS_IN_DOMAIN]->(d:Domain)
+            
+            // Collect expertise fields
+            WITH e, org_similarity, connection_count,
+                COLLECT(DISTINCT c.name) as concepts,
+                COLLECT(DISTINCT f.name) as fields,
+                COLLECT(DISTINCT d.name) as domains
+            
+            // Calculate final score combining organization, popularity and expertise diversity
+            WITH 
+                e.id as expert_id,
+                e.name as expert_name,
+                e.designation as expert_designation,
+                e.theme as expert_theme,
+                e.unit as expert_unit,
+                org_similarity * 0.5 + 
+                (CASE WHEN connection_count > 20 THEN 0.5 ELSE connection_count / 40.0 END) * 0.3 +
+                (SIZE(concepts) + SIZE(fields) + SIZE(domains)) / 20.0 * 0.2 as score,
+                concepts, fields, domains
+                
+            // Return in standard format
+            RETURN {
+                id: expert_id,
+                name: expert_name,
+                designation: expert_designation,
+                theme: expert_theme,
+                unit: expert_unit,
+                match_details: {
+                    shared_concepts: concepts,
+                    shared_fields: fields,
+                    shared_domains: domains
+                },
+                match_reason: CASE
+                    WHEN expert_theme = $theme AND expert_unit = $unit THEN 'Same theme and unit'
+                    WHEN expert_theme = $theme THEN 'Same theme'
+                    WHEN expert_unit = $unit THEN 'Same unit'
+                    ELSE 'Additional recommendation'
+                END,
+                similarity_score: score
+            } as result
+            ORDER BY score DESC
+            LIMIT $count
+            """
+            
+            params = {
+                "user_id": user_id,
+                "exclude_ids": exclude_ids,
+                "theme": theme,
+                "unit": unit,
+                "count": count
+            }
+            
+            result = session.run(query, params)
+            additional_experts = [record["result"] for record in result]
+            
+            self.logger.info(f"Found {len(additional_experts)} additional recommendations")
+            return additional_experts
+            
+        except Exception as e:
+            self.logger.error(f"Error finding additional recommendations: {str(e)}", exc_info=True)
+            return []
+
+    async def _get_diverse_experts(
+        self,
+        session,
+        count: int,
+        exclude_ids: List[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Find diverse experts from different fields and themes to provide variety.
+        
+        Args:
+            session: Neo4j session
+            count: Number of diverse experts needed
+            exclude_ids: List of expert IDs to exclude
+            
+        Returns:
+            List of diverse recommended experts
+        """
+        if count <= 0:
+            return []
+            
+        exclude_ids = exclude_ids or []
+        self.logger.info(f"Finding {count} diverse experts")
+        
+        try:
+            # This query focuses on finding experts from diverse fields
+            # It groups experts by their themes and fields, then selects representatives
+            query = """
+            // Match active experts not already recommended
+            MATCH (e:Expert)
+            WHERE e.is_active = true
+            AND NOT e.id IN $exclude_ids
+            
+            // Get their themes and fields for diversity
+            WITH e, e.theme as theme
+            OPTIONAL MATCH (e)-[:SPECIALIZES_IN]->(f:Field)
+            OPTIONAL MATCH (e)-[:HAS_CONCEPT]->(c:Concept)
+            
+            // Group by theme and collect expertise
+            WITH e, theme, 
+                COLLECT(DISTINCT f.name) as fields,
+                COLLECT(DISTINCT c.name) as concepts
+                
+            // Calculate a diversity score based on field coverage
+            WITH e, theme, fields, concepts,
+                SIZE(fields) + SIZE(concepts) as expertise_count
+            
+            // Find experts with most diverse expertise
+            ORDER BY expertise_count DESC
+            
+            // Get complete expert data for return
+            WITH e.id as expert_id,
+                e.name as expert_name,
+                e.designation as expert_designation,
+                theme as expert_theme,
+                e.unit as expert_unit,
+                fields, concepts,
+                expertise_count
+                
+            // Return in standard format
+            RETURN {
+                id: expert_id,
+                name: expert_name,
+                designation: expert_designation,
+                theme: expert_theme,
+                unit: expert_unit,
+                match_details: {
+                    shared_concepts: concepts,
+                    shared_fields: fields
+                },
+                match_reason: 'Diverse expertise',
+                similarity_score: expertise_count / 20.0
+            } as result
+            LIMIT $count
+            """
+            
+            params = {
+                "exclude_ids": exclude_ids,
+                "count": count
+            }
+            
+            result = session.run(query, params)
+            diverse_experts = [record["result"] for record in result]
+            
+            self.logger.info(f"Found {len(diverse_experts)} diverse experts")
+            return diverse_experts
+            
+        except Exception as e:
+            self.logger.error(f"Error finding diverse experts: {str(e)}", exc_info=True)
+            return []
+
+    async def _get_fallback_recommendations(
+        self,
+        session,
+        count: int,
+        exclude_ids: List[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get fallback recommendations when all other methods fail.
+        Simply returns the most connected active experts.
+        
+        Args:
+            session: Neo4j session
+            count: Number of fallback recommendations needed
+            exclude_ids: List of expert IDs to exclude
+            
+        Returns:
+            List of fallback recommended experts
+        """
+        if count <= 0:
+            return []
+            
+        exclude_ids = exclude_ids or []
+        self.logger.info(f"Using fallback to find {count} experts")
+        
+        try:
+            # The simplest possible query - just get active experts
+            # sorted by their connection count
+            query = """
+            // Match active experts
+            MATCH (e:Expert)
+            WHERE e.is_active = true
+            AND NOT e.id IN $exclude_ids
+            
+            // Count their connections as a basic popularity metric
+            OPTIONAL MATCH (e)-[r]-()
+            WITH e, COUNT(r) as connection_count
+            
+            // Get expert information
+            WITH e.id as expert_id,
+                e.name as expert_name,
+                e.designation as expert_designation,
+                e.theme as expert_theme,
+                e.unit as expert_unit,
+                connection_count
+                
+            // Sort by connection count
+            ORDER BY connection_count DESC
+            
+            // Return in standard format
+            RETURN {
+                id: expert_id,
+                name: expert_name,
+                designation: expert_designation,
+                theme: expert_theme,
+                unit: expert_unit,
+                match_details: {},
+                match_reason: 'Popular expert',
+                similarity_score: 0.1
+            } as result
+            LIMIT $count
+            """
+            
+            params = {
+                "exclude_ids": exclude_ids,
+                "count": count
+            }
+            
+            result = session.run(query, params)
+            fallback_experts = [record["result"] for record in result]
+            
+            self.logger.info(f"Found {len(fallback_experts)} fallback experts")
+            
+            # If we still don't have enough (which would be very unlikely),
+            # create synthetic placeholder experts
+            if len(fallback_experts) < count:
+                self.logger.warning(f"Unable to find enough real experts, creating placeholders")
+                
+                placeholder_count = count - len(fallback_experts)
+                placeholder_experts = []
+                
+                for i in range(placeholder_count):
+                    placeholder_experts.append({
+                        "id": f"placeholder_{i}",
+                        "name": f"Expert {i+1}",
+                        "designation": "Recommendation Unavailable",
+                        "theme": "",
+                        "unit": "",
+                        "match_details": {},
+                        "match_reason": "Placeholder recommendation",
+                        "similarity_score": 0.01
+                    })
+                
+                fallback_experts.extend(placeholder_experts)
+            
+            return fallback_experts
+            
+        except Exception as e:
+            self.logger.error(f"Error in fallback recommendations: {str(e)}", exc_info=True)
+            
+            # If even the database query fails, create complete placeholder recommendations
+            self.logger.warning("Creating emergency placeholder recommendations")
+            
+            placeholders = []
+            for i in range(count):
+                placeholders.append({
+                    "id": f"emergency_{i}",
+                    "name": f"Expert {i+1}",
+                    "designation": "Recommendation Unavailable",
+                    "theme": "",
+                    "unit": "",
+                    "match_details": {},
+                    "match_reason": "System is currently unavailable",
+                    "similarity_score": 0.0
+                })
+                
+            return placeholders
+
     async def _get_cold_start_recommendations(
         self, 
         session, 
@@ -238,22 +569,24 @@ class ExpertMatchingService:
         """
         Generate recommendations for new users with no history or minimal data.
         Uses a combination of organizational structure and popular experts.
+        Always returns exactly 5 recommendations.
         
         Args:
             session: Neo4j session
-            limit: Maximum number of recommendations to return
+            limit: Maximum number of recommendations to return (fixed at 5)
             theme: User's theme if available
             unit: User's unit if available
             
         Returns:
-            List of recommended experts
+            List of exactly 5 recommended experts
         """
         self.logger.info("Generating cold-start recommendations")
+        limit = 5  # Always use exactly 5
         
         try:
             # Build the match clause based on available organizational data
             org_match = ""
-            params = {"limit": limit}
+            params = {"limit": limit * 2}  # Request more than needed to ensure we have enough
             
             if theme:
                 org_match += "MATCH (t:Theme {name: $theme}) "
@@ -312,8 +645,8 @@ class ExpertMatchingService:
                     theme: expert_theme,
                     unit: expert_unit,
                     match_details: {
-                        concepts: concepts,
-                        fields: fields
+                        shared_concepts: concepts,
+                        shared_fields: fields
                     },
                     match_reason: 'Popular expert',
                     similarity_score: popularity_score
@@ -371,8 +704,8 @@ class ExpertMatchingService:
                     theme: expert_theme,
                     unit: expert_unit,
                     match_details: {
-                        concepts: concepts,
-                        fields: fields
+                        shared_concepts: concepts,
+                        shared_fields: fields
                     },
                     match_reason: CASE
                         WHEN expert_theme = $theme AND expert_unit = $unit THEN 'Same theme and unit'
@@ -399,23 +732,46 @@ class ExpertMatchingService:
                     seen_ids.add(expert['id'])
                     unique_experts.append(expert)
             
-            # If we don't have enough experts, we could try a completely different approach here
-            if len(unique_experts) < limit:
-                self.logger.warning(
-                    f"Cold start recommendations returned only {len(unique_experts)} experts, "
-                    f"below the requested limit of {limit}"
+            # NEW: If we don't have enough recommendations, try another approach
+            if len(unique_experts) < 5:
+                self.logger.info(f"Cold start found only {len(unique_experts)} experts, trying diversity approach")
+                
+                # Get diverse experts from different fields to supplement
+                diversity_experts = await self._get_diverse_experts(
+                    session, 
+                    5 - len(unique_experts),
+                    [expert['id'] for expert in unique_experts]  # Exclude already recommended experts
                 )
                 
-                # Try to find some diverse experts to fill the gap
-                # This would normally be a fallback query, but we'll skip implementing it
-                # for brevity
+                if diversity_experts:
+                    unique_experts.extend(diversity_experts)
             
-            self.logger.info(f"Generated {len(unique_experts)} cold-start recommendations")
-            return unique_experts
+            # NEW: If still not enough, use the fallback approach
+            if len(unique_experts) < 5:
+                self.logger.info(f"Still only have {len(unique_experts)} experts, using fallback approach")
+                
+                fallback_experts = await self._get_fallback_recommendations(
+                    session,
+                    5 - len(unique_experts),
+                    [expert['id'] for expert in unique_experts]  # Exclude already recommended experts
+                )
+                
+                if fallback_experts:
+                    unique_experts.extend(fallback_experts)
+            
+            # Always return exactly 5 experts (or fewer if absolutely impossible)
+            final_experts = unique_experts[:5]
+            
+            self.logger.info(f"Generated {len(final_experts)} cold-start recommendations")
+            return final_experts
             
         except Exception as e:
             self.logger.error(f"Error generating cold-start recommendations: {str(e)}", exc_info=True)
-            return []
+            # On error, try the fallback method
+            try:
+                return await self._get_fallback_recommendations(session, 5)
+            except Exception:
+                return []
 
     async def get_recommendations_for_user(
         self, 
@@ -428,7 +784,7 @@ class ExpertMatchingService:
         
         :param user_id: ID of the expert to find recommendations for
         :param limit: Maximum number of recommendations to return
-        :return: List of recommended experts
+        :return: List of recommended experts (always 5)
         """
         start_time = datetime.utcnow()
         
@@ -464,8 +820,8 @@ class ExpertMatchingService:
                 
                 if not debug_record:
                     self.logger.warning(f"No expert found with ID: {user_id}")
-                    # NEW: If user isn't found as an expert, attempt cold-start recommendations
-                    return await self._get_cold_start_recommendations(session, limit)
+                    # If user isn't found as an expert, use cold-start recommendations
+                    return await self._get_cold_start_recommendations(session, 5)
                 
                 # Log expert details for debugging
                 self.logger.info(f"Expert Debug Info: {dict(debug_record)}")
@@ -475,10 +831,10 @@ class ExpertMatchingService:
                 has_fields = debug_record.get("field_count", 0) > 0
                 has_domains = debug_record.get("domain_count", 0) > 0
                 
-                # NEW: For new users or users with minimal data, use the cold start approach
+                # For new users or users with minimal data, use the cold start approach
                 if is_new_user and not (has_concepts or has_fields or has_domains):
                     self.logger.info(f"New user with minimal data detected: {user_id}")
-                    return await self._get_cold_start_recommendations(session, limit, theme=debug_record.get("theme"), unit=debug_record.get("unit"))
+                    return await self._get_cold_start_recommendations(session, 5, theme=debug_record.get("theme"), unit=debug_record.get("unit"))
                 
                 # Dynamic weights based on data availability
                 # Initialize weights with default values
@@ -702,10 +1058,13 @@ class ExpertMatchingService:
                 LIMIT $limit
                 """
                 
+                # Get a higher limit to ensure we have enough experts after deduplication
+                adjusted_limit = max(limit * 2, 10)
+                
                 # Parameters for this specific query
                 params = {
                     "expert_id": user_id,
-                    "limit": limit,
+                    "limit": adjusted_limit,  # Using a higher limit to ensure enough results after filtering
                     "concept_weight": concept_weight,
                     "domain_weight": domain_weight,
                     "field_weight": field_weight,
@@ -735,11 +1094,27 @@ class ExpertMatchingService:
                         f"that weren't caught by the DISTINCT clause"
                     )
                 
-                # Limit to the requested number if we have more after deduplication
-                unique_experts = unique_experts[:limit]
+                # NEW: Check if we have enough recommendations and add more if needed
+                if len(unique_experts) < 5:
+                    self.logger.info(f"Only found {len(unique_experts)} recommendations, adding more to reach 5")
+                    
+                    # Get additional experts to reach exactly 5
+                    additional_experts = await self._get_additional_recommendations(
+                        session, 
+                        user_id, 
+                        5 - len(unique_experts),
+                        [expert['id'] for expert in unique_experts]  # Exclude already recommended experts
+                    )
+                    
+                    if additional_experts:
+                        unique_experts.extend(additional_experts)
+                        self.logger.info(f"Added {len(additional_experts)} additional experts")
+                
+                # NEW: Always limit to exactly 5 results
+                final_experts = unique_experts[:5]
                 
                 # Log this recommendation interaction for future reference
-                await self._log_recommendation_interaction(user_id, [expert['id'] for expert in unique_experts])
+                await self._log_recommendation_interaction(user_id, [expert['id'] for expert in final_experts])
                 
                 # Performance and result logging
                 end_time = datetime.utcnow()
@@ -747,7 +1122,7 @@ class ExpertMatchingService:
                 
                 self.logger.info(
                     f"Recommendation generation for user {user_id}: "
-                    f"Found {len(unique_experts)} unique experts, "
+                    f"Returning exactly {len(final_experts)} experts, "
                     f"Process time: {process_time:.2f} seconds"
                 )
                 
@@ -759,14 +1134,20 @@ class ExpertMatchingService:
                     f"available_features={available_features}"
                 )
                 
-                return unique_experts
+                return final_experts
                     
         except Exception as e:
             self.logger.error(
                 f"Error finding similar experts for user {user_id}: {str(e)}", 
                 exc_info=True
             )
-            return []
+            # NEW: On error, return 5 fallback recommendations
+            try:
+                with self._neo4j_driver.session() as session:
+                    return await self._get_fallback_recommendations(session, 5)
+            except Exception as fallback_error:
+                self.logger.error(f"Error getting fallback recommendations: {fallback_error}")
+                return []
 
     def close(self):
         """Close database connections with logging"""
