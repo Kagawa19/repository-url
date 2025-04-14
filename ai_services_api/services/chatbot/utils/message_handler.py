@@ -95,12 +95,12 @@ class MessageHandler:
         buffer = ""
         metadata = None
         in_publication_list = False
-        list_count = 0
         publication_buffer = ""
         # Track intent information for content-aware enhancements
         detected_intent = None
         is_first_chunk = True
         transition_inserted = False
+
         try:
             async for chunk in response_stream:
                 # Capture metadata with improved detection
@@ -115,7 +115,7 @@ class MessageHandler:
                     # Log metadata capture but don't yield it to user
                     logger.debug(f"Captured metadata: {json.dumps(metadata, default=str) if metadata else 'None'}")
                     continue
-                
+
                 # Extract text from chunk with enhanced format handling
                 if isinstance(chunk, dict):
                     if 'chunk' in chunk:
@@ -139,11 +139,11 @@ class MessageHandler:
                     # Skip unknown formats
                     logger.debug(f"Skipping unknown chunk format: {type(chunk)}")
                     continue
-                
+
                 # Skip empty chunks
-                if not text:
+                if not text.strip():
                     continue
-                
+
                 # Add natural language improvements for first chunk based on intent
                 if is_first_chunk and detected_intent and not transition_inserted:
                     # Prepare intent-specific natural introductions
@@ -165,9 +165,9 @@ class MessageHandler:
                         yield intro_text
                         transition_inserted = True
                     is_first_chunk = False
-                
+
                 buffer += text
-                
+
                 # Detect publication lists
                 if re.search(r'\d+\.\s+Title:', buffer) or re.search(r'Title:', buffer):
                     if not in_publication_list:
@@ -184,10 +184,9 @@ class MessageHandler:
                     else:
                         publication_buffer += text
                         # Check if we have a complete publication entry or multiple entries
-                        if re.search(r'
-    \d+\.', publication_buffer):
+                        if re.search(r'\n\d+\.', publication_buffer):
                             # Multiple entries detected, try to split
-                            entries = re.split(r'(?=\d+\.\s+Title:)', publication_buffer)
+                            entries = re.split(r'(?=\n\d+\.\s+Title:)', publication_buffer)
                             if len(entries) > 1:
                                 # Process all but the last entry
                                 for entry in entries[:-1]:
@@ -201,8 +200,7 @@ class MessageHandler:
                                 # Keep the last entry in the buffer
                                 publication_buffer = entries[-1]
                         # Check if entry appears complete (has multiple fields and ending line)
-                        elif len(re.findall(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', publication_buffer)) >= 3 and '
-    ' in publication_buffer:
+                        elif len(re.findall(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', publication_buffer)) >= 3 and '\n' in publication_buffer:
                             # This looks like a complete entry
                             # Apply enhanced text cleaning
                             cleaned_entry = self._clean_text_for_user(publication_buffer)
@@ -213,7 +211,7 @@ class MessageHandler:
                             if detected_intent == "publication" and random.random() < 0.3:
                                 yield self._get_random_transition("after_publication")
                         continue
-                
+
                 # If we were in a publication list but now we're not, yield the publication buffer
                 if in_publication_list and not re.search(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', text):
                     if publication_buffer.strip():
@@ -225,7 +223,7 @@ class MessageHandler:
                             yield self._get_random_transition("after_publications")
                     publication_buffer = ""
                     in_publication_list = False
-                
+
                 # Normal sentence processing for non-publication content
                 if not in_publication_list:
                     # Check if buffer contains complete sentences
@@ -239,7 +237,7 @@ class MessageHandler:
                                 yield cleaned_sentence
                         # Keep the last sentence in the buffer
                         buffer = sentences[-1]
-            
+
             # Handle any remaining text in buffers
             if publication_buffer.strip():
                 cleaned_text = self._clean_text_for_user(publication_buffer)
@@ -253,6 +251,7 @@ class MessageHandler:
                 # Add appropriate closing based on intent
                 if detected_intent:
                     yield self._get_random_transition(f"{detected_intent}_conclusion")
+
         except Exception as e:
             logger.error(f"Error processing stream response: {e}", exc_info=True)
             # Yield any remaining buffer to avoid losing content
