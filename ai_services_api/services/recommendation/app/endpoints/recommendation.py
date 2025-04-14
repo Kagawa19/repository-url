@@ -68,21 +68,46 @@ async def process_recommendations(user_id: str, redis_client: Redis) -> Dict:
     try:
         logger.info(f"Starting recommendation process for user: {user_id}")
         
+        # Check if we need to check for recent database changes
+        should_check_changes = True
+        
         # Check cache first
         cache_key = f"user_recommendations:{user_id}"
         cached_response = await redis_client.get(cache_key)
         
         if cached_response:
-            logger.info(f"Cache hit for user recommendations: {cache_key}")
             try:
-                return json.loads(cached_response)
+                cached_data = json.loads(cached_response)
+                
+                # NEW: Check if we should use the cached data or if there might be DB changes
+                # Only check for DB changes if the cache is older than 5 minutes
+                cache_age = await redis_client.ttl(cache_key)
+                if cache_age > 1500:  # If more than 5 minutes fresh (1800-300=1500)
+                    should_check_changes = False
+                    logger.info(f"Using fresh cache for user recommendations: {cache_key}")
+                    return cached_data
+                else:
+                    # Cache exists but may be stale, check for DB changes before using
+                    logger.info(f"Cache exists but may need validation: {cache_key}")
             except json.JSONDecodeError as json_err:
                 logger.error(f"Error decoding cached response: {json_err}")
+        
+        # NEW: Check if there have been relevant database changes
+        if should_check_changes:
+            has_changes = await _check_for_database_changes(user_id, redis_client)
+            
+            # If there are no changes and we have cached data, use it
+            if not has_changes and cached_response:
+                try:
+                    logger.info(f"No relevant database changes, using cache: {cache_key}")
+                    return json.loads(cached_response)
+                except json.JSONDecodeError:
+                    pass  # Fall through to regenerating recommendations
         
         start_time = datetime.utcnow()
         logger.debug(f"Recommendation generation started at: {start_time}")
         
-        # ---- NEW ADDITION: Get search analytics to enhance recommendations ----
+        # ---- Get search analytics to enhance recommendations ----
         search_analytics = await _get_user_search_analytics(user_id, redis_client)
         logger.info(f"Retrieved search analytics for user {user_id}: {len(search_analytics)} records")
         
@@ -90,10 +115,10 @@ async def process_recommendations(user_id: str, redis_client: Redis) -> Dict:
         try:
             logger.info(f"Generating recommendations for user: {user_id}")
             
-            # ---- UNCHANGED: Get recommendations ----
+            # ---- Get recommendations ----
             recommendations = await expert_matching.get_recommendations_for_user(user_id)
             
-            # ---- NEW ADDITION: Apply search analytics boosting ----
+            # ---- Apply search analytics boosting ----
             if search_analytics and recommendations:
                 # Get search query patterns
                 search_queries = [sa.get('query', '').lower() for sa in search_analytics if sa.get('query')]
@@ -128,13 +153,15 @@ async def process_recommendations(user_id: str, redis_client: Redis) -> Dict:
                     recommendations.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
                     logger.info(f"Applied search-based boosting to recommendations")
             
-            # ---- UNCHANGED: Format response data ----
+            # ---- Format response data ----
             response_data = {
                 "user_id": user_id,
                 "recommendations": recommendations or [],
                 "total_matches": len(recommendations) if recommendations else 0,
                 "timestamp": datetime.utcnow().isoformat(),
-                "response_time": (datetime.utcnow() - start_time).total_seconds()
+                "response_time": (datetime.utcnow() - start_time).total_seconds(),
+                # NEW: Add a data version marker for change detection
+                "data_version": await _get_current_data_version(redis_client)
             }
             
             logger.info(f"Recommendation generation completed for user {user_id}. "
@@ -151,7 +178,7 @@ async def process_recommendations(user_id: str, redis_client: Redis) -> Dict:
             except Exception as cache_err:
                 logger.error(f"Failed to cache recommendations: {cache_err}")
             
-            # ---- NEW ADDITION: Log this recommendation event ----
+            # ---- Log this recommendation event ----
             await _log_recommendation_event(user_id, response_data, redis_client)
             
             return response_data
@@ -167,6 +194,258 @@ async def process_recommendations(user_id: str, redis_client: Redis) -> Dict:
     except Exception as e:
         logger.error(f"Unhandled error in recommendation process for user {user_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Comprehensive recommendation error")
+
+async def _check_for_database_changes(user_id: str, redis_client: Redis) -> bool:
+    """
+    Check if there have been database changes that would affect recommendations for this user.
+    
+    Args:
+        user_id: The user's identifier
+        redis_client: Redis client for version checking
+        
+    Returns:
+        Boolean indicating if changes have been detected
+    """
+    try:
+        # Get the cached data version if it exists
+        cache_key = f"user_recommendations:{user_id}"
+        cached_data = await redis_client.get(cache_key)
+        
+        if not cached_data:
+            # No cache exists, so consider this as needing fresh data
+
+async def _check_for_database_changes(user_id: str, redis_client: Redis) -> bool:
+    """
+    Check if there have been database changes that would affect recommendations for this user.
+    
+    Args:
+        user_id: The user's identifier
+        redis_client: Redis client for version checking
+        
+    Returns:
+        Boolean indicating if changes have been detected
+    """
+    try:
+        # Get the cached data version if it exists
+        cache_key = f"user_recommendations:{user_id}"
+        cached_data = await redis_client.get(cache_key)
+        
+        if not cached_data:
+            # No cache exists, so consider this as needing fresh data
+            return True
+            
+        try:
+            # Extract the data version from cached data
+            cached_version = json.loads(cached_data).get('data_version', 0)
+        except (json.JSONDecodeError, AttributeError):
+            # If we can't parse the cache or get the version, assume we need fresh data
+            return True
+            
+        # Get the current data version
+        current_version = await _get_current_data_version(redis_client)
+        
+        # Check if the user has specific changes
+        user_changes_key = f"user_data_changed:{user_id}"
+        user_has_changes = await redis_client.exists(user_changes_key)
+        
+        if user_has_changes:
+            # Clear the change flag since we're processing it now
+            await redis_client.delete(user_changes_key)
+            logger.info(f"Detected specific changes for user {user_id}")
+            return True
+            
+        # Compare versions to see if there have been general data changes
+        if current_version > cached_version:
+            logger.info(f"Data version change detected: {cached_version} -> {current_version}")
+            return True
+            
+        # No relevant changes detected
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error checking for database changes: {e}")
+        # On error, assume we should refresh data to be safe
+        return True
+
+async def _get_current_data_version(redis_client: Redis) -> int:
+    """
+    Get the current data version number that tracks database changes.
+    
+    Args:
+        redis_client: Redis client for version tracking
+        
+    Returns:
+        Current data version as integer
+    """
+    try:
+        # Key for storing the global data version
+        version_key = "recommendation_data_version"
+        
+        # Get current version
+        version = await redis_client.get(version_key)
+        
+        if version is None:
+            # Initialize if doesn't exist
+            await redis_client.set(version_key, "1")
+            return 1
+            
+        return int(version)
+        
+    except Exception as e:
+        logger.error(f"Error getting data version: {e}")
+        # Return a default version on error
+        return 0
+
+async def increment_data_version(redis_client: Redis) -> int:
+    """
+    Increment the data version to indicate database changes.
+    This should be called whenever significant changes are made to the database
+    that would affect recommendations.
+    
+    Args:
+        redis_client: Redis client for version tracking
+        
+    Returns:
+        New data version as integer
+    """
+    try:
+        # Key for storing the global data version
+        version_key = "recommendation_data_version"
+        
+        # Increment and return the new version
+        new_version = await redis_client.incr(version_key)
+        logger.info(f"Incremented data version to {new_version}")
+        
+        return new_version
+        
+    except Exception as e:
+        logger.error(f"Error incrementing data version: {e}")
+        return 0
+
+async def mark_user_data_changed(user_id: str, redis_client: Redis) -> bool:
+    """
+    Mark a specific user as having data changes that would affect their recommendations.
+    This is more targeted than incrementing the global version and should be used
+    when changes only affect specific users.
+    
+    Args:
+        user_id: The user's identifier
+        redis_client: Redis client for tracking
+        
+    Returns:
+        Boolean indicating success
+    """
+    try:
+        # Key for tracking user-specific changes
+        user_changes_key = f"user_data_changed:{user_id}"
+        
+        # Set a flag that will be checked and cleared when processing recommendations
+        # Use a short expiry to prevent permanent flags
+        await redis_client.setex(user_changes_key, 3600, "1")  # 1 hour expiry
+        
+        logger.info(f"Marked data changes for user {user_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error marking user data changes: {e}")
+        return False
+
+@router.delete("/cache/recommendations/{user_id}")
+async def clear_user_recommendations_cache(
+    user_id: str,
+    redis_client: Redis = Depends(get_redis)
+) -> Dict:
+    """Clear recommendations cache for a specific user"""
+    try:
+        cache_key = f"user_recommendations:{user_id}"
+        deleted = await redis_client.delete(cache_key)
+        
+        # NEW: Also mark this user as having data changes
+        await mark_user_data_changed(user_id, redis_client)
+        
+        logger.info(f"Cache clearing request for user: {user_id}, result: {deleted > 0}")
+        
+        if deleted:
+            return {"status": "success", "message": f"Cache cleared for user {user_id}"}
+        else:
+            return {"status": "success", "message": f"No cache found for user {user_id}"}
+    
+    except Exception as e:
+        logger.error(f"Failed to clear cache for user {user_id}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Cache clearing error: {str(e)}")
+
+@router.delete("/cache/recommendations")
+async def clear_all_recommendations_cache(
+    request: Request,
+    redis_client: Redis = Depends(get_redis)
+) -> Dict:
+    """Clear recommendations cache for all users"""
+    try:
+        # Find all keys matching the pattern
+        pattern = "user_recommendations:*"
+        total_deleted = 0
+        
+        # Use scan_iter to get all matching keys and delete them
+        async for key in redis_client.scan_iter(match=pattern):
+            await redis_client.delete(key)
+            total_deleted += 1
+        
+        # NEW: Also increment the data version to ensure fresh recommendations
+        await increment_data_version(redis_client)
+        
+        logger.info(f"All recommendation caches cleared. Total deleted: {total_deleted}")
+        
+        return {
+            "status": "success", 
+            "message": f"Cleared all recommendation caches", 
+            "total_deleted": total_deleted
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to clear all recommendation caches: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Cache clearing error: {str(e)}")
+
+@router.post("/notify/database-change")
+async def notify_database_change(
+    request: Request,
+    redis_client: Redis = Depends(get_redis)
+) -> Dict:
+    """
+    Endpoint for other services to notify of database changes that
+    might affect recommendations.
+    """
+    try:
+        # Get the request data
+        data = await request.json()
+        
+        # Check if this change affects specific users
+        affected_users = data.get("affected_users", [])
+        
+        if affected_users:
+            # Mark specific users as having changes
+            for user_id in affected_users:
+                await mark_user_data_changed(user_id, redis_client)
+                
+            logger.info(f"Marked changes for {len(affected_users)} specific users")
+            return {
+                "status": "success",
+                "message": f"Marked changes for {len(affected_users)} users",
+                "affected_users": len(affected_users)
+            }
+        else:
+            # Increment the global version for system-wide changes
+            new_version = await increment_data_version(redis_client)
+            
+            logger.info(f"Incremented global data version to {new_version}")
+            return {
+                "status": "success",
+                "message": "Updated global data version",
+                "new_version": new_version
+            }
+    
+    except Exception as e:
+        logger.error(f"Failed to process database change notification: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Notification processing error: {str(e)}")
 
 async def _get_user_search_analytics(user_id: str, redis_client: Redis) -> List[Dict]:
     """

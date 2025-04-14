@@ -247,11 +247,13 @@ class ExpertMatchingService:
         self.logger.info(f"Generating recommendations for user ID: {user_id}, limit: {limit}")
         
         try:
-            # ---- NEW ADDITION: Get user interests from user_topic_interests table ----
+            # Get user interests from user_topic_interests table
             user_interests = await self._get_user_interests(user_id)
-            self.logger.info(f"Retrieved {len(user_interests)} interests for user {user_id}")
+            self.logger.info(f"Retrieved {sum(len(v) for v in user_interests.values())} interests for user {user_id}")
             
-            # ---- UNCHANGED: Session creation and debug info ----
+            # Check if this is a new user (no interests and likely no history)
+            is_new_user = all(len(interests) == 0 for interests in user_interests.values())
+            
             with self._neo4j_driver.session() as session:
                 # Verify expert exists and get baseline information
                 debug_query = """
@@ -273,7 +275,8 @@ class ExpertMatchingService:
                 
                 if not debug_record:
                     self.logger.warning(f"No expert found with ID: {user_id}")
-                    return []
+                    # NEW: If user isn't found as an expert, attempt cold-start recommendations
+                    return await self._get_cold_start_recommendations(session, limit)
                 
                 # Log expert details for debugging
                 self.logger.info(f"Expert Debug Info: {dict(debug_record)}")
@@ -283,7 +286,12 @@ class ExpertMatchingService:
                 has_fields = debug_record.get("field_count", 0) > 0
                 has_domains = debug_record.get("domain_count", 0) > 0
                 
-                # ---- MODIFIED: Dynamic weights with user interest integration ----
+                # NEW: For new users or users with minimal data, use the cold start approach
+                if is_new_user and not (has_concepts or has_fields or has_domains):
+                    self.logger.info(f"New user with minimal data detected: {user_id}")
+                    return await self._get_cold_start_recommendations(session, limit, theme=debug_record.get("theme"), unit=debug_record.get("unit"))
+                
+                # Dynamic weights based on data availability
                 # Initialize weights with default values
                 concept_weight = 0.0
                 domain_weight = 0.0
@@ -313,7 +321,7 @@ class ExpertMatchingService:
                     search_weight = 0.1
                     interest_weight = 0.2
                 
-                # ---- MODIFIED: Enhanced query with user interest integration ----
+                # Interest-based matching clauses
                 interest_clause = ""
                 interest_match = ""
                 interests_param = {}
@@ -541,7 +549,6 @@ class ExpertMatchingService:
                 # Limit to the requested number if we have more after deduplication
                 unique_experts = unique_experts[:limit]
                 
-                # ---- NEW ADDITION: Log interactions after getting recommendations ----
                 # Log this recommendation interaction for future reference
                 await self._log_recommendation_interaction(user_id, [expert['id'] for expert in unique_experts])
                 
