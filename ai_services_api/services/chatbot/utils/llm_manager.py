@@ -546,7 +546,7 @@ class GeminiLLMManager:
             is_list_request = bool(re.search(r'\b(list|show|all|many)\b.*?\b(expert|researcher|scientist|specialist)', query.lower()))
             
             # Adjust limit for list requests - ADDED
-            if is_list_request and limit < O:
+            if is_list_request and limit < 0:
                 limit = 5  # Increase limit for explicit list requests
                 logger.info(f"Detected list request, increased limit to {limit}")
 
