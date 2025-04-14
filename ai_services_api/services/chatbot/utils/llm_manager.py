@@ -1845,7 +1845,7 @@ class GeminiLLMManager:
             return "I couldn't find any expert information on this topic. Would you like me to help you search for something else?"
 
         # Create header based on the number of experts
-        markdown_text = "# Experts in Health Sciences at APHRC:\n" if len(experts) > 1 else "# Expert Profile:\n"
+        markdown_text = "# Experts in Health Sciences at APHRC:\n\n" if len(experts) > 1 else "# Expert Profile:\n\n"
 
         for idx, expert in enumerate(experts):
             try:
