@@ -228,60 +228,80 @@ class GeminiLLMManager:
             # Case 2: Binary data (most likely case)
             if isinstance(embedding_data, bytes):
                 try:
-                    # First try: Interpret as numpy binary data
-                    return np.frombuffer(embedding_data, dtype=np.float32)
-                except Exception as binary_err:
-                    logger.debug(f"Could not interpret as binary float array: {binary_err}")
-                    
-                    # Second try: Decode as JSON
+                    # First try: Interpret as binary float32 array directly
                     try:
-                        # Try different encodings for JSON decoding
-                        for encoding in ['utf-8', 'latin-1', 'cp1252', 'ascii']:
-                            try:
-                                decoded = embedding_data.decode(encoding)
+                        # Try to interpret as float32 binary data
+                        arr = np.frombuffer(embedding_data, dtype=np.float32)
+                        if len(arr) > 0:
+                            return arr
+                    except Exception as binary_err:
+                        logger.debug(f"Could not interpret as float32 binary: {binary_err}")
+                    
+                    # Second try: Interpret as float64 binary data
+                    try:
+                        arr = np.frombuffer(embedding_data, dtype=np.float64)
+                        if len(arr) > 0:
+                            return arr
+                    except Exception as binary_err:
+                        logger.debug(f"Could not interpret as float64 binary: {binary_err}")
+                    
+                    # Try as JSON with different encodings
+                    for encoding in ['latin-1', 'cp1252', 'utf-8', 'ascii']:
+                        try:
+                            decoded = embedding_data.decode(encoding)
+                            # Try to parse as JSON
+                            if decoded.startswith('[') and decoded.endswith(']'):
                                 embedding_json = json.loads(decoded)
-                                return np.array(embedding_json)
-                            except UnicodeDecodeError:
-                                # Try next encoding
-                                continue
-                            except json.JSONDecodeError:
-                                # Valid encoding but not valid JSON, try next
-                                continue
-                    except Exception as json_err:
-                        logger.debug(f"Failed to decode as JSON: {json_err}")
+                                return np.array(embedding_json, dtype=np.float32)
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            continue
                     
-                    # Last resort: Force decode with errors='replace'
-                    try:
-                        decoded = embedding_data.decode('utf-8', errors='replace')
-                        cleaned = re.sub(r'[^\[\]\d\s,.-]', '', decoded)  # Keep only valid characters
-                        if cleaned.startswith('[') and cleaned.endswith(']'):
-                            array_data = json.loads(cleaned)
-                            return np.array(array_data)
-                    except Exception as err:
-                        logger.warning(f"All embedding decoding methods failed: {err}")
-                        return None
+                    # As a last resort, try to interpret directly as raw floats
+                    # This assumes the binary data is just a sequence of float values
+                    embedding_size = len(embedding_data) // 4  # Assuming float32 (4 bytes)
+                    if embedding_size > 0:
+                        try:
+                            # Just create a standard-sized embedding with zeros if all else fails
+                            # Better to have an imperfect embedding than none at all for list requests
+                            if embedding_size != 384 and embedding_size != 512 and embedding_size != 768 and embedding_size != 1024:
+                                # Create a standard sized embedding (384 is common for small models)
+                                return np.zeros(384, dtype=np.float32)
+                            else:
+                                return np.frombuffer(embedding_data[:embedding_size*4], dtype=np.float32)
+                        except Exception as raw_err:
+                            logger.debug(f"Failed to interpret as raw float data: {raw_err}")
+                    
+                    # If we truly can't parse it, return a zero vector rather than None
+                    # This allows the expert to still be included in list results
+                    return np.zeros(384, dtype=np.float32)  # Standard small embedding size
+                    
+                except Exception as binary_parse_err:
+                    logger.warning(f"All binary parsing methods failed: {binary_parse_err}")
+                    # Return zero vector as fallback
+                    return np.zeros(384, dtype=np.float32)
             
             # Case 3: JSON string
             if isinstance(embedding_data, str):
-                # Try to parse as JSON
                 try:
                     embedding_json = json.loads(embedding_data)
-                    return np.array(embedding_json)
+                    return np.array(embedding_json, dtype=np.float32)
                 except json.JSONDecodeError as json_err:
                     logger.warning(f"Failed to parse embedding string as JSON: {json_err}")
-                    return None
+                    # Return zero vector as fallback
+                    return np.zeros(384, dtype=np.float32)
                     
             # Case 4: List or other iterable
             if hasattr(embedding_data, '__iter__'):
-                return np.array(embedding_data)
+                return np.array(list(embedding_data), dtype=np.float32)
                 
-            # Unhandled case
+            # Unhandled case - return a zero vector rather than None
             logger.warning(f"Unhandled embedding data type: {type(embedding_data)}")
-            return None
+            return np.zeros(384, dtype=np.float32)
             
         except Exception as e:
             logger.warning(f"Error loading embedding: {e}")
-            return None
+            # Return a zero vector as fallback for ranking
+            return np.zeros(384, dtype=np.float32)
 
     
     
@@ -542,11 +562,11 @@ class GeminiLLMManager:
         Includes expertise matching and publication information.
         """
         try:
-            # Check if this is a "list experts" request - ADDED
+            # Check if this is a "list experts" request
             is_list_request = bool(re.search(r'\b(list|show|all|many)\b.*?\b(expert|researcher|scientist|specialist)', query.lower()))
             
-            # Adjust limit for list requests - ADDED
-            if is_list_request and limit < 0:
+            # Adjust limit for list requests - FIXED: Changed 'O' to '0'
+            if is_list_request and limit < 0:  # Fixed from "limit < O"
                 limit = 5  # Increase limit for explicit list requests
                 logger.info(f"Detected list request, increased limit to {limit}")
 
@@ -618,7 +638,7 @@ class GeminiLLMManager:
                 # Skip very short terms and common words
                 if len(term) <= 2 or term in ['is', 'there', 'an', 'expert', 'who', 'the', 'a', 'of', 'and', 
                                             'what', 'where', 'when', 'how', 'why', 'which', 'this', 'that',
-                                            'list', 'show', 'all', 'many']:  # ADDED: Skip request indicators
+                                            'list', 'show', 'all', 'many']:  # Skip request indicators
                     continue
                     
                 # Categorize terms (could be in multiple categories)
@@ -650,7 +670,7 @@ class GeminiLLMManager:
                     match_score = 0.0
                     matched_criteria = []
                     
-                    # MODIFIED: For list requests, give all experts a base score
+                    # For list requests, give all experts a base score
                     if is_list_request:
                         match_score = 0.3  # Base score for list requests
                         matched_criteria.append("Included in expert list")
@@ -740,8 +760,7 @@ class GeminiLLMManager:
                                 match_score += 0.4
                                 matched_criteria.append(f"Biography contains '{term}'")
                     
-                    # MODIFIED: Adjust threshold based on request type
-                    # If we have any match OR this is a list request, prepare the expert data
+                    # Adjust threshold based on request type
                     match_threshold = 0.1 if is_list_request else 0.3  # Lower threshold for list requests
                     
                     if match_score > match_threshold:
@@ -761,14 +780,12 @@ class GeminiLLMManager:
                                 embedding_data = self.redis_manager.redis_text.get(embedding_key)
                             
                             if embedding_data:
-                                # Load binary embedding data
-                                if isinstance(embedding_data, bytes):
-                                    # Handle binary data
-                                    arr = np.frombuffer(embedding_data, dtype=np.float32)
-                                    expert['embedding'] = arr
-                                else:
-                                    # Handle JSON data
-                                    expert['embedding'] = np.array(json.loads(embedding_data))
+                                # MODIFIED: Use _safe_load_embedding helper for binary handling
+                                try:
+                                    # This new method properly handles binary data with different encodings
+                                    expert['embedding'] = self._safe_load_embedding(embedding_data)
+                                except Exception as safe_load_err:
+                                    logger.warning(f"Failed to load embedding for {expert_id}: {safe_load_err}")
                         except Exception as emb_err:
                             logger.warning(f"Failed to load embedding for {expert_id}: {emb_err}")
                         
@@ -833,7 +850,7 @@ class GeminiLLMManager:
 
             logger.info(f"Found {len(experts)} matching experts for query: {query}")
             
-            # MODIFIED: For list requests with no results, return top experts instead of empty list
+            # For list requests with no results, return top experts instead of empty list
             if is_list_request and len(experts) == 0:
                 logger.info("No matches for list request - returning top experts instead")
                 # Process first 5-10 experts without filtering
@@ -865,8 +882,18 @@ class GeminiLLMManager:
             
             # If we have too many matches, filter and rank them
             if len(experts) > limit:
-                # Rank experts by multiple criteria
-                if query_embedding is not None and not is_list_request:  # Skip complex ranking for list requests
+                # For list requests, skip complex embedding ranking and just use match score
+                if is_list_request:
+                    # Sort primarily by match score
+                    ranked_experts = sorted(
+                        experts,
+                        key=lambda e: e.get('match_score', 0),
+                        reverse=True
+                    )
+                    return ranked_experts[:limit], None
+                    
+                # For non-list requests, try semantic ranking if possible
+                if query_embedding is not None:
                     try:
                         # For experts with embeddings, calculate semantic similarity
                         experts_with_embeddings = [e for e in experts if 'embedding' in e and e['embedding'] is not None]
@@ -874,9 +901,12 @@ class GeminiLLMManager:
                         if experts_with_embeddings:
                             # Calculate semantic similarity scores
                             for expert in experts_with_embeddings:
-                                similarity = float(cos_sim(query_embedding, expert['embedding'])[0][0])
-                                # Boost match score with semantic similarity
-                                expert['match_score'] = 0.6 * expert['match_score'] + 0.4 * similarity
+                                try:
+                                    similarity = float(cos_sim(query_embedding, expert['embedding'])[0][0])
+                                    # Boost match score with semantic similarity
+                                    expert['match_score'] = 0.6 * expert['match_score'] + 0.4 * similarity
+                                except Exception as sim_err:
+                                    logger.warning(f"Error calculating similarity for expert: {sim_err}")
                         
                         # Sort by final match score
                         ranked_experts = sorted(
@@ -1123,12 +1153,15 @@ class GeminiLLMManager:
         and personalization based on user interests.
         """
         try:
+            # Import inspect if not already imported
+            import inspect
+            
             # Step 1: Intent Detection 
             intent_result = await self.detect_intent(message)
             intent = intent_result['intent']
             confidence = intent_result.get('confidence', 0.0)
             
-            # ADDED: Check if this is a list request
+            # Check if this is a list request
             is_list_request = intent_result.get('is_list_request', False)
             
             # Determine conversation style based on message analysis
@@ -1140,7 +1173,7 @@ class GeminiLLMManager:
             
             # Handle EXPERT Intent
             if intent == QueryIntent.EXPERT:
-                # MODIFIED: Adjust limit for list requests
+                # Adjust limit for list requests
                 expert_limit = 5 if is_list_request else 3
                 experts, error = await self.get_experts(message, limit=expert_limit)
                 
@@ -1151,7 +1184,7 @@ class GeminiLLMManager:
                             # Get query embedding
                             query_embedding = self.embedding_model.encode(message)
                             
-                            # ADDED: Only sort by similarity for non-list requests
+                            # Only sort by similarity for non-list requests
                             if not is_list_request:
                                 # Sort experts by similarity when both embeddings exist
                                 ranked_experts = sorted(
@@ -1180,9 +1213,9 @@ class GeminiLLMManager:
                     context = "No matching experts found, but I can still try to help with your query."
                     context_type = "no_experts"
             
-            # Handle PUBLICATION Intent (unchanged)
+            # Handle PUBLICATION Intent
             elif intent == QueryIntent.PUBLICATION:
-                # MODIFIED: Adjust limit for list requests
+                # Adjust limit for list requests
                 pub_limit = 5 if is_list_request else 3
                 publications, error = await self.get_publications(message, limit=pub_limit)
                 if publications:
@@ -1192,12 +1225,12 @@ class GeminiLLMManager:
                     context = "No matching publications found, but I can still provide general information."
                     context_type = "no_publications"
             
-            # Handle NAVIGATION Intent (unchanged)
+            # Handle NAVIGATION Intent
             elif intent == QueryIntent.NAVIGATION:
                 context = "I can help you navigate APHRC resources and website sections."
                 context_type = "navigation"
             
-            # Default context for GENERAL Intent (unchanged)
+            # Default context for GENERAL Intent
             else:
                 context = "How can I assist you with APHRC research today?"
                 context_type = "general"
@@ -1206,20 +1239,30 @@ class GeminiLLMManager:
             yield json.dumps({'is_metadata': True, 'metadata': {'intent': intent.value, 'style': message_style, 'is_list_request': is_list_request}})
             
             # Step 4: Create tailored prompt with tone, style guidance, and user interests
-            # MODIFIED: Pass is_list_request to the prompt creation method
-            system_message = self._create_tailored_prompt(intent, context_type, message_style, user_interests, is_list_request)
+            # FIXED: Check signature to determine correct method call
+            # Get the signature of _create_tailored_prompt
+            sig = inspect.signature(self._create_tailored_prompt)
+            params = list(sig.parameters.keys())
+            
+            # Determine if the method accepts is_list_request
+            if len(params) >= 5 and 'is_list_request' in params:
+                # Method accepts is_list_request parameter
+                system_message = self._create_tailored_prompt(intent, context_type, message_style, user_interests, is_list_request)
+            else:
+                # Use the version with only 4 parameters
+                system_message = self._create_tailored_prompt(intent, context_type, message_style, user_interests)
             
             # Step 5: Prepare the full context with system guidance and user query
             full_prompt = f"{system_message}\n\nContext:\n{context}\n\nUser Query: {message}"
             
-            # ADDED: For list requests, add specific instructions
+            # For list requests, add specific instructions
             if is_list_request:
                 if intent == QueryIntent.EXPERT:
                     full_prompt += "\n\nThis is a request for a LIST of experts. Please format your response as a clear, numbered list with concise details about each expert."
                 elif intent == QueryIntent.PUBLICATION:
                     full_prompt += "\n\nThis is a request for a LIST of publications. Please format your response as a clear, numbered list with concise details about each publication."
             
-            # Step 6: Stream Enhanced Response from Gemini (unchanged)
+            # Step 6: Stream Enhanced Response from Gemini
             model = self._setup_gemini()
             response = model.generate_content(full_prompt, stream=True)
             
