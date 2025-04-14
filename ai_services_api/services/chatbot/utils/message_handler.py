@@ -106,6 +106,9 @@ class MessageHandler:
         text = re.sub(r'^\s*\}\s*', '', text)  # Remove leading }
         text = re.sub(r'\s*\{\s*$', '', text)  # Remove trailing {
         
+        # Fix missing line breaks before numbered list items (e.g., "including:1. " → "including:\n\n1. ")
+        text = re.sub(r'([:.\n])\s*(\d+\.\s+)', r'\1\n\n\2', text)
+        
         if content_type == "list":
             # Check if this is a publication list specifically
             if re.search(r'(publication|paper|article|study|research)', text.lower()):
@@ -183,6 +186,9 @@ class MessageHandler:
                 # Ensure consistent newlines between sections
                 formatted_text = re.sub(r'\n{3,}', '\n\n', formatted_text)
                 
+                # Fix missing line breaks before numbered list items (e.g., "including:1. " → "including:\n\n1. ")
+                formatted_text = re.sub(r'([:.\n])\s*(\d+\.\s+)', r'\1\n\n\2', formatted_text)
+                
                 return formatted_text
                 
             # Check if this is an expert list specifically (existing code)
@@ -259,160 +265,23 @@ class MessageHandler:
                     # Ensure proper line breaks between experts
                     cleaned_text = re.sub(r'([^\s]+@[^\s]+)(\s+\d+\.)', r'\1\n\n\2', cleaned_text)
                 
+                # Fix missing line breaks before numbered list items (e.g., "including:1. " → "including:\n\n1. ")
+                cleaned_text = re.sub(r'([:.\n])\s*(\d+\.\s+)', r'\1\n\n\2', cleaned_text)
+                
                 return cleaned_text
             
             # For non-list content, just apply general cleaning
             return self._clean_text_for_user(text)
         
         # For non-list content, just apply general cleaning
-        return self._clean_text_for_user(text)
+        cleaned_text = self._clean_text_for_user(text)
+        
+        # Fix missing line breaks before numbered list items (e.g., "including:1. " → "including:\n\n1. ")
+        cleaned_text = re.sub(r'([:.\n])\s*(\d+\.\s+)', r'\1\n\n\2', cleaned_text)
+        
+        return cleaned_text
 
-    def _clean_structured_content(self, text: str, content_type: str) -> str:
-        """
-        Specialized cleaning for structured content like publication lists or expert profiles.
-        Applies format-specific cleaning rules based on content type.
-        
-        Args:
-            text (str): The structured content text
-            content_type (str): Type of content ("list", "expert", "publication", etc.)
-            
-        Returns:
-            str: Cleaned and properly formatted structured content
-        """
-        if not text or not content_type:
-            return self._clean_text_for_user(text)  # Fallback to general cleaning
-            
-        # Remove JSON metadata that might have slipped through
-        metadata_pattern = r'^\s*\{\"is_metadata\"\s*:\s*true.*?\}\s*'
-        text = re.sub(metadata_pattern, '', text, flags=re.MULTILINE)
-        
-        # CRITICAL FIX: Remove any stray curly braces at the beginning or end of the text
-        text = re.sub(r'^\s*\}\s*', '', text)  # Remove leading }
-        text = re.sub(r'\s*\{\s*$', '', text)  # Remove trailing {
-        
-        if content_type == "list":
-            # For numbered lists (publications or experts)
-            
-            # Check if this is a publication list specifically
-            if re.search(r'(publication|paper|article|study|research)', text.lower()):
-                # Extract introduction paragraph if present
-                intro_match = re.search(r'^(.*?)(?=\d+\.|$)', text, re.DOTALL)
-                intro = intro_match.group(1).strip() if intro_match else ""
-                
-                # Remove duplicate headers/intros that might be included in each item
-                for pattern in [
-                    r'Research Domains:.*?(?=\n|\Z)',
-                    r'Summary:.*?(?=\n|\Z)',
-                    r'Regarding.*?publications:.*?(?=\n|\Z)'
-                ]:
-                    matches = list(re.finditer(pattern, text, re.DOTALL | re.IGNORECASE))
-                    if len(matches) > 1:
-                        # Keep only the first instance
-                        first_match_end = matches[0].end()
-                        for match in matches[1:]:
-                            text = text[:match.start()] + text[match.end():]
-                
-                # Ensure proper spacing and formatting for numbered items
-                text = re.sub(r'(\d+)\.\s*', r'\1. ', text)
-                
-                # Format publication fields consistently
-                for field in ['Title', 'Authors', 'Publication Year', 'DOI', 'Abstract', 'Summary']:
-                    # Format each field with consistent style
-                    text = re.sub(
-                        rf'[-–•]?\s*({field}):\s*', 
-                        r'**\1**: ', 
-                        text, 
-                        flags=re.IGNORECASE
-                    )
-                
-                # Clean DOI links
-                text = re.sub(
-                    r'(DOI:?\s*)(10\.\s*\d+\s*/\s*[^\s\)]+)',
-                    lambda m: m.group(1) + m.group(2).replace(' ', ''),
-                    text
-                )
-                
-                # Ensure consistent newlines between sections
-                text = re.sub(r'\n{3,}', '\n\n', text)
-                    
-            # Check if this is an expert list specifically
-            elif re.search(r'(expert|researcher|scientist|professor|specialist)', text.lower()):
-                # CRITICAL FIX: Parse and reformat expert list with proper structure
-                
-                # Extract the header/intro
-                intro_match = re.search(r'^(.*?)(?=\d+\.)', text, re.DOTALL)
-                intro = intro_match.group(1).strip() if intro_match else ""
-                
-                # Extract the expert entries
-                expert_entries = []
-                
-                # Split by numbered list items
-                entry_pattern = r'(\d+\.\s+\*\*[^*]+\*\*(?:(?!\d+\.\s+\*\*).)*)'
-                entries = re.findall(entry_pattern, text, re.DOTALL)
-                
-                # Process each expert
-                formatted_experts = []
-                
-                for entry in entries:
-                    if not entry.strip():
-                        continue
-                    
-                    # Extract numbered part and name
-                    number_name_match = re.match(r'(\d+)\.\s+\*\*([^*]+)\*\*', entry)
-                    if not number_name_match:
-                        continue
-                        
-                    number = number_name_match.group(1)
-                    name = number_name_match.group(2).strip()
-                    
-                    # Extract email if present
-                    email_match = re.search(r'\*\*Email:\*\*\s*([^\s]+@[^\s]+)', entry)
-                    email = email_match.group(1) if email_match else ""
-                    
-                    # Format the expert entry properly with name and email together
-                    formatted_entry = f"{number}. **{name}**"
-                    if email:
-                        formatted_entry += f"\n    Email: {email}"
-                    
-                    formatted_experts.append(formatted_entry)
-                
-                # Find the closing message
-                closing_match = re.search(r'Would you like more detailed.*$', text, re.DOTALL)
-                closing = closing_match.group(0) if closing_match else ""
-                
-                # Reconstruct the text
-                if intro:
-                    text = f"{intro}\n\n"
-                else:
-                    text = ""
-                    
-                text += "\n\n".join(formatted_experts)
-                
-                if closing:
-                    text += f"\n\n{closing}"
-            
-            # Perform general cleaning for any remaining issues
-            cleaned_text = self._clean_text_for_user(text)
-            
-            # Additional cleaning specific to expert list formatting
-            if re.search(r'(expert|researcher|scientist|professor|specialist)', text.lower()):
-                # CRITICAL FIX: Ensure email addresses are properly attached to expert names
-                # This prevents the "1.- Expert Name* Email: email@domain.com" formatting issue
-                cleaned_text = re.sub(r'(\d+\.\s+\*\*[^*]+\*\*)\s*\n\s*Email:', r'\1\nEmail:', cleaned_text)
-                
-                # Remove any stray asterisks that might appear
-                cleaned_text = re.sub(r'([A-Za-z0-9])\*\s+', r'\1 ', cleaned_text)
-                
-                # Fix formatting for email lines
-                cleaned_text = re.sub(r'Email:\s*([^\s]+@[^\s]+)', r'Email: \1', cleaned_text)
-                
-                # Ensure proper line breaks between experts
-                cleaned_text = re.sub(r'([^\s]+@[^\s]+)(\s+\d+\.)', r'\1\n\n\2', cleaned_text)
-            
-            return cleaned_text
-        
-        # For non-list content, just apply general cleaning
-        return self._clean_text_for_user(text)
+    
     
   
 
