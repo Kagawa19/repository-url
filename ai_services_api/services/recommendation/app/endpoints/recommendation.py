@@ -213,25 +213,6 @@ async def _check_for_database_changes(user_id: str, redis_client: Redis) -> bool
         
         if not cached_data:
             # No cache exists, so consider this as needing fresh data
-
-async def _check_for_database_changes(user_id: str, redis_client: Redis) -> bool:
-    """
-    Check if there have been database changes that would affect recommendations for this user.
-    
-    Args:
-        user_id: The user's identifier
-        redis_client: Redis client for version checking
-        
-    Returns:
-        Boolean indicating if changes have been detected
-    """
-    try:
-        # Get the cached data version if it exists
-        cache_key = f"user_recommendations:{user_id}"
-        cached_data = await redis_client.get(cache_key)
-        
-        if not cached_data:
-            # No cache exists, so consider this as needing fresh data
             return True
             
         try:
