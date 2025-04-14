@@ -33,15 +33,62 @@ class MessageHandler:
         # This maintains backward compatibility while using enhanced cleaning
         return MessageHandler._clean_text_for_user(text)
     
+    @staticmethod
+    def _clean_text_for_user(text: str) -> str:
+        """
+        Enhanced text cleaning for user-facing responses in Markdown format.
+        Removes technical artifacts, properly formats Markdown, and 
+        improves language quality and readability.
+        Args:
+            text (str): The input text that may contain technical artifacts or raw markdown
+        Returns:
+            str: Clean, well-formatted text suitable for user display with improved readability
+        """
+        if not text:
+            return ""
+        
+        # Remove any JSON metadata that might have slipped through
+        metadata_pattern = r'^\s*\{\"is_metadata\"\s*:\s*true.*?\}\s*'
+        text = re.sub(metadata_pattern, '', text)
+        
+        # Handle publication lists
+        if re.search(r'\d+\.\s+Title:', text):
+            # Format numbered lists as Markdown
+            text = re.sub(r'(\d+)\.\s+(.+)', r'\1. \2', text)
+        
+        # Handle bold text
+        text = re.sub(r'\*\*(.+?)\*\*', r'**\1**', text)
+        
+        # Handle headers
+        text = re.sub(r'#\s+(.+)', r'# \1', text)
+        
+        # Handle bullet points
+        text = re.sub(r'\*\s+(.+)', r'- \1', text)
+        
+        # Ensure proper spacing for readability
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        return text
+
+    def _format_markdown_headers(self, text: str) -> str:
+        """
+        Formats headers in Markdown syntax.
+        Args:
+            text (str): Input text containing potential headers
+        Returns:
+            str: Text with headers formatted in Markdown
+        """
+        # Format headers
+        text = re.sub(r'#\s+(.+)', r'# \1', text)
+        return text
+    
     
     async def process_stream_response(self, response_stream):
         """
         Process the streaming response with enhanced formatting, structure preservation,
         and improved natural language elements.
-        
         Args:
             response_stream: Async generator of response chunks
-            
         Yields:
             str or dict: Cleaned and formatted response chunks with natural language improvements
         """
@@ -50,12 +97,10 @@ class MessageHandler:
         in_publication_list = False
         list_count = 0
         publication_buffer = ""
-        
         # Track intent information for content-aware enhancements
         detected_intent = None
         is_first_chunk = True
         transition_inserted = False
-        
         try:
             async for chunk in response_stream:
                 # Capture metadata with improved detection
@@ -63,12 +108,10 @@ class MessageHandler:
                     # Store metadata both in method instance and for internal use
                     metadata = chunk.get('metadata', chunk)
                     self.metadata = metadata
-                    
                     # Extract intent information if available for content-aware styling
                     if metadata and 'intent' in metadata:
                         detected_intent = metadata.get('intent')
                         logger.debug(f"Detected intent for response styling: {detected_intent}")
-                    
                     # Log metadata capture but don't yield it to user
                     logger.debug(f"Captured metadata: {json.dumps(metadata, default=str) if metadata else 'None'}")
                     continue
@@ -117,36 +160,32 @@ class MessageHandler:
                         intro_prefix = self._get_random_intro("navigation")
                         if intro_prefix and not text.startswith(intro_prefix):
                             intro_text = intro_prefix
-                    
                     # Insert introduction if we have one
                     if intro_text:
                         yield intro_text
                         transition_inserted = True
-                    
                     is_first_chunk = False
-                    
+                
                 buffer += text
                 
                 # Detect publication lists
                 if re.search(r'\d+\.\s+Title:', buffer) or re.search(r'Title:', buffer):
                     if not in_publication_list:
                         in_publication_list = True
-                        
                         # Add natural transition for publication lists if not already done
                         if not transition_inserted and detected_intent == "publication":
                             transition = self._get_random_transition("publication_list")
                             if transition:
                                 yield transition
                                 transition_inserted = True
-                        
                         publication_buffer = buffer
                         buffer = ""
                         continue
                     else:
                         publication_buffer += text
-                        
                         # Check if we have a complete publication entry or multiple entries
-                        if re.search(r'\n\d+\.', publication_buffer):
+                        if re.search(r'
+    \d+\.', publication_buffer):
                             # Multiple entries detected, try to split
                             entries = re.split(r'(?=\d+\.\s+Title:)', publication_buffer)
                             if len(entries) > 1:
@@ -156,27 +195,23 @@ class MessageHandler:
                                         # Apply enhanced text cleaning for publication entries
                                         cleaned_entry = self._clean_text_for_user(entry)
                                         yield cleaned_entry
-                                        
                                         # Add transition between publications if appropriate
                                         if detected_intent == "publication" and random.random() < 0.5:
                                             yield self._get_random_transition("between_publications")
-                                
                                 # Keep the last entry in the buffer
                                 publication_buffer = entries[-1]
-                            
                         # Check if entry appears complete (has multiple fields and ending line)
-                        elif len(re.findall(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', publication_buffer)) >= 3 and '\n\n' in publication_buffer:
+                        elif len(re.findall(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', publication_buffer)) >= 3 and '
+    ' in publication_buffer:
                             # This looks like a complete entry
                             # Apply enhanced text cleaning
                             cleaned_entry = self._clean_text_for_user(publication_buffer)
                             yield cleaned_entry
                             publication_buffer = ""
                             in_publication_list = False
-                            
                             # Add transition after publication if appropriate
                             if detected_intent == "publication" and random.random() < 0.3:
                                 yield self._get_random_transition("after_publication")
-                            
                         continue
                 
                 # If we were in a publication list but now we're not, yield the publication buffer
@@ -185,11 +220,9 @@ class MessageHandler:
                         # Apply enhanced text cleaning
                         cleaned_entry = self._clean_text_for_user(publication_buffer)
                         yield cleaned_entry
-                        
                         # Add appropriate closing transition
                         if detected_intent == "publication":
                             yield self._get_random_transition("after_publications")
-                    
                     publication_buffer = ""
                     in_publication_list = False
                 
@@ -204,7 +237,6 @@ class MessageHandler:
                                 # Apply enhanced text cleaning
                                 cleaned_sentence = self._clean_text_for_user(sentence)
                                 yield cleaned_sentence
-                        
                         # Keep the last sentence in the buffer
                         buffer = sentences[-1]
             
@@ -212,19 +244,15 @@ class MessageHandler:
             if publication_buffer.strip():
                 cleaned_text = self._clean_text_for_user(publication_buffer)
                 yield cleaned_text
-                
                 # Add appropriate closing for publication list
                 if detected_intent == "publication":
                     yield self._get_random_transition("publication_conclusion")
-                    
             elif buffer.strip():
                 cleaned_text = self._clean_text_for_user(buffer)
                 yield cleaned_text
-                
                 # Add appropriate closing based on intent
                 if detected_intent:
                     yield self._get_random_transition(f"{detected_intent}_conclusion")
-                    
         except Exception as e:
             logger.error(f"Error processing stream response: {e}", exc_info=True)
             # Yield any remaining buffer to avoid losing content
@@ -232,218 +260,7 @@ class MessageHandler:
                 yield self._clean_text_for_user(publication_buffer)
             elif buffer.strip():
                 yield self._clean_text_for_user(buffer)
-
-    @staticmethod
-    def _clean_text_for_user(text: str) -> str:
-        """
-        Enhanced text cleaning for user-facing responses.
-        Removes technical artifacts, properly formats markdown, and 
-        improves language quality and readability.
         
-        Args:
-            text (str): The input text that may contain technical artifacts or raw markdown
-            
-        Returns:
-            str: Clean, well-formatted text suitable for user display with improved readability
-        """
-        if not text:
-            return ""
-        
-        # Remove any JSON metadata that might have slipped through
-        metadata_pattern = r'^\s*\{\"is_metadata\"\s*:\s*true.*?\}\s*'
-        text = re.sub(metadata_pattern, '', text)
-        
-        # Check if text is part of a structured publication list
-        is_publication_item = bool(re.search(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:|Research Domains:)', text))
-        
-        # Explicit DOI URL protection pattern
-        doi_url_pattern = r'(https?://doi\.org/10\.\d+/[^\s]+)'
-        doi_pattern = r'(10\.\d+/[^\s]+)'
-        
-        # If the entire text is a DOI or DOI URL, return it exactly
-        if re.match(f'^({doi_url_pattern}|{doi_pattern})$', text.strip()):
-            return text.strip()
-        
-        # Preserve DOI lines exactly
-        if re.match(r'^DOI:', text.strip()):
-            return text.strip()
-        
-        # Convert markdown formatting: replace ** with proper formatting or remove
-        # In this implementation, we'll remove them for clean plain text
-        # If UI supports formatting, this could be modified
-        text = text.replace('***', '')
-        text = text.replace('**', '')
-        
-        # Handle structured publication data differently
-        if is_publication_item:
-            # For publication data, preserve line structure but clean up extra whitespace
-            cleaned = text
-            
-            # Fix line breaks to ensure each field is on its own line
-            for field in ['Title:', 'Authors:', 'Publication Year:', 'DOI:', 'Abstract:', 'Summary:', 'Research Domains:', 'Citation:']:
-                # Ensure field starts on a new line
-                if field in cleaned and not re.search(f'(\n|^){field}', cleaned):
-                    cleaned = cleaned.replace(field, f'\n{field}')
-            
-            # Clean up extra whitespace while preserving line structure
-            lines = [line.strip() for line in cleaned.split('\n')]
-            
-            # Enhance publication formatting for better readability
-            enhanced_lines = []
-            for line in lines:
-                # Improve Title formatting
-                if line.startswith('Title:'):
-                    title_content = line[6:].strip()
-                    if title_content and not title_content.endswith(('.', '?', '!')):
-                        # Add period if title doesn't end with punctuation
-                        title_content += '.'
-                    enhanced_lines.append(f'Title: {title_content}')
-                
-                # Improve Authors formatting with proper joining
-                elif line.startswith('Authors:'):
-                    authors_content = line[8:].strip()
-                    if ',' in authors_content and ' and ' not in authors_content and authors_content.count(',') > 1:
-                        # Fix author lists that have commas but no "and"
-                        last_comma = authors_content.rindex(',')
-                        authors_content = authors_content[:last_comma] + ' and' + authors_content[last_comma+1:]
-                    enhanced_lines.append(f'Authors: {authors_content}')
-                
-                # Improve Abstract for readability
-                elif line.startswith('Abstract:'):
-                    abstract_content = line[9:].strip()
-                    if abstract_content:
-                        # Ensure abstract has proper sentence structure
-                        if not abstract_content.endswith(('.', '?', '!')):
-                            abstract_content += '.'
-                        
-                        # Split overly long abstracts into better formatted paragraphs
-                        if len(abstract_content) > 200:
-                            sentences = re.split(r'(?<=[.!?])\s+', abstract_content)
-                            formatted_abstract = []
-                            current_paragraph = ""
-                            
-                            for sentence in sentences:
-                                if len(current_paragraph) + len(sentence) > 100:
-                                    if current_paragraph:
-                                        formatted_abstract.append(current_paragraph.strip())
-                                    current_paragraph = sentence
-                                else:
-                                    if current_paragraph:
-                                        current_paragraph += " " + sentence
-                                    else:
-                                        current_paragraph = sentence
-                            
-                            if current_paragraph:
-                                formatted_abstract.append(current_paragraph.strip())
-                            
-                            abstract_content = "\n  ".join(formatted_abstract)
-                            enhanced_lines.append(f'Abstract: \n  {abstract_content}')
-                        else:
-                            enhanced_lines.append(f'Abstract: {abstract_content}')
-                    else:
-                        enhanced_lines.append(line)
-                else:
-                    enhanced_lines.append(line)
-            
-            cleaned = '\n'.join(enhanced_lines)
-            
-            return cleaned
-        
-        # Skip cleaning for numbered publication list items
-        if re.match(r'^\d+\.\s+Title:', text.strip()):
-            cleaned = text.replace('\n**', ' ')
-            cleaned = cleaned.replace('**', '')
-            
-            # Ensure each field is on a new line
-            for field in ['Title:', 'Authors:', 'Publication Year:', 'DOI:', 'Abstract:', 'Summary:', 'Research Domains:']:
-                pattern = f'({field})'
-                replacement = f'\n{field}'
-                cleaned = re.sub(pattern, replacement, cleaned)
-            
-            return cleaned.strip()
-        
-        # Temporarily protect DOI URLs
-        doi_matches = re.findall(doi_url_pattern, text)
-        doi_placeholders = {}
-        
-        # Replace DOI URLs with unique placeholders
-        for i, doi in enumerate(doi_matches):
-            placeholder = f"__DOI_PLACEHOLDER_{i}__"
-            doi_placeholders[placeholder] = doi
-            text = text.replace(doi, placeholder)
-        
-        # Regular cleaning for other text
-        cleaned = text.replace('\n**', ' ')
-        cleaned = cleaned.replace('**', '')
-        
-        # Preserve numbered lists
-        if not re.search(r'\n\d+\.', cleaned):
-            cleaned = re.sub(r'\n\d+\.', '', cleaned)
-        
-        # Handle bullet points without converting DOIs
-        bullet_points = re.findall(r'\*\s*([^*\n]+)', cleaned)
-        if bullet_points:
-            # Only convert bullets to flowing text outside of structured lists
-            if "Title:" not in cleaned and "Authors:" not in cleaned:
-                cleaned = re.sub(r'\*\s*[^*\n]+\n*', '', cleaned)
-                bullet_list = []
-                
-                # Improve bullet point formatting
-                for point in bullet_points:
-                    point = point.strip()
-                    if point:
-                        # Ensure proper sentence structure in bullet points
-                        if not point.endswith(('.', '?', '!')):
-                            point += '.'
-                        bullet_list.append(point)
-                
-                # Combine bullet points with better transitions
-                if bullet_list:
-                    if 'Key Findings:' in cleaned:
-                        if len(bullet_list) > 1:
-                            bullet_text = f"Key findings include: {bullet_list[0]} Additionally, {' '.join(bullet_list[1:])}"
-                        else:
-                            bullet_text = f"Key findings include: {bullet_list[0]}"
-                        cleaned = cleaned.replace('Key Findings:', bullet_text)
-                    else:
-                        if len(bullet_list) > 1:
-                            bullet_text = f"{bullet_list[0]} Additionally, {' '.join(bullet_list[1:])}"
-                        else:
-                            bullet_text = bullet_list[0]
-                        cleaned += f" {bullet_text}"
-        
-        # Fix spacing and formatting
-        cleaned = re.sub(r'\s+', ' ', cleaned)
-        cleaned = re.sub(r'\s+([.,:])', r'\1', cleaned)
-        cleaned = cleaned.strip()
-        
-        # Add proper spacing after periods
-        cleaned = re.sub(r'\.(?! )', '. ', cleaned)
-        
-        # Clean up special characters
-        cleaned = cleaned.replace('\\n', ' ')
-        
-        # Improve sentence structures for better readability
-        # Fix sentences that start with lowercase after periods
-        cleaned = re.sub(r'\.\s+([a-z])', lambda m: f". {m.group(1).upper()}", cleaned)
-        
-        # Fix common awkward phrasings
-        cleaned = cleaned.replace(' i.e. ', ', specifically, ')
-        cleaned = cleaned.replace(' e.g. ', ', for example, ')
-        cleaned = cleaned.replace(' etc.', ', and similar resources.')
-        
-        # Restore DOI URLs
-        for placeholder, doi in doi_placeholders.items():
-            cleaned = cleaned.replace(placeholder, doi)
-        
-        # Final cleanup
-        cleaned = cleaned.strip()
-        
-        # Fix double spacing
-        cleaned = re.sub(r'\s{2,}', ' ', cleaned)
-        
-        return cleaned
-    
     async def send_message_async(self, message: str, user_id: str, session_id: str) -> AsyncGenerator:
         """
         Stream messages with enhanced conversation awareness, contextual references,
