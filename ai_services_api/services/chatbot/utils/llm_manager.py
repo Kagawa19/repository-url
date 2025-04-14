@@ -1900,18 +1900,18 @@ class GeminiLLMManager:
             return "I couldn't find any publications matching your query. Would you like me to help you search for related topics instead?"
 
         # Create header based on publication count
-        markdown_text = f"# APHRC Publications ({len(publications)}):\n"
+        markdown_text = f"# APHRC Publications ({len(publications)}):\n\n"
 
         for idx, pub in enumerate(publications):
             try:
                 # Extract title
                 title = pub.get('title', 'Untitled')
-                markdown_text += f"{idx + 1}. **{title}**\n"
+                markdown_text += f"{idx + 1}. **{title}**\n\n"
 
                 # Add year
                 pub_year = pub.get('publication_year', '')
                 if pub_year:
-                    markdown_text += f"   - **Published in:** {pub_year}\n"
+                    markdown_text += f"   - **Published in:** {pub_year}\n\n"
 
                 # Add authors
                 authors = pub.get('authors', [])
@@ -1922,13 +1922,13 @@ class GeminiLLMManager:
                         author_text = f"{authors[0]} and {authors[1]}"
                     else:
                         author_text = ', '.join(str(a) for a in authors)
-                    markdown_text += f"   - **Authors:** {author_text}\n"
+                    markdown_text += f"   - **Authors:** {author_text}\n\n"
 
                 # Add abstract
                 abstract = pub.get('abstract', '')
                 if abstract:
                     trimmed_abstract = abstract[:300] + "..." if len(abstract) > 300 else abstract
-                    markdown_text += f"   - **Abstract:** {trimmed_abstract}\n"
+                    markdown_text += f"   - **Abstract:** {trimmed_abstract}\n\n"
 
                 # Add DOI as a Markdown link
                 doi = pub.get('doi', '')
@@ -1941,7 +1941,7 @@ class GeminiLLMManager:
                 continue
 
         # Add closing message
-        markdown_text += "\nWould you like more detailed information about any of these publications or related research areas?"
+        markdown_text += "\n\nWould you like more detailed information about any of these publications or related research areas?"
         return markdown_text             
    
     async def analyze_quality(self, message: str, response: str = "") -> Dict:

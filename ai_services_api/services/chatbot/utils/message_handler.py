@@ -33,6 +33,8 @@ class MessageHandler:
         # This maintains backward compatibility while using enhanced cleaning
         return MessageHandler._clean_text_for_user(text)
     
+  
+
     @staticmethod
     def _clean_text_for_user(text: str) -> str:
         """
@@ -48,11 +50,10 @@ class MessageHandler:
 
         # Remove JSON metadata that might have slipped through
         metadata_pattern = r'^\s*\{\"is_metadata\"\s*:\s*true.*?\}\s*'
-        text = re.sub(metadata_pattern, '', text)
+        text = re.sub(metadata_pattern, '', text, flags=re.MULTILINE)
 
         # Handle publication lists
         if re.search(r'\d+\.\s+Title:', text):
-            # Format numbered lists as Markdown
             text = re.sub(r'(\d+)\.\s+(.+)', r'\1. \2', text)
 
         # Handle bold text
@@ -76,11 +77,14 @@ class MessageHandler:
             text
         )
 
+        # Preserve meaningful newlines
+        text = re.sub(r'[ \t]+', ' ', text)  # Replace spaces and tabs only
+        text = re.sub(r'(?<!\n)\n(?!\n)', '  \n', text)  # Convert single newlines to Markdown line breaks
+
         # Ensure proper spacing for readability
-        text = re.sub(r'\s+', ' ', text).strip()
+        text = text.strip()
 
         return text
-
     def _format_markdown_headers(self, text: str) -> str:
         """
         Formats headers in Markdown syntax.
