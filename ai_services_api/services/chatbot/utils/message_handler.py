@@ -32,6 +32,96 @@ class MessageHandler:
         # ⚠️ Changed: This method now calls our new helper method for text cleaning
         # This maintains backward compatibility while using enhanced cleaning
         return MessageHandler._clean_text_for_user(text)
+
+    def _clean_structured_content(self, text: str, content_type: str) -> str:
+        """
+        Specialized cleaning for structured content like publication lists or expert profiles.
+        Applies format-specific cleaning rules based on content type.
+        
+        Args:
+            text (str): The structured content text
+            content_type (str): Type of content ("list", "expert", "publication", etc.)
+            
+        Returns:
+            str: Cleaned and properly formatted structured content
+        """
+        if not text or not content_type:
+            return self._clean_text_for_user(text)  # Fallback to general cleaning
+            
+        # Remove JSON metadata that might have slipped through
+        metadata_pattern = r'^\s*\{\"is_metadata\"\s*:\s*true.*?\}\s*'
+        text = re.sub(metadata_pattern, '', text, flags=re.MULTILINE)
+        
+        if content_type == "list":
+            # For numbered lists (publications or experts)
+            
+            # Check if this is a publication list specifically
+            if re.search(r'(publication|paper|article|study|research)', text.lower()):
+                # Extract introduction paragraph if present
+                intro_match = re.search(r'^(.*?)(?=\d+\.|$)', text, re.DOTALL)
+                intro = intro_match.group(1).strip() if intro_match else ""
+                
+                # Remove duplicate headers/intros that might be included in each item
+                for pattern in [
+                    r'Research Domains:.*?(?=\n|\Z)',
+                    r'Summary:.*?(?=\n|\Z)',
+                    r'Regarding.*?publications:.*?(?=\n|\Z)'
+                ]:
+                    matches = list(re.finditer(pattern, text, re.DOTALL | re.IGNORECASE))
+                    if len(matches) > 1:
+                        # Keep only the first instance
+                        first_match_end = matches[0].end()
+                        for match in matches[1:]:
+                            text = text[:match.start()] + text[match.end():]
+                
+                # Ensure proper spacing and formatting for numbered items
+                text = re.sub(r'(\d+)\.\s*', r'\1. ', text)
+                
+                # Format publication fields consistently
+                for field in ['Title', 'Authors', 'Publication Year', 'DOI', 'Abstract', 'Summary']:
+                    # Format each field with consistent style
+                    text = re.sub(
+                        rf'[-–•]?\s*({field}):\s*', 
+                        r'**\1**: ', 
+                        text, 
+                        flags=re.IGNORECASE
+                    )
+                
+                # Clean DOI links
+                text = re.sub(
+                    r'(DOI:?\s*)(10\.\s*\d+\s*/\s*[^\s\)]+)',
+                    lambda m: m.group(1) + m.group(2).replace(' ', ''),
+                    text
+                )
+                
+                # Ensure consistent newlines between sections
+                text = re.sub(r'\n{3,}', '\n\n', text)
+                
+            # Check if this is an expert list specifically
+            elif re.search(r'(expert|researcher|scientist|professor|specialist)', text.lower()):
+                # Format expert fields consistently
+                for field in ['Position', 'Department', 'Email', 'Expertise', 'Notable publications']:
+                    text = re.sub(
+                        rf'[-–•]?\s*({field}):\s*', 
+                        r'**\1**: ', 
+                        text, 
+                        flags=re.IGNORECASE
+                    )
+                
+                # Format expert names consistently
+                text = re.sub(r'(\d+\.\s+)(\*{1,3})([^*]+)(\*{1,3})', r'\1**\3**', text)
+                
+                # Ensure email links are properly formatted
+                text = re.sub(
+                    r'\[([^]]+@[^]]+)\]\(mailto:([^)]+)\)',
+                    lambda m: f"[{m.group(1)}](mailto:{m.group(2)})",
+                    text
+                )
+        
+        # Perform general cleaning for any remaining issues
+        text = self._clean_text_for_user(text)
+        
+        return text
     
   
 
@@ -51,52 +141,67 @@ class MessageHandler:
         # Remove JSON metadata that might have slipped through
         metadata_pattern = r'^\s*\{\"is_metadata\"\s*:\s*true.*?\}\s*'
         text = re.sub(metadata_pattern, '', text, flags=re.MULTILINE)
-
-        # Handle publication lists
-        if re.search(r'\d+\.\s+Title:', text):
-            text = re.sub(r'(\d+)\.\s+(.+)', r'\1. \2', text)
-
-        # Handle bold text
-        text = re.sub(r'\*\*(.+?)\*\*', r'**\1**', text)
-
-        # Handle headers
-        text = re.sub(r'#\s+(.+)', r'# \1', text)
-
-        # Handle bullet points
-        text = re.sub(r'\*\s+(.+)', r'- \1', text)
-
-        # Fix spaces in DOI links
+        
+        # Fix potential duplicate heading markers
+        text = re.sub(r'(#+)\s*(#+)\s*', r'\1 ', text)
+        
+        # Normalize heading formatting
+        text = re.sub(r'(#+)(\w)', r'\1 \2', text)  # Ensure space after heading markers
+        
+        # Preserve markdown bold formatting (ensure spaces are correct)
+        text = re.sub(r'\*\*\s*(.+?)\s*\*\*', r'**\1**', text)
+        
+        # Normalize bullet points (could be * or - in markdown)
+        text = re.sub(r'^\s*[-*]\s*', '- ', text, flags=re.MULTILINE)  # Standardize to dash style
+        
+        # Fix spaces in DOI links - special case for academic content
+        # First, handle standard DOI URLs
         text = re.sub(
             r'(https?://doi\.org/\s*)([\d\.]+(/\s*)?[^\s\)]*)',
             lambda m: m.group(1).replace(' ', '') + m.group(2).replace(' ', ''),
             text
         )
+        
+        # Then handle bare DOI references
         text = re.sub(
-            r'(10\.\s*\d+\s*/\s*[^\s\)]+)',
-            lambda m: m.group(1).replace(' ', ''),
+            r'(DOI:?\s*)(10\.\s*\d+\s*/\s*[^\s\)]+)',
+            lambda m: m.group(1) + m.group(2).replace(' ', ''),
             text
         )
-
-        # Preserve meaningful newlines
-        text = re.sub(r'[ \t]+', ' ', text)  # Replace spaces and tabs only
-        text = re.sub(r'(?<!\n)\n(?!\n)', '  \n', text)  # Convert single newlines to Markdown line breaks
-
-        # Ensure proper spacing for readability
-        text = text.strip()
-
-        return text
-    def _format_markdown_headers(self, text: str) -> str:
-        """
-        Formats headers in Markdown syntax.
-        Args:
-            text (str): Input text containing potential headers
-        Returns:
-            str: Text with headers formatted in Markdown
-        """
-        # Format headers
-        text = re.sub(r'#\s+(.+)', r'# \1', text)
-        return text
-    
+        
+        # Handle numbered lists consistently
+        text = re.sub(r'(\d+)\.\s+([A-Z])', r'\1. \2', text)  # Ensure proper spacing after numbers
+        
+        # Clean up excess whitespace while preserving meaningful structure
+        text = re.sub(r'[ \t]+', ' ', text)  # Replace multiple spaces/tabs with single space
+        
+        # Ensure proper Markdown line breaks
+        # Single newlines become Markdown line breaks (with two spaces)
+        text = re.sub(r'(?<!\n)\n(?!\n)', '  \n', text)
+        
+        # But multiple newlines are preserved for paragraph breaks
+        text = re.sub(r'\n{3,}', '\n\n', text)  # Normalize multiple newlines to exactly two
+        
+        # Remove trailing whitespace
+        text = re.sub(r'\s+$', '', text, flags=re.MULTILINE)
+        
+        # Ensure consistent formatting for publication information
+        text = re.sub(r'(Title|Authors|Publication Year|DOI|Abstract|Summary):\s*', r'**\1**: ', text)
+        
+        # Final trim of any leading/trailing whitespace
+        return text.strip()
+        def _format_markdown_headers(self, text: str) -> str:
+            """
+            Formats headers in Markdown syntax.
+            Args:
+                text (str): Input text containing potential headers
+            Returns:
+                str: Text with headers formatted in Markdown
+            """
+            # Format headers
+            text = re.sub(r'#\s+(.+)', r'# \1', text)
+            return text
+        
     
     async def process_stream_response(self, response_stream):
         """
@@ -109,12 +214,15 @@ class MessageHandler:
         """
         buffer = ""
         metadata = None
-        in_publication_list = False
-        publication_buffer = ""
         detected_intent = None
         is_first_chunk = True
         transition_inserted = False
-
+        
+        # Track different content segments for better processing
+        in_structured_content = False
+        structured_buffer = ""
+        content_type = None
+        
         try:
             async for chunk in response_stream:
                 # Capture metadata with improved detection
@@ -125,6 +233,7 @@ class MessageHandler:
                         detected_intent = metadata.get('intent')
                         logger.debug(f"Detected intent for response styling: {detected_intent}")
                     logger.debug(f"Captured metadata: {json.dumps(metadata, default=str) if metadata else 'None'}")
+                    yield chunk  # Pass metadata through for downstream handling
                     continue
 
                 # Extract text from chunk
@@ -158,79 +267,123 @@ class MessageHandler:
                         intro_prefix = self._get_random_intro("navigation")
                         if intro_prefix and not text.startswith(intro_prefix):
                             intro_text = intro_prefix
+                    
                     if intro_text:
                         yield intro_text
                         transition_inserted = True
                     is_first_chunk = False
 
+                # Check if we're entering a structured content section
+                # Publication list detection
+                if not in_structured_content and (
+                    re.search(r'\d+\.\s+(Title:|Publication|Author)', text) or
+                    re.search(r'# Publications|# Experts|# APHRC Publications', text)
+                ):
+                    in_structured_content = True
+                    content_type = "list"
+                    structured_buffer = buffer + text
+                    buffer = ""
+                    
+                    # Insert appropriate transition if needed
+                    if not transition_inserted and detected_intent:
+                        if "publication" in str(detected_intent).lower():
+                            yield self._get_random_transition("publication_list")
+                        elif "expert" in str(detected_intent).lower():
+                            yield self._get_random_transition("expert_list")
+                        transition_inserted = True
+                    continue
+                
+                # If we're in a structured content section, keep collecting it
+                if in_structured_content:
+                    structured_buffer += text
+                    
+                    # Check if we have a complete structured content item to yield
+                    # This handles cases where we're getting a complete publication or expert entry
+                    if content_type == "list" and re.search(r'\n\d+\.', structured_buffer):
+                        # We have at least one complete numbered item
+                        items = re.split(r'(?=\n\d+\.)', structured_buffer)
+                        
+                        # Keep the last (potentially incomplete) item
+                        if len(items) > 1:
+                            for item in items[:-1]:
+                                if item.strip():
+                                    # Apply specialized cleaning for structured content
+                                    cleaned_item = self._clean_structured_content(item, content_type)
+                                    yield cleaned_item
+                                    
+                                    # Maybe add transition between items
+                                    if "publication" in str(detected_intent).lower() and random.random() < 0.3:
+                                        yield self._get_random_transition("between_publications")
+                            
+                            # Keep the potentially incomplete last item in the buffer
+                            structured_buffer = items[-1]
+                    
+                    # Check if we're exiting structured content
+                    if (content_type == "list" and 
+                        len(structured_buffer) > 100 and  # Reasonable size to have complete content
+                        not re.search(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:|Expert|Position:)', 
+                                    text, re.IGNORECASE)):
+                        # We're likely leaving the structured content section
+                        if structured_buffer.strip():
+                            cleaned_content = self._clean_structured_content(structured_buffer, content_type)
+                            yield cleaned_content
+                            
+                            # Add appropriate conclusion transition
+                            if detected_intent:
+                                if "publication" in str(detected_intent).lower():
+                                    yield self._get_random_transition("after_publications")
+                                elif "expert" in str(detected_intent).lower():
+                                    yield self._get_random_transition("after_experts")
+                        
+                        # Reset for normal text processing
+                        in_structured_content = False
+                        structured_buffer = ""
+                        content_type = None
+                        
+                    continue
+                
+                # Normal text processing (not in structured content)
                 buffer += text
+                
+                # Process complete sentences from the buffer
+                sentences = re.split(r'(?<=[.!?])\s+', buffer)
+                if len(sentences) > 1:
+                    # Process and yield complete sentences
+                    for sentence in sentences[:-1]:
+                        if sentence.strip():
+                            # Apply general text cleaning
+                            cleaned_sentence = self._clean_text_for_user(sentence)
+                            yield cleaned_sentence
+                    
+                    # Keep the last incomplete sentence in the buffer
+                    buffer = sentences[-1]
 
-                # Detect publication lists
-                if re.search(r'\d+\.\s+Title:', buffer) or re.search(r'Title:', buffer):
-                    if not in_publication_list:
-                        in_publication_list = True
-                        if not transition_inserted and detected_intent == "publication":
-                            transition = self._get_random_transition("publication_list")
-                            if transition:
-                                yield transition
-                                transition_inserted = True
-                        publication_buffer = buffer
-                        buffer = ""
-                        continue
-                    else:
-                        publication_buffer += text
-                        if re.search(r'\n\d+\.', publication_buffer):
-                            entries = re.split(r'(?=\n\d+\.\s+Title:)', publication_buffer)
-                            if len(entries) > 1:
-                                for entry in entries[:-1]:
-                                    if entry.strip():
-                                        cleaned_entry = self._clean_text_for_user(entry)
-                                        yield cleaned_entry
-                                        if detected_intent == "publication" and random.random() < 0.5:
-                                            yield self._get_random_transition("between_publications")
-                                publication_buffer = entries[-1]
-                        elif len(re.findall(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', publication_buffer)) >= 3 and '\n' in publication_buffer:
-                            cleaned_entry = self._clean_text_for_user(publication_buffer)
-                            yield cleaned_entry
-                            publication_buffer = ""
-                            in_publication_list = False
-                            if detected_intent == "publication" and random.random() < 0.3:
-                                yield self._get_random_transition("after_publication")
-                        continue
-
-                if in_publication_list and not re.search(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', text):
-                    if publication_buffer.strip():
-                        cleaned_entry = self._clean_text_for_user(publication_buffer)
-                        yield cleaned_entry
-                        if detected_intent == "publication":
-                            yield self._get_random_transition("after_publications")
-                    publication_buffer = ""
-                    in_publication_list = False
-
-                if not in_publication_list:
-                    sentences = re.split(r'(?<=[.!?])\s+', buffer)
-                    if len(sentences) > 1:
-                        for sentence in sentences[:-1]:
-                            if sentence.strip():
-                                cleaned_sentence = self._clean_text_for_user(sentence)
-                                yield cleaned_sentence
-                        buffer = sentences[-1]
-
-            if publication_buffer.strip():
-                cleaned_text = self._clean_text_for_user(publication_buffer)
-                yield cleaned_text
-                if detected_intent == "publication":
-                    yield self._get_random_transition("publication_conclusion")
+            # Process any remaining content
+            if in_structured_content and structured_buffer.strip():
+                cleaned_content = self._clean_structured_content(structured_buffer, content_type)
+                yield cleaned_content
+                
+                # Add appropriate closing transition
+                if detected_intent:
+                    if "publication" in str(detected_intent).lower():
+                        yield self._get_random_transition("publication_conclusion")
+                    elif "expert" in str(detected_intent).lower():
+                        yield self._get_random_transition("expert_conclusion")
+                        
             elif buffer.strip():
+                # Clean any remaining content in the buffer
                 cleaned_text = self._clean_text_for_user(buffer)
                 yield cleaned_text
-                if detected_intent:
-                    yield self._get_random_transition(f"{detected_intent}_conclusion")
+                
+                # Add general conclusion if appropriate
+                if detected_intent and not in_structured_content:
+                    yield self._get_random_transition(f"{str(detected_intent).lower()}_conclusion")
 
         except Exception as e:
             logger.error(f"Error processing stream response: {e}", exc_info=True)
-            if publication_buffer.strip():
-                yield self._clean_text_for_user(publication_buffer)
+            # Return any remaining buffered content if there's an error
+            if in_structured_content and structured_buffer.strip():
+                yield self._clean_structured_content(structured_buffer, content_type)
             elif buffer.strip():
                 yield self._clean_text_for_user(buffer)
         
