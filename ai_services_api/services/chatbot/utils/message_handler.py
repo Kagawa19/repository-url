@@ -114,6 +114,9 @@ class MessageHandler:
         # Fix missing line breaks before numbered list items (e.g., "including:1. " → "including:\n\n1. ")
         text = re.sub(r'([:.\n])\s*(\d+\.\s+)', r'\1\n\n\2', text)
         
+        # Fix critical issue where Email: appears on same line as the next numbered item
+        text = re.sub(r'(Email:[^@\n]*@[^\n]+)(\s*)(\d+\.)', r'\1\n\n\3', text)
+        
         if content_type == "list":
             # Check if this is a publication list specifically
             if re.search(r'(publication|paper|article|study|research)', text.lower()):
@@ -196,85 +199,105 @@ class MessageHandler:
                 
                 return formatted_text
                 
-            # Check if this is an expert list specifically (existing code)
+            # Check if this is an expert list specifically
             elif re.search(r'(expert|researcher|scientist|professor|specialist)', text.lower()):
-                # CRITICAL FIX: Parse and reformat expert list with proper structure
+                # COMPLETE REWRITE of expert list formatting for more reliability
                 
-                # Extract the header/intro
-                intro_match = re.search(r'^(.*?)(?=\d+\.)', text, re.DOTALL)
+                # Extract the header/intro before any expert entries
+                intro_pattern = r'^(.*?)(?=(?:\d+\.|\s+[A-Z][a-z]+\s+[A-Z][a-z]+\s*\n\s*Email:|\s+[A-Z][a-z]+\s*\n))'
+                intro_match = re.search(intro_pattern, text, re.DOTALL)
                 intro = intro_match.group(1).strip() if intro_match else ""
                 
-                # Extract the expert entries
+                # Prepare for text processing
+                result_text = intro
+                
+                # First, ensure each expert has proper formatting and numbering
+                # Fix unnumbered experts - if we find a name followed by Email: pattern without a number
+                text = re.sub(
+                    r'([^\d\n])\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*\n\s*Email:',
+                    r'\1\n\n1. \2\nEmail:',
+                    text
+                )
+                
+                # Now let's extract all expert entries using multiple patterns to catch all variations
                 expert_entries = []
                 
-                # Split by numbered list items with improved pattern matching
-                # This pattern now captures the entire expert entry
-                entry_pattern = r'(\d+\.\s+.+?)(?=\n\s*\d+\.\s+|\Z)'
-                entries = re.findall(entry_pattern, text, re.DOTALL)
+                # Pattern for numbered experts
+                numbered_pattern = r'(\d+\.)([^.\d]+)(?=\d+\.|$)'
+                numbered_experts = re.findall(numbered_pattern, text, re.DOTALL)
                 
-                # Process each expert
-                formatted_experts = []
-                
-                for entry in entries:
-                    if not entry.strip():
-                        continue
+                # Process each numbered expert
+                for number, content in numbered_experts:
+                    # Extract the expert's name
+                    name_pattern = r'\s*(?:\*\*)?(.*?)(?:\*\*)?(?:\s*\n|\s*$)'
+                    name_match = re.search(name_pattern, content)
+                    name = name_match.group(1).strip() if name_match else content.strip()
                     
-                    # Extract numbered part and name with improved pattern
-                    number_name_match = re.match(r'(\d+)\.\s+(.*?)(?:\n|$)', entry, re.DOTALL)
-                    if not number_name_match:
-                        formatted_experts.append(entry)  # Just add as-is if pattern doesn't match
-                        continue
-                        
-                    number = number_name_match.group(1)
-                    name_content = number_name_match.group(2).strip()
-                    
-                    # Check if name includes email or other content
-                    name_parts = name_content.split('\n', 1)
-                    name = name_parts[0].strip()
-                    
-                    # Remove any existing bold markers or asterisks from name
-                    name = re.sub(r'\*\*', '', name)
-                    name = name.strip('*').strip()
-                    
-                    # Extract email if present (looking at the entire entry now)
-                    email_match = re.search(r'Email:\s*([^\s]+@[^\s]+)', entry, re.IGNORECASE)
+                    # Extract email if present
+                    email_match = re.search(r'Email:\s*([^\s]+@[^\s]+)', content, re.IGNORECASE)
                     email = email_match.group(1) if email_match else ""
                     
-                    # Create consistent formatting for all experts
-                    formatted_entry = f"{number}. **{name}**"
-                    
-                    # Always add a line break after the name for consistent formatting
-                    # Add email on next line if available
+                    # Create properly formatted entry
+                    entry = f"{number} **{name}**"
                     if email:
-                        formatted_entry += f"\nEmail: {email}"
+                        entry += f"\nEmail: {email}"
                     
-                    formatted_experts.append(formatted_entry)
+                    expert_entries.append(entry)
+                
+                # If we didn't find any numbered experts, try alternative patterns
+                if not expert_entries:
+                    # Look for name/email pairs
+                    pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*\n\s*Email:\s*([^\s]+@[^\s]+)'
+                    expert_matches = re.findall(pattern, text)
+                    
+                    for i, (name, email) in enumerate(expert_matches, 1):
+                        entry = f"{i}. **{name.strip()}**\nEmail: {email}"
+                        expert_entries.append(entry)
+                
+                # Ensure we have at least captured names without emails
+                if not expert_entries:
+                    # Last resort pattern for just names
+                    name_pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)'
+                    names = re.findall(name_pattern, text)
+                    
+                    # Filter out common words that might be falsely matched
+                    filtered_names = [name for name in names if len(name.split()) >= 2 and 
+                                    not re.search(r'\b(would|like|more|detailed|information|about|any|these|experts)\b', 
+                                                name.lower())]
+                    
+                    for i, name in enumerate(filtered_names, 1):
+                        entry = f"{i}. **{name.strip()}**"
+                        expert_entries.append(entry)
                 
                 # Find the closing message
                 closing_match = re.search(r'Would you like more detailed.*$', text, re.DOTALL)
                 closing = closing_match.group(0) if closing_match else ""
                 
-                # Reconstruct the text with proper formatting
+                # Build the final formatted text
                 if intro:
-                    formatted_text = f"{intro}\n\n"
+                    result_text = f"{intro}\n\n"
                 else:
-                    formatted_text = ""
+                    result_text = ""
                     
-                # Join with double newlines for proper spacing between experts
-                formatted_text += "\n\n".join(formatted_experts)
+                result_text += "\n\n".join(expert_entries)
                 
                 if closing:
-                    formatted_text += f"\n\n{closing}"
+                    result_text += f"\n\n{closing}"
                 
-                # Clean up any final formatting issues
-                formatted_text = re.sub(r'(\d+\.\s+)\*\*([^*]+)\*\*', r'\1**\2**', formatted_text)  # Fix bold formatting
-                formatted_text = re.sub(r'Email:\s+', r'Email: ', formatted_text)  # Normalize email spacing
-                formatted_text = re.sub(r'\n{3,}', r'\n\n', formatted_text)  # Fix excessive newlines
+                # Final formatting fixes
+                # Fix multiple newlines
+                result_text = re.sub(r'\n{3,}', '\n\n', result_text)
+                
+                # Ensure emails are properly spaced and on their own line
+                result_text = re.sub(r'(\*\*)\s+Email:', r'\1\nEmail:', result_text)
                 
                 # Fix missing line breaks before numbered list items
-                formatted_text = re.sub(r'([:.\n])\s*(\d+\.\s+)', r'\1\n\n\2', formatted_text)
+                result_text = re.sub(r'([:.\n])\s*(\d+\.\s+)', r'\1\n\n\2', result_text)
                 
-                return formatted_text
+                # Make sure no email runs into next numbered item
+                result_text = re.sub(r'(@[^\s]+)(\s*)(\d+\.)', r'\1\n\n\3', result_text)
+                
+                return result_text
             
             # For non-list content, just apply general cleaning
             return self._clean_text_for_user(text)
@@ -284,6 +307,9 @@ class MessageHandler:
         
         # Fix missing line breaks before numbered list items
         cleaned_text = re.sub(r'([:.\n])\s*(\d+\.\s+)', r'\1\n\n\2', cleaned_text)
+        
+        # Fix critical issue where Email: appears on same line as the next numbered item
+        cleaned_text = re.sub(r'(Email:[^@\n]*@[^\n]+)(\s*)(\d+\.)', r'\1\n\n\3', cleaned_text)
         
         return cleaned_text
 
@@ -337,6 +363,9 @@ class MessageHandler:
         # Fix missing line breaks before numbered list items
         text = re.sub(r'([:.\n])\s*(\d+\.\s+)', r'\1\n\n\2', text)
         
+        # CRITICAL FIX: Ensure email addresses don't run into the next numbered item
+        text = re.sub(r'(Email:[^@\n]*@[^\n]+)(\s*)(\d+\.)', r'\1\n\n\3', text)
+        
         # Clean up excess whitespace while preserving meaningful structure
         text = re.sub(r'[ \t]+', ' ', text)  # Replace multiple spaces/tabs with single space
         
@@ -361,6 +390,9 @@ class MessageHandler:
         
         # Fix line breaks for expert entries and emails
         text = re.sub(r'(\d+\.\s+\*\*[^*]+\*\*)\s+Email:', r'\1\nEmail:', text)
+        
+        # Ensure proper spacing between numbered items in a list
+        text = re.sub(r'(\d+\.\s+\*\*[^*]+\*\*(?:\n[^\n]+)?)(\s*)(\d+\.)', r'\1\n\n\3', text)
         
         # Final trim of any leading/trailing whitespace
         return text.strip()
