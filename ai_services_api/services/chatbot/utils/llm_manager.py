@@ -1833,11 +1833,147 @@ class GeminiLLMManager:
         self._rate_limited = False
         logger.info(f"Rate limit cooldown expired after {seconds} seconds")
 
+    def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
+        """
+        Format publication information into Markdown format for rendering in the frontend.
+        
+        Args:
+            publications: List of publication dictionaries
+            
+        Returns:
+            Formatted Markdown string with structured publication presentations
+        """
+        logger.info(f"Starting format_publication_context with {len(publications)} publications")
+        
+        if not publications:
+            logger.info("No publications provided, returning helpful message")
+            return "I couldn't find any publications matching your query. Would you like me to help you search for related topics instead?"
+        
+        try:
+            # Create header based on publication count
+            if len(publications) == 1:
+                markdown_text = "# Relevant APHRC Publication:\n\n"
+            else:
+                markdown_text = f"# APHRC Publications ({len(publications)}):\n\n"
+            
+            # Process each publication with Markdown formatting
+            for idx, pub in enumerate(publications):
+                logger.debug(f"Processing publication {idx+1}")
+                
+                # Check publication data
+                if not isinstance(pub, dict):
+                    logger.warning(f"Publication {idx+1} is not a dictionary but a {type(pub).__name__}")
+                    continue
+                    
+                # Extract title
+                title = pub.get('title', 'Untitled')
+                if not title:
+                    title = "Untitled Publication"
+                
+                logger.debug(f"Publication {idx+1} title: {title[:50]}...")
+                
+                # Add numbered publication with bold title
+                markdown_text += f"{idx+1}. **{title}**\n\n"
+                
+                # Add year with bold field name
+                pub_year = pub.get('publication_year', '')
+                if pub_year:
+                    logger.debug(f"Adding year: {pub_year}")
+                    markdown_text += f"* **Published in:** {pub_year}\n\n"
+                
+                # Add authors with Markdown formatting
+                try:
+                    authors = pub.get('authors', [])
+                    logger.debug(f"Authors type: {type(authors).__name__}")
+                    
+                    if authors:
+                        if isinstance(authors, list):
+                            # Format author list
+                            try:
+                                if len(authors) > 3:
+                                    author_text = f"{', '.join(str(a) for a in authors[:2])} et al."
+                                    markdown_text += f"* **Authors:** {author_text}\n\n"
+                                elif len(authors) == 2:
+                                    author_text = f"{authors[0]} and {authors[1]}"
+                                    markdown_text += f"* **Authors:** {author_text}\n\n"
+                                elif len(authors) == 1:
+                                    markdown_text += f"* **Author:** {authors[0]}\n\n"
+                                else:
+                                    author_text = f"{', '.join(str(a) for a in authors[:-1])}, and {authors[-1]}"
+                                    markdown_text += f"* **Authors:** {author_text}\n\n"
+                            except Exception as author_error:
+                                logger.warning(f"Error formatting authors: {author_error}")
+                                markdown_text += f"* **Authors:** {len(authors)} contributors\n\n"
+                        else:
+                            logger.debug(f"Authors not a list: {authors}")
+                            markdown_text += f"* **Author(s):** {authors}\n\n"
+                except Exception as authors_error:
+                    logger.error(f"Error processing authors: {authors_error}", exc_info=True)
+                
+                # Add APHRC experts with Markdown formatting
+                try:
+                    aphrc_experts = pub.get('aphrc_experts', [])
+                    if aphrc_experts:
+                        if isinstance(aphrc_experts, list):
+                            if len(aphrc_experts) == 1:
+                                markdown_text += f"* **APHRC Expert:** {aphrc_experts[0]}\n\n"
+                            else:
+                                experts_text = f"{', '.join(str(e) for e in aphrc_experts[:2])}"
+                                if len(aphrc_experts) > 2:
+                                    experts_text += " and others"
+                                markdown_text += f"* **APHRC Experts:** {experts_text}\n\n"
+                        else:
+                            markdown_text += f"* **APHRC Expert:** {aphrc_experts}\n\n"
+                except Exception as experts_error:
+                    logger.error(f"Error processing APHRC experts: {experts_error}", exc_info=True)
+                
+                # Add abstract with Markdown formatting
+                try:
+                    abstract = pub.get('abstract', '')
+                    if abstract:
+                        if len(abstract) > 300:
+                            abstract_intro = "* **Key findings:** "
+                            trimmed_abstract = abstract[:297] + "..."
+                            
+                            # Try to end at a sentence boundary
+                            last_period = trimmed_abstract.rfind('.')
+                            if last_period > 150:  # Only trim to sentence if we don't lose too much
+                                trimmed_abstract = abstract[:last_period+1]
+                            
+                            markdown_text += f"{abstract_intro}{trimmed_abstract}\n\n"
+                        else:
+                            markdown_text += f"* **Abstract:** {abstract}\n\n"
+                except Exception as abstract_error:
+                    logger.error(f"Error processing abstract: {abstract_error}", exc_info=True)
+                
+                # Add DOI as Markdown link
+                doi = pub.get('doi', '')
+                if doi:
+                    # Format as a proper DOI link
+                    if not doi.startswith('http'):
+                        doi_url = f"https://doi.org/{doi}"
+                    else:
+                        doi_url = doi
+                    markdown_text += f"* **DOI:** [{doi}]({doi_url})\n\n"
+                
+            # Add closing message
+            if len(publications) > 1:
+                markdown_text += "Would you like more detailed information about any of these publications or related research areas?"
+            else:
+                markdown_text += "Would you like to know more about this research or related publications?"
+            
+            logger.info(f"Successfully created Markdown text, length: {len(markdown_text)}")
+            return markdown_text
+                
+        except Exception as e:
+            logger.error(f"Unhandled error in format_publication_context: {e}", exc_info=True)
+            return f"I encountered an issue while preparing publication information. Would you like to try a different search term?"
+
     
         
     def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
         """
-        Format expert information into a clear, structured Markdown presentation.
+        Format expert information into Markdown format for rendering in the frontend.
         
         Args:
             experts: List of expert dictionaries
@@ -1849,22 +1985,16 @@ class GeminiLLMManager:
         if not experts:
             return "I couldn't find any expert information on this topic. Would you like me to help you search for something else?"
         
-        # Determine if this is a list based on number of experts
-        is_list_request = len(experts) > 1
-        
-        # Create Markdown header for experts list
-        if is_list_request:
-            if len(experts) >= 3:
-                context_parts = ["# Experts in Health Sciences at APHRC:"]
-            else:
-                context_parts = ["# APHRC Experts in this field:"]
+        # Create Markdown header based on the number of experts
+        if len(experts) > 1:
+            markdown_text = "# Experts in Health Sciences at APHRC:\n\n"
         else:
-            context_parts = ["# Expert Profile:"]
+            markdown_text = "# Expert Profile:\n\n"
         
-        # Format each expert entry with consistent Markdown structure
+        # Format each expert with Markdown formatting
         for idx, expert in enumerate(experts):
             try:
-                # Extract name components with fallbacks
+                # Extract name components
                 first_name = expert.get('first_name', '').strip()
                 last_name = expert.get('last_name', '').strip()
                 
@@ -1874,10 +2004,10 @@ class GeminiLLMManager:
                     
                 full_name = f"{first_name} {last_name}".strip()
                 
-                # Create numbered list item for each expert with Markdown formatting
-                expert_info = [f"{idx+1}. **{full_name}**"]
+                # Add numbered expert with name in bold
+                markdown_text += f"{idx+1}. **{full_name}**\n\n"
                 
-                # Process expertise with consistent Markdown formatting
+                # Process expertise
                 try:
                     expertise = expert.get('expertise', [])
                     expertise_text = ""
@@ -1908,214 +2038,60 @@ class GeminiLLMManager:
                         if expertise:
                             expertise_text = ", ".join(str(e) for e in expertise)
                     
-                    # Add expertise as bullet point if available with emphasis on field name
+                    # Add expertise bullet point with bold field name
                     if expertise_text:
-                        expert_info.append(f"* **Expertise:** {expertise_text}")
+                        markdown_text += f"* **Expertise:** {expertise_text}\n\n"
                     
                 except Exception as exp_err:
                     logger.warning(f"Error formatting expertise for {full_name}: {exp_err}")
                 
-                # Add position and department if available
+                # Add position and department
                 position = expert.get('position', '')
                 department = expert.get('department', '')
                 
                 if position and department:
-                    expert_info.append(f"* **Position:** {position} in the {department}")
+                    markdown_text += f"* **Position:** {position} in the {department}\n\n"
                 elif position:
-                    expert_info.append(f"* **Position:** {position}")
+                    markdown_text += f"* **Position:** {position}\n\n"
                 elif department:
-                    expert_info.append(f"* **Department:** {department}")
+                    markdown_text += f"* **Department:** {department}\n\n"
                 
-                # Add email with consistent Markdown formatting, making it a clickable link
+                # Add email as markdown link
                 email = expert.get('email', '')
                 if email:
-                    expert_info.append(f"* **Email:** [{email}](mailto:{email})")
+                    markdown_text += f"* **Email:** [{email}](mailto:{email})\n\n"
                 
-                # Add publications if available (limit to 1 for list presentations)
+                # Add publications (limited for list views)
                 try:
                     publications = expert.get('publications', [])
-                    if publications and not is_list_request:
-                        expert_info.append("* **Notable publications:**")
-                        for i, pub in enumerate(publications[:2]):
-                            pub_title = pub.get('title', 'Untitled')
-                            pub_year = pub.get('publication_year', '')
-                            year_text = f" ({pub_year})" if pub_year else ""
-                            expert_info.append(f"  * \"{pub_title}\"{year_text}")
-                    elif publications and is_list_request:
-                        pub = publications[0]
-                        pub_title = pub.get('title', '')
-                        if pub_title:
-                            expert_info.append(f"* **Notable publication:** \"{pub_title}\"")
+                    if publications and len(publications) > 0:
+                        if len(experts) > 1:  # List view - just show one publication
+                            pub = publications[0]
+                            pub_title = pub.get('title', '')
+                            if pub_title:
+                                markdown_text += f"* **Notable publication:** \"{pub_title}\"\n\n"
+                        else:  # Single expert view - show more publications
+                            markdown_text += "* **Notable publications:**\n"
+                            for i, pub in enumerate(publications[:2]):
+                                pub_title = pub.get('title', 'Untitled')
+                                pub_year = pub.get('publication_year', '')
+                                year_text = f" ({pub_year})" if pub_year else ""
+                                markdown_text += f"  * \"{pub_title}\"{year_text}\n"
+                            markdown_text += "\n"
                 except Exception as pub_err:
                     logger.warning(f"Error formatting publications for {full_name}: {pub_err}")
-                
-                # Join expert info with newlines for clear presentation
-                context_parts.append("\n".join(expert_info))
                 
             except Exception as expert_err:
                 logger.error(f"Error processing expert at index {idx}: {expert_err}")
                 continue
         
-        # Add appropriate conclusion based on context
-        if is_list_request:
-            context_parts.append("Would you like more detailed information about any of these experts? You can ask by name or area of expertise.")
+        # Add appropriate conclusion
+        if len(experts) > 1:
+            markdown_text += "Would you like more detailed information about any of these experts? You can ask by name or area of expertise."
         else:
-            context_parts.append("Would you like to know more about this expert's research or publications?")
+            markdown_text += "Would you like to know more about this expert's research or publications?"
         
-        # Join with double newlines for clear separation between experts
-        return "\n\n".join(context_parts)
-    def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
-        """
-        Format publication information into a rich, structured Markdown presentation.
-        
-        Args:
-            publications: List of publication dictionaries
-            
-        Returns:
-            Formatted Markdown string with engaging publication presentations
-        """
-        logger.info(f"Starting format_publication_context with {len(publications)} publications")
-        
-        if not publications:
-            logger.info("No publications provided, returning helpful message")
-            return "I couldn't find any publications matching your query. Would you like me to help you search for related topics instead?"
-        
-        try:
-            # Create engaging Markdown header based on number of publications
-            if len(publications) == 1:
-                context_parts = ["# Relevant APHRC Publication:"]
-            else:
-                context_parts = [f"# APHRC Publications ({len(publications)}):"]
-            
-            # Process each publication with consistent Markdown formatting
-            for idx, pub in enumerate(publications):
-                logger.debug(f"Processing publication {idx+1}")
-                
-                # Check publication data
-                if not isinstance(pub, dict):
-                    logger.warning(f"Publication {idx+1} is not a dictionary but a {type(pub).__name__}")
-                    continue
-                    
-                # Extract title with fallback
-                title = pub.get('title', 'Untitled')
-                if not title:
-                    title = "Untitled Publication"
-                
-                logger.debug(f"Publication {idx+1} title: {title[:50]}...")
-                
-                # Create numbered publication with bold title
-                pub_info = [f"{idx+1}. **{title}**"]
-                
-                # Add year as bullet point with Markdown formatting
-                pub_year = pub.get('publication_year', '')
-                if pub_year:
-                    logger.debug(f"Adding year: {pub_year}")
-                    pub_info.append(f"* **Published in:** {pub_year}")
-                
-                # Add authors with careful handling and better Markdown formatting
-                try:
-                    authors = pub.get('authors', [])
-                    logger.debug(f"Authors type: {type(authors).__name__}")
-                    
-                    if authors:
-                        if isinstance(authors, list):
-                            # Format author list with proper Oxford comma and "et al."
-                            try:
-                                if len(authors) > 3:
-                                    author_text = f"{', '.join(str(a) for a in authors[:2])} et al."
-                                    pub_info.append(f"* **Authors:** {author_text}")
-                                elif len(authors) == 2:
-                                    author_text = f"{authors[0]} and {authors[1]}"
-                                    pub_info.append(f"* **Authors:** {author_text}")
-                                elif len(authors) == 1:
-                                    pub_info.append(f"* **Author:** {authors[0]}")
-                                else:
-                                    author_text = f"{', '.join(str(a) for a in authors[:-1])}, and {authors[-1]}"
-                                    pub_info.append(f"* **Authors:** {author_text}")
-                            except Exception as author_error:
-                                logger.warning(f"Error formatting authors: {author_error}")
-                                pub_info.append(f"* **Authors:** {len(authors)} contributors")
-                        else:
-                            logger.debug(f"Authors not a list: {authors}")
-                            pub_info.append(f"* **Author(s):** {authors}")
-                except Exception as authors_error:
-                    logger.error(f"Error processing authors: {authors_error}", exc_info=True)
-                
-                # Add APHRC experts with Markdown emphasis
-                try:
-                    aphrc_experts = pub.get('aphrc_experts', [])
-                    if aphrc_experts:
-                        if isinstance(aphrc_experts, list):
-                            if len(aphrc_experts) == 1:
-                                pub_info.append(f"* **APHRC Expert:** {aphrc_experts[0]}")
-                            else:
-                                experts_text = f"{', '.join(str(e) for e in aphrc_experts[:2])}"
-                                if len(aphrc_experts) > 2:
-                                    experts_text += " and others"
-                                pub_info.append(f"* **APHRC Experts:** {experts_text}")
-                        else:
-                            pub_info.append(f"* **APHRC Expert:** {aphrc_experts}")
-                except Exception as experts_error:
-                    logger.error(f"Error processing APHRC experts: {experts_error}", exc_info=True)
-                
-                # Add abstract with better Markdown formatting
-                try:
-                    abstract = pub.get('abstract', '')
-                    if abstract:
-                        # Format for readability with appropriate length
-                        if len(abstract) > 300:
-                            abstract_intro = "* **Key findings:** "
-                            trimmed_abstract = abstract[:297] + "..."
-                            
-                            # Try to end at a sentence boundary
-                            last_period = trimmed_abstract.rfind('.')
-                            if last_period > 150:  # Only trim to sentence if we don't lose too much
-                                trimmed_abstract = abstract[:last_period+1]
-                            
-                            pub_info.append(f"{abstract_intro}{trimmed_abstract}")
-                        else:
-                            pub_info.append(f"* **Abstract:** {abstract}")
-                except Exception as abstract_error:
-                    logger.error(f"Error processing abstract: {abstract_error}", exc_info=True)
-                
-                # Add DOI as clickable Markdown link if available
-                doi = pub.get('doi', '')
-                if doi:
-                    # Format as a proper DOI link
-                    if not doi.startswith('http'):
-                        doi_url = f"https://doi.org/{doi}"
-                    else:
-                        doi_url = doi
-                    pub_info.append(f"* **DOI:** [{doi}]({doi_url})")
-                
-                # Combine all information about this publication
-                logger.debug(f"Completed processing publication {idx+1}, {len(pub_info)} info parts")
-                try:
-                    context_parts.append("\n".join(pub_info))
-                except Exception as join_error:
-                    logger.error(f"Error joining pub_info: {join_error}", exc_info=True)
-                    context_parts.append(f"Publication {idx+1}: {title}")
-            
-            # Add helpful conclusion with Markdown formatting
-            if len(publications) > 1:
-                context_parts.append("Would you like more detailed information about any of these publications or related research areas?")
-            else:
-                context_parts.append("Would you like to know more about this research or related publications?")
-            
-            # Join all context parts with double newlines for proper Markdown spacing
-            logger.info(f"Joining {len(context_parts)} context parts")
-            try:
-                result = "\n\n".join(context_parts)
-                logger.info(f"Successfully created context, length: {len(result)}")
-                return result
-            except Exception as final_join_error:
-                logger.error(f"Error in final context join: {final_join_error}", exc_info=True)
-                return "Error formatting publications. Please try a more specific query."
-                
-        except Exception as e:
-            logger.error(f"Unhandled error in format_publication_context: {e}", exc_info=True)
-            return f"I encountered an issue while preparing publication information. Would you like to try a different search term?"
-                
+        return markdown_text
                                                         
    
     async def analyze_quality(self, message: str, response: str = "") -> Dict:
