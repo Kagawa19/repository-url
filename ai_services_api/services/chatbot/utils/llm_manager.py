@@ -1826,7 +1826,7 @@ class GeminiLLMManager:
 
     
    
-   
+            
     async def _reset_rate_limited_after(self, seconds: int):
         """Reset rate limited flag after specified seconds."""
         await asyncio.sleep(seconds)
@@ -1853,41 +1853,45 @@ class GeminiLLMManager:
                 first_name = expert.get('first_name', '').strip()
                 last_name = expert.get('last_name', '').strip()
                 full_name = f"{first_name} {last_name}".strip()
-                markdown_text += f"{idx + 1}. ***{full_name}***\n\n"
+                
+                # UPDATED: Use consistent formatting that works better with cleaning function
+                # Use numbered list with double asterisks instead of triple
+                markdown_text += f"{idx + 1}. **{full_name}**\n\n"
 
+                # UPDATED: Ensure consistent indentation with 4 spaces for all fields
                 # Add position and department
                 position = expert.get('position', '')
                 department = expert.get('department', '')
                 if position and department:
-                    markdown_text += f"   - ***Position:*** {position} in the {department}\n\n"
+                    markdown_text += f"    - **Position:** {position} in the {department}\n\n"
                 elif position:
-                    markdown_text += f"   - ***Position:*** {position}\n\n"
+                    markdown_text += f"    - **Position:** {position}\n\n"
                 elif department:
-                    markdown_text += f"   - ***Department:*** {department}\n\n"
+                    markdown_text += f"    - **Department:** {department}\n\n"
 
-                # Add email as a Markdown link
+                # UPDATED: Ensure email is on a separate line with consistent indentation
+                # Add email with consistent label format
                 email = expert.get('email', '')
                 if email:
-                    markdown_text += f"   - ***Email:*** [{email}](mailto:{email})\n\n"
+                    markdown_text += f"    - **Email:** {email}\n\n"
 
-                # Add notable publications
+                # Add notable publications with consistent indentation
                 publications = expert.get('publications', [])
                 if publications:
-                    markdown_text += "   - **Notable publications:**\n\n"
+                    markdown_text += "    - **Notable publications:**\n\n"
                     for pub in publications[:2]:
                         pub_title = pub.get('title', 'Untitled')
                         pub_year = pub.get('publication_year', '')
                         year_text = f" ({pub_year})" if pub_year else ""
-                        markdown_text += f"      - \"{pub_title}\"{year_text}\n\n"
+                        markdown_text += f"        - \"{pub_title}\"{year_text}\n\n"
 
             except Exception as e:
                 logger.error(f"Error formatting expert {idx + 1}: {e}")
                 continue
 
         # Add closing message
-        markdown_text += "\n\nWould you like more detailed information about any of these experts? You can ask by name or area of expertise."
+        markdown_text += "\nWould you like more detailed information about any of these experts? You can ask by name or area of expertise."
         return markdown_text
-
     def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
         Format publication information into Markdown format for rendering in the frontend.
