@@ -1837,82 +1837,61 @@ class GeminiLLMManager:
         
     def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
         """
-        Format expert information into a rich, conversational presentation with 
-        natural language introductions and transitions between experts.
+        Format expert information into a clear, structured list presentation.
         
         Args:
             experts: List of expert dictionaries
             
         Returns:
-            Formatted context string with engaging expert presentations
+            Formatted string with structured expert presentations
         """
-        # UNCHANGED: Handle empty experts case
+        # Handle empty experts case
         if not experts:
             return "I couldn't find any expert information on this topic. Would you like me to help you search for something else?"
         
-        # MODIFIED: Detect if this is likely a list request based on number of experts
-        is_list_request = len(experts) >= 3
+        # Determine if this is a list based on number of experts
+        is_list_request = len(experts) > 1
         
-        # Create engaging introduction based on number of experts found
-        # MODIFIED: More robust introduction handling
-        if len(experts) == 1:
-            context_parts = [f"I found an APHRC expert who specializes in this area:"]
-        elif len(experts) == 2:
-            context_parts = [f"I found two APHRC experts who can provide insights on this topic:"]
-        elif len(experts) <= 5:
-            context_parts = [f"Here are {len(experts)} APHRC experts who specialize in this field:"]
+        # Create header for experts list
+        if is_list_request:
+            if len(experts) >= 3:
+                context_parts = ["# Experts in Health Sciences at APHRC:"]
+            else:
+                context_parts = ["# APHRC Experts in this field:"]
         else:
-            context_parts = [f"I've identified several APHRC experts in this area. Here are the most relevant ones:"]
+            context_parts = [f"# Expert Profile:"]
         
-        # UNCHANGED: Add transitions between experts
-        transitions = [
-            "",  # No transition for first expert
-            "Another expert in this field is ",
-            "You might also be interested in the work of ",
-            "Additionally, ",
-            "I should also mention ",
-            "Another researcher with relevant expertise is ",
-            "The research team also includes "
-        ]
-        
-        # MODIFIED: Improved expert information processing with better error handling
+        # Format each expert entry with consistent structure
         for idx, expert in enumerate(experts):
             try:
-                # Extract name components with fallbacks for missing data
+                # Extract name components with fallbacks
                 first_name = expert.get('first_name', '').strip()
                 last_name = expert.get('last_name', '').strip()
                 
-                # Skip if no name available at all
+                # Skip if no name available
                 if not first_name and not last_name:
-                    logger.warning(f"Skipping expert at index {idx} due to missing name")
                     continue
                     
                 full_name = f"{first_name} {last_name}".strip()
                 
-                # Create expert entry with appropriate transition for position in list
-                if idx == 0:
-                    # First expert gets number and bold name
-                    expert_info = [f"{idx+1}. **{full_name}**"]
-                else:
-                    # Subsequent experts get a transition phrase
-                    transition = transitions[min(idx, len(transitions)-1)]
-                    expert_info = [f"{idx+1}. {transition}**{full_name}**"]
+                # Create numbered list item for each expert
+                expert_info = [f"{idx+1}. {full_name}"]
                 
-                # MODIFIED: Better handling of expertise areas with improved error handling
+                # Process expertise with consistent formatting
                 try:
                     expertise = expert.get('expertise', [])
+                    expertise_text = ""
+                    
+                    # Handle different expertise formats
                     if expertise:
-                        # Handle both string and JSON formats
                         if isinstance(expertise, str):
                             try:
                                 expertise = json.loads(expertise)
                             except json.JSONDecodeError:
-                                # If not valid JSON, use as-is
                                 expertise = [expertise]
                         
                         # Format expertise based on type
                         if isinstance(expertise, dict):
-                            # Extract values from dictionary
                             expertise_values = []
                             for key, values in expertise.items():
                                 if isinstance(values, list):
@@ -1925,98 +1904,66 @@ class GeminiLLMManager:
                         if not isinstance(expertise, list):
                             expertise = [expertise]
                         
-                        # Format expertise list
-                        if len(expertise) == 1:
-                            expert_info.append(f"* Specializes in {expertise[0]}")
-                        elif len(expertise) > 1:
-                            expertise_text = ", ".join(str(e) for e in expertise[:-1])
-                            expert_info.append(f"* Areas of expertise include {expertise_text}, and {expertise[-1]}")
+                        # Format as comma-separated list
+                        if expertise:
+                            expertise_text = ", ".join(str(e) for e in expertise)
+                    
+                    # Add expertise as bullet point if available
+                    if expertise_text:
+                        expert_info.append(f"* Expertise: {expertise_text}")
+                    
                 except Exception as exp_err:
-                    logger.warning(f"Error formatting expertise for expert {full_name}: {exp_err}")
-                    # Fallback: Use generic expertise line if available
-                    if expert.get('expertise'):
-                        expert_info.append(f"* Has expertise in various research areas")
+                    logger.warning(f"Error formatting expertise for {full_name}: {exp_err}")
                 
-                # MODIFIED: Improved research interests handling
-                try:
-                    research_interests = expert.get('research_interests', [])
-                    if research_interests:
-                        # Handle string format
-                        if isinstance(research_interests, str):
-                            try:
-                                research_interests = json.loads(research_interests)
-                            except json.JSONDecodeError:
-                                research_interests = [research_interests]
-                        
-                        # Ensure it's a list
-                        if not isinstance(research_interests, list):
-                            research_interests = [research_interests]
-                        
-                        # Format research interests
-                        if research_interests and len(research_interests) > 0:
-                            if len(research_interests) == 1:
-                                expert_info.append(f"* Current research focuses on {research_interests[0]}")
-                            else:
-                                interests_text = ", ".join(str(ri) for ri in research_interests[:-1])
-                                expert_info.append(f"* Research interests span {interests_text}, and {research_interests[-1]}")
-                except Exception as ri_err:
-                    logger.warning(f"Error formatting research interests for expert {full_name}: {ri_err}")
-                
-                # UNCHANGED: Add position and department with natural phrasing
+                # Add position and department if available
                 position = expert.get('position', '')
                 department = expert.get('department', '')
                 
                 if position and department:
-                    expert_info.append(f"* Serves as {position} in the {department}")
+                    expert_info.append(f"* Position: {position} in the {department}")
                 elif position:
-                    expert_info.append(f"* Current role: {position}")
+                    expert_info.append(f"* Position: {position}")
                 elif department:
-                    expert_info.append(f"* Works in the {department}")
+                    expert_info.append(f"* Department: {department}")
                 
-                # UNCHANGED: Add contact info with more helpful framing
+                # Add email with consistent formatting
                 email = expert.get('email', '')
                 if email:
-                    expert_info.append(f"* You can reach them at {email}")
+                    expert_info.append(f"* Email: {email}")
                 
-                # MODIFIED: Improved publication handling with better error checks
+                # Add publications if available (limit to 1 for list presentations)
                 try:
                     publications = expert.get('publications', [])
-                    if publications:
-                        if len(publications) == 1:
-                            pub = publications[0]
+                    if publications and not is_list_request:
+                        expert_info.append("* Notable publications:")
+                        for i, pub in enumerate(publications[:2]):
                             pub_title = pub.get('title', 'Untitled')
+                            pub_year = pub.get('publication_year', '')
+                            year_text = f" ({pub_year})" if pub_year else ""
+                            expert_info.append(f"  * \"{pub_title}\"{year_text}")
+                    elif publications and is_list_request:
+                        pub = publications[0]
+                        pub_title = pub.get('title', '')
+                        if pub_title:
                             expert_info.append(f"* Notable publication: \"{pub_title}\"")
-                        elif len(publications) > 1:
-                            expert_info.append("* Notable publications include:")
-                            for i, pub in enumerate(publications[:2]):  # Limit to 2 publications
-                                pub_title = pub.get('title', 'Untitled')
-                                pub_year = pub.get('publication_year', '')
-                                year_text = f" ({pub_year})" if pub_year else ""
-                                expert_info.append(f"  * \"{pub_title}\"{year_text}")
                 except Exception as pub_err:
-                    logger.warning(f"Error formatting publications for expert {full_name}: {pub_err}")
+                    logger.warning(f"Error formatting publications for {full_name}: {pub_err}")
                 
-                # Combine all information about this expert with proper line breaks
+                # Join expert info with newlines for clear presentation
                 context_parts.append("\n".join(expert_info))
-            
+                
             except Exception as expert_err:
                 logger.error(f"Error processing expert at index {idx}: {expert_err}")
-                # Skip this expert but continue processing others
                 continue
         
-        # MODIFIED: Add appropriate conclusion based on expert count
-        if len(experts) > 1:
-            # For list presentations, add more specific follow-up options
-            if is_list_request:
-                context_parts.append("Would you like more detailed information about any specific expert from this list? You can ask by name or area of expertise.")
-            else:
-                context_parts.append("Would you like more detailed information about any of these experts or their research areas?")
+        # Add appropriate conclusion based on context
+        if is_list_request:
+            context_parts.append("Would you like more detailed information about any of these experts? You can ask by name or area of expertise.")
         else:
             context_parts.append("Would you like to know more about this expert's research or publications?")
         
-        # Join with double newlines for better readability
+        # Join with double newlines for clear separation between experts
         return "\n\n".join(context_parts)
-
     def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
         Format publication information into a rich, conversational presentation with
