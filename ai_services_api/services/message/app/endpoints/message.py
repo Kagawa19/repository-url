@@ -55,7 +55,7 @@ def generate_with_retry(model, prompt):
 
 def clean_message_content(text: str, receiver: dict, sender: dict, context: str) -> str:
     """
-    Enhanced cleaning of message content with real sender information.
+    Enhanced cleaning of message content with real sender information to ensure no gaps remain.
     
     Args:
         text: The raw message text from the AI
@@ -64,9 +64,9 @@ def clean_message_content(text: str, receiver: dict, sender: dict, context: str)
         context: The original context provided by the user
         
     Returns:
-        str: The cleaned and enhanced message text
+        str: The cleaned and enhanced message text with no gaps
     """
-    logger.debug("Cleaning message content with sender information")
+    logger.debug("Cleaning message content with comprehensive gap removal")
     
     # Get name information
     receiver_name = f"{receiver.get('first_name', '')} {receiver.get('last_name', '').strip()}".strip()
@@ -76,6 +76,13 @@ def clean_message_content(text: str, receiver: dict, sender: dict, context: str)
     
     # Fix repetitive salutations
     text = re.sub(rf'Dear {receiver_name},\s*Dear {receiver_name},', f'Dear {receiver_name},', text)
+    
+    # Ensure correct position title
+    text = re.sub(r'I am a research at', 'I am a Researcher at', text)
+    text = re.sub(r'I am an research at', 'I am a Researcher at', text)
+    
+    # Fix double titles
+    text = re.sub(r'I am a researcher at.*?I am a researcher at', 'I am a Researcher at', text, flags=re.IGNORECASE | re.DOTALL)
     
     # Ensure introduction includes sender details
     intro_pattern = r'My name is.*?and I am a.*?at the African Population and Health Research Center \(APHRC\)'
@@ -103,75 +110,143 @@ def clean_message_content(text: str, receiver: dict, sender: dict, context: str)
         # If no signature found, add it at the end
         text = text.rstrip() + f"\n\n{proper_signature}"
     
-    # Remove any remaining placeholders
-    text = re.sub(r'\[.*?\]', '', text)
+    # Fix incomplete phrases and placeholder removal
+    # Remove any bracketed placeholders
+    text = re.sub(r'\[\s*\]', '', text)  # Empty brackets []
+    text = re.sub(r'\[\s*\.\s*\]', '', text)  # Brackets with period [.]
+    text = re.sub(r'\[\s*\w+\s*\]', '', text)  # Brackets with one word [word]
+    text = re.sub(r'\[.*?\]', '', text)  # Any remaining brackets [anything]
+    
+    # Fix incomplete phrases and sentences
+    text = re.sub(r'focuses\s+on\s+on', 'focuses on', text)
+    text = re.sub(r'focuses\s+on\s*\.', 'focuses on this research area.', text)
+    text = re.sub(r'focuses\s+on\s*$', 'focuses on this research area.', text, flags=re.MULTILINE)
+    text = re.sub(r'focuses\s+on\s+within', 'focuses on research within', text)
+    text = re.sub(r'interested\s+in\s*\.', 'interested in this collaboration.', text)
+    text = re.sub(r'interested\s+in\s*$', 'interested in this collaboration.', text, flags=re.MULTILINE)
+    text = re.sub(r'specializes\s+in\s*\.', 'specializes in this field.', text)
+    text = re.sub(r'specializes\s+in\s*$', 'specializes in this field.', text, flags=re.MULTILINE)
+    
+    # Fix other common gap patterns
+    text = re.sub(r'such\s+as\s*\.', 'such as these areas.', text)
+    text = re.sub(r'such\s+as\s*$', 'such as these areas.', text, flags=re.MULTILINE)
+    text = re.sub(r'including\s*\.', 'including various aspects.', text)
+    text = re.sub(r'including\s*$', 'including various aspects.', text, flags=re.MULTILINE)
+    text = re.sub(r'regarding\s*\.', 'regarding this matter.', text)
+    text = re.sub(r'regarding\s*$', 'regarding this matter.', text, flags=re.MULTILINE)
+    text = re.sub(r'pertaining\s+to\s*\.', 'pertaining to this subject.', text)
+    text = re.sub(r'pertaining\s+to\s*$', 'pertaining to this subject.', text, flags=re.MULTILINE)
+    
+    # Fill in the gap if context is mentioned without details
+    if context and len(context) > 3:
+        context_summary = context[:50] + '...' if len(context) > 50 else context
+        text = re.sub(
+            r'(writing|reaching out|contacting) (to you|you)( today)? (because|regarding|about|concerning)\s*\.', 
+            f'\\1 \\2\\3 \\4 {context_summary}.', 
+            text
+        )
+        text = re.sub(
+            r'(writing|reaching out|contacting) (to you|you)( today)? (because|regarding|about|concerning)\s*$', 
+            f'\\1 \\2\\3 \\4 {context_summary}.', 
+            text, 
+            flags=re.MULTILINE
+        )
+    
+    # Replace multiple spaces with a single space
+    text = re.sub(r'\s{2,}', ' ', text)
+    
+    # Remove duplicate adjacent words (like "the the")
+    text = re.sub(r'\b(\w+)\s+\1\b', r'\1', text)
+    
+    # Remove any remaining placeholders or references
+    text = re.sub(r'\(Insert.*?\)', '', text)
+    text = re.sub(r'\[Insert.*?\]', '', text)
+    text = re.sub(r'\{Insert.*?\}', '', text)
+    
+    # Ensure sentences end with proper punctuation
+    text = re.sub(r'(\w)\s*\n', r'\1.\n', text)
     
     # Normalize whitespace
     text = re.sub(r'\n{3,}', '\n\n', text)
     
-    return text.strip()
-
-def generate_expert_draft_prompt(receiver: dict, content: str, sender: dict) -> str:
-    """
-    Generate a sophisticated prompt with real sender information.
+    # Split into paragraphs and ensure each has meaningful content
+    paragraphs = text.split('\n\n')
+    processed_paragraphs = []
     
-    Args:
-        receiver: Dictionary containing receiver details
-        content: The original message context
-        sender: Dictionary containing sender details
+    for para in paragraphs:
+        stripped_para = para.strip()
+        # Skip very short or empty paragraphs
+        if len(stripped_para) < 5:
+            continue
+            
+        # Check for incomplete sentences at paragraph end
+        if stripped_para and stripped_para[-1] not in ['.', '!', '?', ':', ';', ',']:
+            stripped_para += '.'
+            
+        processed_paragraphs.append(stripped_para)
+    
+    # Final sanity check for remaining placeholders or incomplete phrases
+    result = '\n\n'.join(processed_paragraphs)
+    
+    # Check for any remaining ellipses or indicators of missing content
+    result = re.sub(r'\.\.\.$', '.', result, flags=re.MULTILINE)
+    result = re.sub(r'\.\.\.\s+\.', '.', result)
+    
+    return result.strip()
+
+def validate_message_completeness(content, context, receiver_name, sender_name):
+    """
+    Validate that the message is complete without gaps.
+    Returns a fixed version if gaps are found.
+    """
+    # Check for common indicators of incomplete content
+    has_gaps = any([
+        "I am particularly interested in ." in content,
+        "focuses on  on" in content,
+        "within ]" in content,
+        "such as ." in content,
+        "including ." in content,
+        ". ." in content,
+        "  " in content,
+        "[" in content and "]" in content,
+        "research at the the" in content
+    ])
+    
+    # Fix any remaining issues if gaps detected
+    if has_gaps:
+        logger.warning(f"Post-cleaning gaps detected, performing additional fixes")
         
-    Returns:
-        str: Comprehensive prompt for message generation
-    """
-    # Prepare receiver details
-    first_name = receiver.get('first_name', 'Respected')
-    last_name = receiver.get('last_name', 'Colleague')
-    designation = receiver.get('designation', 'Research Expert')
-    theme = receiver.get('theme', 'Population Health Research')
-    domains = ', '.join(receiver.get('domains', ['Interdisciplinary Research']))
-    fields = ', '.join(receiver.get('fields', ['Health Systems']))
+        # Fix additional issues
+        content = content.replace("I am particularly interested in .", "I am particularly interested in this collaboration.")
+        content = content.replace("focuses on  on", "focuses on")
+        content = content.replace("within ]", "within our field")
+        content = content.replace("such as .", "such as these relevant areas.")
+        content = content.replace("including .", "including various aspects of this work.")
+        content = content.replace(". .", ".")
+        content = content.replace("  ", " ")
+        content = content.replace("research at the the", "research at the")
+        
+        # If context is available, include it in relevant places
+        if context:
+            context_brief = context[:40] + "..." if len(context) > 40 else context
+            if "regarding ." in content:
+                content = content.replace("regarding .", f"regarding {context_brief}.")
+                
+            if "pertaining to ." in content:
+                content = content.replace("pertaining to .", f"pertaining to {context_brief}.")
+                
+            # Handle any incomplete sentences with research focus
+            if "My research focuses on ." in content:
+                content = content.replace("My research focuses on .", f"My research focuses on {context_brief}.")
     
-    # Prepare sender details
-    sender_first_name = sender.get('first_name', 'Research')
-    sender_last_name = sender.get('last_name', 'Team')
-    sender_position = sender.get('position', 'Researcher')
-    sender_department = sender.get('department', 'APHRC')
-    
-    # Construct a nuanced, context-rich prompt
-    prompt = f"""
-    You are an AI assistant helping a researcher from the African Population and Health Research Center (APHRC) draft a professional communication.
-
-    Recipient Details:
-    - Name: {first_name} {last_name}
-    - Designation: {designation}
-    - Research Focus: {theme}
-    - Primary Domains: {domains}
-    - Specialized Fields: {fields}
-    
-    Sender Details:
-    - Name: {sender_first_name} {sender_last_name}
-    - Position: {sender_position}
-    - Department: {sender_department}
-
-    Communication Context: {content}
-
-    IMPORTANT FORMATTING REQUIREMENTS:
-    1. Begin with "Dear {first_name} {last_name},"
-    2. Introduce the sender using their real name: "My name is {sender_first_name} {sender_last_name}, and I am a {sender_position} at the African Population and Health Research Center (APHRC)."
-    3. End with "Best regards,\\n{sender_first_name} {sender_last_name}\\n{sender_department}\\nAfrican Population and Health Research Center (APHRC)"
-    4. DO NOT use placeholder text anywhere in the message
-
-    Drafting Guidelines:
-    1. Craft a concise, professional message that reflects APHRC's research excellence
-    2. Demonstrate genuine interest in potential collaboration or knowledge exchange
-    3. Highlight the relevance of the proposed communication to the recipient's expertise
-    4. Maintain a tone of academic respect and professional curiosity
-    5. Ensure the message is culturally sensitive and aligned with APHRC's mission
-
-    Draft the message accordingly, focusing on creating a meaningful professional connection.
-    """
-    
-    return prompt
+    # Ensure the message is properly addressed and signed
+    if not content.startswith(f"Dear {receiver_name}"):
+        content = f"Dear {receiver_name},\n\n" + content
+        
+    if "Best regards" not in content:
+        content += f"\n\nBest regards,\n{sender_name}"
+        
+    return content
 
 async def process_message_draft(
     user_id: str,
@@ -191,7 +266,15 @@ async def process_message_draft(
         cached_response = await redis_client.get(cache_key)
         if cached_response:
             logger.info("Cache hit for message draft")
-            return json.loads(cached_response)
+            cached_data = json.loads(cached_response)
+            
+            # Even for cached responses, validate completeness
+            receiver_name = cached_data.get("receiver_name", "Respected Colleague")
+            sender_name = cached_data.get("sender_name", "APHRC Researcher")
+            cached_data["content"] = validate_message_completeness(
+                cached_data["content"], content, receiver_name, sender_name
+            )
+            return cached_data
             
         # If no exact match, check for similar content to maximize cache usage
         similar_key_pattern = f"message_draft:{user_id}:{receiver_id}:*"
@@ -227,7 +310,15 @@ async def process_message_draft(
                             cached_response = await redis_client.get(key)
                             if cached_response:
                                 logger.info(f"Found similar cached content (similarity: {overlap_ratio:.2f})")
-                                return json.loads(cached_response)
+                                cached_data = json.loads(cached_response)
+                                
+                                # Validate completeness even for similar cached data
+                                receiver_name = cached_data.get("receiver_name", "Respected Colleague")
+                                sender_name = cached_data.get("sender_name", "APHRC Researcher")
+                                cached_data["content"] = validate_message_completeness(
+                                    cached_data["content"], content, receiver_name, sender_name
+                                )
+                                return cached_data
                     except Exception as key_error:
                         logger.warning(f"Error processing cache key {key}: {str(key_error)}")
                         continue
@@ -298,6 +389,7 @@ async def process_message_draft(
             response = generate_with_retry(model, prompt)
             draft_content = response.text
             logger.info(f"Generated draft content of length: {len(draft_content)}")
+            logger.debug(f"Raw Gemini response: {draft_content[:1000]}")
             
             # Apply enhanced cleaning function to the response with sender info
             cleaned_content = clean_message_content(
@@ -307,6 +399,18 @@ async def process_message_draft(
                 context=content
             )
             logger.info(f"Cleaned content of length: {len(cleaned_content)}")
+            
+            # Perform final validation to ensure no gaps remain
+            receiver_name = f"{receiver['first_name']} {receiver['last_name']}".strip()
+            sender_name = f"{sender['first_name']} {sender['last_name']}".strip()
+            final_content = validate_message_completeness(
+                cleaned_content, content, receiver_name, sender_name
+            )
+            
+            if final_content != cleaned_content:
+                logger.info("Final validation fixed additional gaps in content")
+            
+            cleaned_content = final_content
             
         except Exception as api_error:
             logger.error(f"Error generating content after retries: {str(api_error)}")
@@ -415,6 +519,77 @@ African Population and Health Research Center (APHRC)"""
         if conn:
             conn.close()
         logger.debug("Database connections closed")
+
+def generate_expert_draft_prompt(receiver: dict, content: str, sender: dict) -> str:
+    """
+    Generate a sophisticated prompt with real sender information.
+    Enhanced to prevent gaps in generated content.
+    
+    Args:
+        receiver: Dictionary containing receiver details
+        content: The original message context
+        sender: Dictionary containing sender details
+        
+    Returns:
+        str: Comprehensive prompt for message generation
+    """
+    # Prepare receiver details
+    first_name = receiver.get('first_name', 'Respected')
+    last_name = receiver.get('last_name', 'Colleague')
+    designation = receiver.get('designation', 'Research Expert')
+    theme = receiver.get('theme', 'Population Health Research')
+    domains = ', '.join(receiver.get('domains', ['Interdisciplinary Research']))
+    fields = ', '.join(receiver.get('fields', ['Health Systems']))
+    
+    # Prepare sender details
+    sender_first_name = sender.get('first_name', 'Research')
+    sender_last_name = sender.get('last_name', 'Team')
+    sender_position = sender.get('position', 'Researcher')
+    sender_department = sender.get('department', 'APHRC')
+    
+    # Construct a nuanced, context-rich prompt with explicit instruction to avoid gaps
+    prompt = f"""
+    You are an AI assistant helping a researcher from the African Population and Health Research Center (APHRC) draft a professional communication.
+
+    Recipient Details:
+    - Name: {first_name} {last_name}
+    - Designation: {designation}
+    - Research Focus: {theme}
+    - Primary Domains: {domains}
+    - Specialized Fields: {fields}
+    
+    Sender Details:
+    - Name: {sender_first_name} {sender_last_name}
+    - Position: {sender_position}
+    - Department: {sender_department}
+
+    Communication Context: {content}
+
+    IMPORTANT FORMATTING REQUIREMENTS:
+    1. Begin with "Dear {first_name} {last_name},"
+    2. Introduce the sender using their real name: "My name is {sender_first_name} {sender_last_name}, and I am a {sender_position} at the African Population and Health Research Center (APHRC)."
+    3. End with "Best regards,\\n{sender_first_name} {sender_last_name}\\n{sender_department}\\nAfrican Population and Health Research Center (APHRC)"
+    4. DO NOT use placeholder text anywhere in the message
+    5. NEVER use "..." or "[insert something]" or leave any part of the message incomplete
+    6. ALWAYS provide complete, specific details instead of placeholders
+    7. If referring to research topics, BE SPECIFIC about what those topics are - do not leave gaps
+    8. NEVER use phrases like "I am interested in ." - always complete the thought
+    9. DO NOT include double spaces, repeated words, or incomplete sentences
+
+    Drafting Guidelines:
+    1. Craft a concise, professional message that reflects APHRC's research excellence
+    2. Demonstrate genuine interest in potential collaboration or knowledge exchange
+    3. Highlight the relevance of the proposed communication to the recipient's expertise
+    4. Maintain a tone of academic respect and professional curiosity
+    5. Ensure the message is culturally sensitive and aligned with APHRC's mission
+    6. INCLUDE SPECIFIC RESEARCH TOPICS related to the communication context
+    7. COMPLETE ALL THOUGHTS and sentences fully with specific details
+    8. DO NOT leave any part of the message unspecified or incomplete
+
+    Draft a COMPLETE message, focusing on creating a meaningful professional connection.
+    """
+    
+    return prompt
 
 from fastapi import Body
 from typing import Dict
