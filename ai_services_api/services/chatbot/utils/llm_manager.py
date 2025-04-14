@@ -1853,22 +1853,22 @@ class GeminiLLMManager:
                 first_name = expert.get('first_name', '').strip()
                 last_name = expert.get('last_name', '').strip()
                 full_name = f"{first_name} {last_name}".strip()
-                markdown_text += f"{idx + 1}. **{full_name}**\n"
+                markdown_text += f"{idx + 1}. ***{full_name}***\n"
 
                 # Add position and department
                 position = expert.get('position', '')
                 department = expert.get('department', '')
                 if position and department:
-                    markdown_text += f"   - **Position:** {position} in the {department}\n"
+                    markdown_text += f"   - ***Position:*** {position} in the {department}\n"
                 elif position:
-                    markdown_text += f"   - **Position:** {position}\n"
+                    markdown_text += f"   - ***Position:*** {position}\n"
                 elif department:
-                    markdown_text += f"   - **Department:** {department}\n"
+                    markdown_text += f"   - ***Department:*** {department}\n"
 
                 # Add email as a Markdown link
                 email = expert.get('email', '')
                 if email:
-                    markdown_text += f"   - **Email:** [{email}](mailto:{email})\n"
+                    markdown_text += f"   - ***Email:*** [{email}](mailto:{email})\n"
 
                 # Add notable publications
                 publications = expert.get('publications', [])
