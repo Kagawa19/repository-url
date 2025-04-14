@@ -332,6 +332,9 @@ class MessageHandler:
         # Handle numbered lists consistently
         text = re.sub(r'(\d+)\.\s+([A-Z])', r'\1. \2', text)  # Ensure proper spacing after numbers
         
+        # Fix missing line breaks before numbered list items (e.g., "including:1. " → "including:\n\n1. ")
+        text = re.sub(r'([:.\n])\s*(\d+\.\s+)', r'\1\n\n\2', text)
+        
         # Clean up excess whitespace while preserving meaningful structure
         text = re.sub(r'[ \t]+', ' ', text)  # Replace multiple spaces/tabs with single space
         
@@ -348,19 +351,14 @@ class MessageHandler:
         # Ensure consistent formatting for publication information
         text = re.sub(r'(Title|Authors|Publication Year|DOI|Abstract|Summary):\s*', r'**\1**: ', text)
         
+        # CRITICAL FIX: Ensure each bold section starts on a new line
+        text = re.sub(r'([^\n])\s*\*\*([^*:]+):\*\*', r'\1\n\n**\2:**', text)
+        
+        # Fix line breaks for expert entries and emails
+        text = re.sub(r'(\d+\.\s+\*\*[^*]+\*\*)\s+Email:', r'\1\nEmail:', text)
+        
         # Final trim of any leading/trailing whitespace
         return text.strip()
-        def _format_markdown_headers(self, text: str) -> str:
-            """
-            Formats headers in Markdown syntax.
-            Args:
-                text (str): Input text containing potential headers
-            Returns:
-                str: Text with headers formatted in Markdown
-            """
-            # Format headers
-            text = re.sub(r'#\s+(.+)', r'# \1', text)
-            return text
         
     
     async def process_stream_response(self, response_stream):

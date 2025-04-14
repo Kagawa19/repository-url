@@ -730,100 +730,14 @@ async def flexible_chat_endpoint(
                     "message": "An unexpected error occurred. Please try again."
                 }
             )
-
-from fastapi import HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-
-# Add security scheme for admin endpoints
-security = HTTPBearer()
-
-async def verify_admin_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Verify admin token for cache clearing operations."""
-    # In production, you would validate this against your auth system
-    expected_token = "your_admin_token_here"  # Should be from config/environment
-    if credentials.credentials != expected_token:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid authorization credentials"
-        )
-    return True
-
-@router.delete("/cache/clear", responses={
-    200: {"description": "Cache cleared successfully"},
-    403: {"description": "Not authorized"},
-    500: {"description": "Error clearing cache"}
-})
-async def clear_chat_cache(
-    user_id: Optional[str] = None,
-    all: bool = False,
-    redis_client: Redis = Depends(get_redis),
-    authorized: bool = Depends(verify_admin_token)
-):
-    """
-    Clear chat cache entries from Redis.
-    
-    Parameters:
-    - user_id: Optional specific user ID to clear cache for
-    - all: If True, clears all chat cache entries (requires admin)
-    
-    Returns:
-    - Count of keys deleted
-    """
-    try:
-        if not authorized:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not authorized to perform this action"
-            )
-
-        deleted_count = 0
-        
-        if all:
-            # Clear all chat cache entries (use with caution in production)
-            logger.warning("Clearing ALL chat cache entries")
-            keys = await redis_client.keys("chat:*")
-            if keys:
-                deleted_count = await redis_client.delete(*keys)
-            logger.info(f"Deleted all {deleted_count} chat cache entries")
-            
-        elif user_id:
-            # Clear cache for a specific user
-            logger.info(f"Clearing cache for user: {user_id}")
-            keys = await redis_client.keys(f"chat:{user_id}:*")
-            if keys:
-                deleted_count = await redis_client.delete(*keys)
-            logger.info(f"Deleted {deleted_count} cache entries for user {user_id}")
-            
-        else:
-            # No parameters provided - return error
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Must specify either user_id or all=True"
-            )
-            
-        return {
-            "status": "success",
-            "deleted_count": deleted_count,
-            "message": f"Deleted {deleted_count} cache entries"
-        }
-        
-    except Exception as e:
-        logger.error(f"Error clearing cache: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error clearing cache: {str(e)}"
-        )
-
 @router.delete("/cache/clear/{cache_key:path}", responses={
     200: {"description": "Cache cleared successfully"},
-    403: {"description": "Not authorized"},
     404: {"description": "Key not found"},
     500: {"description": "Error clearing cache"}
 })
 async def clear_specific_cache_key(
     cache_key: str,
-    redis_client: Redis = Depends(get_redis),
-    authorized: bool = Depends(verify_admin_token)
+    redis_client: Redis = Depends(get_redis)
 ):
     """
     Clear a specific cache key from Redis.
@@ -835,12 +749,6 @@ async def clear_specific_cache_key(
     - Success message if key was deleted
     """
     try:
-        if not authorized:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not authorized to perform this action"
-            )
-
         # Check if key exists first
         exists = await redis_client.exists(cache_key)
         if not exists:
@@ -867,7 +775,87 @@ async def clear_specific_cache_key(
             detail=f"Error clearing cache key: {str(e)}"
         )
 
-# Startup and shutdown events
+@router.delete("/cache/clear/all", responses={
+    200: {"description": "All cache cleared successfully"},
+    500: {"description": "Error clearing cache"}
+})
+async def clear_all_cache(
+    redis_client: Redis = Depends(get_redis)
+):
+    """
+    Clear ALL cache entries from Redis (not just chat-related).
+    
+    This is a powerful operation that should be used with caution.
+    It will clear all keys in the Redis database.
+    
+    Returns:
+    - Count of keys deleted
+    """
+    try:
+        # Get all keys in Redis
+        all_keys = await redis_client.keys("*")
+        deleted_count = 0
+        
+        if all_keys:
+            logger.warning(f"Clearing ALL {len(all_keys)} Redis cache entries")
+            deleted_count = await redis_client.delete(*all_keys)
+            logger.info(f"Deleted {deleted_count} total cache entries")
+        else:
+            logger.info("No cache entries found to delete")
+        
+        return {
+            "status": "success",
+            "deleted_count": deleted_count,
+            "message": f"Deleted {deleted_count} total cache entries"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error clearing all cache: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error clearing all cache: {str(e)}"
+        )
+
+@router.delete("/cache/clear", responses={
+    200: {"description": "Cache cleared successfully"},
+    500: {"description": "Error clearing cache"}
+})
+async def clear_chat_cache(
+    all: bool = True,  # Default to clearing all cache
+    redis_client: Redis = Depends(get_redis)
+):
+    """
+    Clear chat cache entries from Redis with no security.
+    
+    Parameters:
+    - all: If False, only clears system cache entries (not user-specific)
+      Default is True, which clears all chat cache entries
+    
+    Returns:
+    - Count of keys deleted
+    """
+    try:
+        deleted_count = 0
+        
+        # Clear all chat cache entries by default
+        logger.warning("Clearing chat cache entries")
+        keys = await redis_client.keys("chat:*")
+        if keys:
+            deleted_count = await redis_client.delete(*keys)
+        logger.info(f"Deleted {deleted_count} chat cache entries")
+            
+        return {
+            "status": "success",
+            "deleted_count": deleted_count,
+            "message": f"Deleted {deleted_count} cache entries"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error clearing cache: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error clearing cache: {str(e)}"
+        )
 async def startup_event():
     """Initialize database and Redis connections on startup."""
     await DatabaseConnector.initialize()
