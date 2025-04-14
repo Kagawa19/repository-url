@@ -37,37 +37,48 @@ class MessageHandler:
     def _clean_text_for_user(text: str) -> str:
         """
         Enhanced text cleaning for user-facing responses in Markdown format.
-        Removes technical artifacts, properly formats Markdown, and 
-        improves language quality and readability.
+        Removes technical artifacts, properly formats Markdown, and improves readability.
         Args:
-            text (str): The input text that may contain technical artifacts or raw markdown
+            text (str): The input text that may contain technical artifacts or raw Markdown
         Returns:
             str: Clean, well-formatted text suitable for user display with improved readability
         """
         if not text:
             return ""
-        
-        # Remove any JSON metadata that might have slipped through
+
+        # Remove JSON metadata that might have slipped through
         metadata_pattern = r'^\s*\{\"is_metadata\"\s*:\s*true.*?\}\s*'
         text = re.sub(metadata_pattern, '', text)
-        
+
         # Handle publication lists
         if re.search(r'\d+\.\s+Title:', text):
             # Format numbered lists as Markdown
             text = re.sub(r'(\d+)\.\s+(.+)', r'\1. \2', text)
-        
+
         # Handle bold text
         text = re.sub(r'\*\*(.+?)\*\*', r'**\1**', text)
-        
+
         # Handle headers
         text = re.sub(r'#\s+(.+)', r'# \1', text)
-        
+
         # Handle bullet points
         text = re.sub(r'\*\s+(.+)', r'- \1', text)
-        
+
+        # Fix spaces in DOI links
+        text = re.sub(
+            r'(https?://doi\.org/\s*)([\d\.]+(/\s*)?[^\s\)]*)',
+            lambda m: m.group(1).replace(' ', '') + m.group(2).replace(' ', ''),
+            text
+        )
+        text = re.sub(
+            r'(10\.\s*\d+\s*/\s*[^\s\)]+)',
+            lambda m: m.group(1).replace(' ', ''),
+            text
+        )
+
         # Ensure proper spacing for readability
         text = re.sub(r'\s+', ' ', text).strip()
-        
+
         return text
 
     def _format_markdown_headers(self, text: str) -> str:
@@ -96,7 +107,6 @@ class MessageHandler:
         metadata = None
         in_publication_list = False
         publication_buffer = ""
-        # Track intent information for content-aware enhancements
         detected_intent = None
         is_first_chunk = True
         transition_inserted = False
@@ -105,48 +115,32 @@ class MessageHandler:
             async for chunk in response_stream:
                 # Capture metadata with improved detection
                 if isinstance(chunk, dict) and chunk.get('is_metadata'):
-                    # Store metadata both in method instance and for internal use
                     metadata = chunk.get('metadata', chunk)
                     self.metadata = metadata
-                    # Extract intent information if available for content-aware styling
                     if metadata and 'intent' in metadata:
                         detected_intent = metadata.get('intent')
                         logger.debug(f"Detected intent for response styling: {detected_intent}")
-                    # Log metadata capture but don't yield it to user
                     logger.debug(f"Captured metadata: {json.dumps(metadata, default=str) if metadata else 'None'}")
                     continue
 
-                # Extract text from chunk with enhanced format handling
+                # Extract text from chunk
                 if isinstance(chunk, dict):
-                    if 'chunk' in chunk:
-                        text = chunk['chunk']
-                    elif 'content' in chunk:
-                        text = chunk['content']
-                    elif 'text' in chunk:
-                        text = chunk['text']
-                    else:
-                        # Try to stringify the dict as fallback
-                        text = str(chunk)
+                    text = chunk.get('chunk', chunk.get('content', chunk.get('text', '')))
                 elif isinstance(chunk, (str, bytes)):
                     text = chunk.decode('utf8') if isinstance(chunk, bytes) else chunk
                 elif hasattr(chunk, 'content'):
-                    # Handle AIMessage or similar objects
                     text = chunk.content
                 elif hasattr(chunk, 'text'):
-                    # Handle objects with text attribute
                     text = chunk.text
                 else:
-                    # Skip unknown formats
                     logger.debug(f"Skipping unknown chunk format: {type(chunk)}")
                     continue
 
-                # Skip empty chunks
                 if not text.strip():
                     continue
 
                 # Add natural language improvements for first chunk based on intent
                 if is_first_chunk and detected_intent and not transition_inserted:
-                    # Prepare intent-specific natural introductions
                     intro_text = ""
                     if detected_intent == "publication":
                         intro_prefix = self._get_random_intro("publication")
@@ -160,7 +154,6 @@ class MessageHandler:
                         intro_prefix = self._get_random_intro("navigation")
                         if intro_prefix and not text.startswith(intro_prefix):
                             intro_text = intro_prefix
-                    # Insert introduction if we have one
                     if intro_text:
                         yield intro_text
                         transition_inserted = True
@@ -172,7 +165,6 @@ class MessageHandler:
                 if re.search(r'\d+\.\s+Title:', buffer) or re.search(r'Title:', buffer):
                     if not in_publication_list:
                         in_publication_list = True
-                        # Add natural transition for publication lists if not already done
                         if not transition_inserted and detected_intent == "publication":
                             transition = self._get_random_transition("publication_list")
                             if transition:
@@ -183,78 +175,56 @@ class MessageHandler:
                         continue
                     else:
                         publication_buffer += text
-                        # Check if we have a complete publication entry or multiple entries
                         if re.search(r'\n\d+\.', publication_buffer):
-                            # Multiple entries detected, try to split
                             entries = re.split(r'(?=\n\d+\.\s+Title:)', publication_buffer)
                             if len(entries) > 1:
-                                # Process all but the last entry
                                 for entry in entries[:-1]:
                                     if entry.strip():
-                                        # Apply enhanced text cleaning for publication entries
                                         cleaned_entry = self._clean_text_for_user(entry)
                                         yield cleaned_entry
-                                        # Add transition between publications if appropriate
                                         if detected_intent == "publication" and random.random() < 0.5:
                                             yield self._get_random_transition("between_publications")
-                                # Keep the last entry in the buffer
                                 publication_buffer = entries[-1]
-                        # Check if entry appears complete (has multiple fields and ending line)
                         elif len(re.findall(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', publication_buffer)) >= 3 and '\n' in publication_buffer:
-                            # This looks like a complete entry
-                            # Apply enhanced text cleaning
                             cleaned_entry = self._clean_text_for_user(publication_buffer)
                             yield cleaned_entry
                             publication_buffer = ""
                             in_publication_list = False
-                            # Add transition after publication if appropriate
                             if detected_intent == "publication" and random.random() < 0.3:
                                 yield self._get_random_transition("after_publication")
                         continue
 
-                # If we were in a publication list but now we're not, yield the publication buffer
                 if in_publication_list and not re.search(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', text):
                     if publication_buffer.strip():
-                        # Apply enhanced text cleaning
                         cleaned_entry = self._clean_text_for_user(publication_buffer)
                         yield cleaned_entry
-                        # Add appropriate closing transition
                         if detected_intent == "publication":
                             yield self._get_random_transition("after_publications")
                     publication_buffer = ""
                     in_publication_list = False
 
-                # Normal sentence processing for non-publication content
                 if not in_publication_list:
-                    # Check if buffer contains complete sentences
                     sentences = re.split(r'(?<=[.!?])\s+', buffer)
                     if len(sentences) > 1:
-                        # Process all but the last sentence
                         for sentence in sentences[:-1]:
                             if sentence.strip():
-                                # Apply enhanced text cleaning
                                 cleaned_sentence = self._clean_text_for_user(sentence)
                                 yield cleaned_sentence
-                        # Keep the last sentence in the buffer
                         buffer = sentences[-1]
 
-            # Handle any remaining text in buffers
             if publication_buffer.strip():
                 cleaned_text = self._clean_text_for_user(publication_buffer)
                 yield cleaned_text
-                # Add appropriate closing for publication list
                 if detected_intent == "publication":
                     yield self._get_random_transition("publication_conclusion")
             elif buffer.strip():
                 cleaned_text = self._clean_text_for_user(buffer)
                 yield cleaned_text
-                # Add appropriate closing based on intent
                 if detected_intent:
                     yield self._get_random_transition(f"{detected_intent}_conclusion")
 
         except Exception as e:
             logger.error(f"Error processing stream response: {e}", exc_info=True)
-            # Yield any remaining buffer to avoid losing content
             if publication_buffer.strip():
                 yield self._clean_text_for_user(publication_buffer)
             elif buffer.strip():
