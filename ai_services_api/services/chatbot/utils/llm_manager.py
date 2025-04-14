@@ -205,14 +205,105 @@ class GeminiLLMManager:
                 self.state = "closed"
             self.failures = 0
 
+
+    def _safe_load_embedding(self, embedding_data):
+        """
+        Safely load embedding data with robust error handling for different formats.
+        Handles binary data, JSON strings, and different encodings.
+        
+        Args:
+            embedding_data: Raw embedding data that could be in various formats
+            
+        Returns:
+            numpy.ndarray: The loaded embedding vector or None if loading fails
+        """
+        if embedding_data is None:
+            return None
+            
+        try:
+            # Case 1: Already a numpy array
+            if isinstance(embedding_data, np.ndarray):
+                return embedding_data
+                
+            # Case 2: Binary data (most likely case)
+            if isinstance(embedding_data, bytes):
+                try:
+                    # First try: Interpret as numpy binary data
+                    return np.frombuffer(embedding_data, dtype=np.float32)
+                except Exception as binary_err:
+                    logger.debug(f"Could not interpret as binary float array: {binary_err}")
+                    
+                    # Second try: Decode as JSON
+                    try:
+                        # Try different encodings for JSON decoding
+                        for encoding in ['utf-8', 'latin-1', 'cp1252', 'ascii']:
+                            try:
+                                decoded = embedding_data.decode(encoding)
+                                embedding_json = json.loads(decoded)
+                                return np.array(embedding_json)
+                            except UnicodeDecodeError:
+                                # Try next encoding
+                                continue
+                            except json.JSONDecodeError:
+                                # Valid encoding but not valid JSON, try next
+                                continue
+                    except Exception as json_err:
+                        logger.debug(f"Failed to decode as JSON: {json_err}")
+                    
+                    # Last resort: Force decode with errors='replace'
+                    try:
+                        decoded = embedding_data.decode('utf-8', errors='replace')
+                        cleaned = re.sub(r'[^\[\]\d\s,.-]', '', decoded)  # Keep only valid characters
+                        if cleaned.startswith('[') and cleaned.endswith(']'):
+                            array_data = json.loads(cleaned)
+                            return np.array(array_data)
+                    except Exception as err:
+                        logger.warning(f"All embedding decoding methods failed: {err}")
+                        return None
+            
+            # Case 3: JSON string
+            if isinstance(embedding_data, str):
+                # Try to parse as JSON
+                try:
+                    embedding_json = json.loads(embedding_data)
+                    return np.array(embedding_json)
+                except json.JSONDecodeError as json_err:
+                    logger.warning(f"Failed to parse embedding string as JSON: {json_err}")
+                    return None
+                    
+            # Case 4: List or other iterable
+            if hasattr(embedding_data, '__iter__'):
+                return np.array(embedding_data)
+                
+            # Unhandled case
+            logger.warning(f"Unhandled embedding data type: {type(embedding_data)}")
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Error loading embedding: {e}")
+            return None
+
     
     
     async def detect_intent(self, message: str) -> Dict[str, Any]:
         """
         Enhanced intent detection using multiple fallback strategies.
-        Now includes embedding model fallback and better error handling.
+        Now includes improved list detection and better handling of expert requests.
         """
         logger.info(f"Detecting intent for message: {message}")
+        
+        # ADDED: Check for explicit list queries with improved detection
+        is_list_request = bool(re.search(r'\b(list|show|all|many)\b.*?\b(expert|researcher|scientist|publication|paper|article|resource)', message.lower()))
+        
+        # ADDED: Extract the entity type being listed
+        list_entity = None
+        if is_list_request:
+            if re.search(r'\b(expert|researcher|scientist)\b', message.lower()):
+                list_entity = "expert"
+                logger.info("Detected expert list request")
+            elif re.search(r'\b(publication|paper|article|research)\b', message.lower()):
+                list_entity = "publication"
+                logger.info("Detected publication list request")
         
         try:
             # First try with embeddings if available
@@ -220,12 +311,43 @@ class GeminiLLMManager:
                 try:
                     intent_result = await self._detect_intent_with_embeddings(message)
                     logger.info(f"Embedding intent detection result: {intent_result['intent']} with confidence {intent_result['confidence']}")
+                    
+                    # ADDED: Adjust confidence for list requests
+                    if is_list_request and list_entity:
+                        if list_entity == "expert" and intent_result['intent'] != QueryIntent.EXPERT:
+                            # Override with EXPERT intent for expert lists
+                            logger.info(f"Overriding detected intent for expert list request")
+                            intent_result['intent'] = QueryIntent.EXPERT
+                            intent_result['confidence'] = max(intent_result['confidence'], 0.8)
+                        elif list_entity == "publication" and intent_result['intent'] != QueryIntent.PUBLICATION:
+                            # Override with PUBLICATION intent for publication lists
+                            logger.info(f"Overriding detected intent for publication list request")
+                            intent_result['intent'] = QueryIntent.PUBLICATION
+                            intent_result['confidence'] = max(intent_result['confidence'], 0.8)
+                        
+                        # Add list_request flag
+                        intent_result['is_list_request'] = True
+                        
                     return intent_result
                 except Exception as e:
                     logger.warning(f"Embedding intent detection failed: {e}")
                         
             # Fallback to keyword matching
             keyword_result = self._detect_intent_with_keywords(message)
+            
+            # ADDED: Adjust confidence for list requests in keyword detection
+            if is_list_request and list_entity:
+                if list_entity == "expert":
+                    # Override with EXPERT intent for expert lists
+                    keyword_result['intent'] = QueryIntent.EXPERT
+                    keyword_result['confidence'] = max(keyword_result['confidence'], 0.8)
+                    keyword_result['is_list_request'] = True
+                elif list_entity == "publication":
+                    # Override with PUBLICATION intent for publication lists
+                    keyword_result['intent'] = QueryIntent.PUBLICATION
+                    keyword_result['confidence'] = max(keyword_result['confidence'], 0.8)
+                    keyword_result['is_list_request'] = True
+            
             if keyword_result['confidence'] > 0.7:
                 logger.info(f"Keyword intent detection result: {keyword_result['intent']} with confidence {keyword_result['confidence']}")
                 return keyword_result
@@ -234,6 +356,24 @@ class GeminiLLMManager:
             try:
                 if not await self.circuit_breaker.check():
                     logger.warning("Circuit breaker open, using default GENERAL intent")
+                    
+                    # ADDED: Even with circuit breaker, respect list detection
+                    if is_list_request and list_entity:
+                        if list_entity == "expert":
+                            return {
+                                'intent': QueryIntent.EXPERT,
+                                'confidence': 0.8,
+                                'clarification': None,
+                                'is_list_request': True
+                            }
+                        elif list_entity == "publication":
+                            return {
+                                'intent': QueryIntent.PUBLICATION,
+                                'confidence': 0.8,
+                                'clarification': None,
+                                'is_list_request': True
+                            }
+                    
                     return {
                         'intent': QueryIntent.GENERAL,
                         'confidence': 0.0,
@@ -287,11 +427,39 @@ class GeminiLLMManager:
                     if 'expert_name' in result and result['expert_name']:
                         intent_result['expert_name'] = result['expert_name']
                     
+                    # ADDED: Adjust for list requests detected by pattern
+                    if is_list_request and list_entity:
+                        if list_entity == "expert":
+                            intent_result['intent'] = QueryIntent.EXPERT
+                            intent_result['confidence'] = max(intent_result['confidence'], 0.8)
+                        elif list_entity == "publication":
+                            intent_result['intent'] = QueryIntent.PUBLICATION
+                            intent_result['confidence'] = max(intent_result['confidence'], 0.8)
+                        intent_result['is_list_request'] = True
+                    
                     logger.info(f"Gemini intent detection result: {intent_result['intent']} with confidence {intent_result['confidence']}")
                     return intent_result
                 else:
                     # Handle case where JSON could not be extracted properly
                     logger.warning(f"Could not extract valid JSON from response: {content}")
+                    
+                    # ADDED: Default to appropriate intent for list requests even with JSON parsing error
+                    if is_list_request and list_entity:
+                        if list_entity == "expert":
+                            return {
+                                'intent': QueryIntent.EXPERT,
+                                'confidence': 0.8,
+                                'clarification': None,
+                                'is_list_request': True
+                            }
+                        elif list_entity == "publication":
+                            return {
+                                'intent': QueryIntent.PUBLICATION,
+                                'confidence': 0.8,
+                                'clarification': None,
+                                'is_list_request': True
+                            }
+                            
                     return {
                         'intent': QueryIntent.GENERAL,
                         'confidence': 0.0,
@@ -302,6 +470,24 @@ class GeminiLLMManager:
                 logger.error(f"Gemini intent detection failed: {e}")
                 if "429" in str(e):
                     await self._handle_rate_limit()
+                
+                # ADDED: Try to maintain list intent even with API errors
+                if is_list_request and list_entity:
+                    if list_entity == "expert":
+                        return {
+                            'intent': QueryIntent.EXPERT,
+                            'confidence': 0.8,
+                            'clarification': None,
+                            'is_list_request': True
+                        }
+                    elif list_entity == "publication":
+                        return {
+                            'intent': QueryIntent.PUBLICATION,
+                            'confidence': 0.8,
+                            'clarification': None,
+                            'is_list_request': True
+                        }
+                
                 # Ensure we have a return in this except block
                 return {
                     'intent': QueryIntent.GENERAL,
@@ -338,12 +524,32 @@ class GeminiLLMManager:
             logger.error(f"Failed to initialize embeddings: {e}")
             self.embedding_model = None
         
+    
+            
+    def semantic_search(self, query: str, embeddings: List[np.ndarray], texts: List[str], top_k: int = 3) -> List[str]:
+        try:
+            query_embedding = self.embedding_model.encode(query)
+            similarities = cos_sim(query_embedding, embeddings).numpy().flatten()
+            top_indices = np.argsort(similarities)[-top_k:][::-1]
+            return [texts[i] for i in top_indices]
+        except Exception as e:
+            logger.error(f"Error in semantic search: {e}")
+            return []
+        
     async def get_experts(self, query: str, limit: int = 3) -> Tuple[List[Dict], Optional[str]]:
         """
         Enhanced method to fetch experts by name/query with improved matching and richer results.
         Includes expertise matching and publication information.
         """
         try:
+            # Check if this is a "list experts" request - ADDED
+            is_list_request = bool(re.search(r'\b(list|show|all|many)\b.*?\b(expert|researcher|scientist|specialist)', query.lower()))
+            
+            # Adjust limit for list requests - ADDED
+            if is_list_request and limit < O:
+                limit = 5  # Increase limit for explicit list requests
+                logger.info(f"Detected list request, increased limit to {limit}")
+
             if not self.redis_manager or not self.redis_manager.redis_text:
                 return [], "Redis manager not available"
                 
@@ -411,7 +617,8 @@ class GeminiLLMManager:
             for term in query_terms:
                 # Skip very short terms and common words
                 if len(term) <= 2 or term in ['is', 'there', 'an', 'expert', 'who', 'the', 'a', 'of', 'and', 
-                                            'what', 'where', 'when', 'how', 'why', 'which', 'this', 'that']:
+                                            'what', 'where', 'when', 'how', 'why', 'which', 'this', 'that',
+                                            'list', 'show', 'all', 'many']:  # ADDED: Skip request indicators
                     continue
                     
                 # Categorize terms (could be in multiple categories)
@@ -443,25 +650,32 @@ class GeminiLLMManager:
                     match_score = 0.0
                     matched_criteria = []
                     
+                    # MODIFIED: For list requests, give all experts a base score
+                    if is_list_request:
+                        match_score = 0.3  # Base score for list requests
+                        matched_criteria.append("Included in expert list")
+                    
                     # 1. NAME MATCHING - check first name, last name, middle name
                     expert_first_name = expert.get('first_name', '').lower()
                     expert_last_name = expert.get('last_name', '').lower()
                     expert_middle_name = expert.get('middle_name', '').lower()
                     full_name = f"{expert_first_name} {expert_middle_name} {expert_last_name}".strip()
                     
-                    for term in name_terms:
-                        if term in expert_first_name:
-                            match_score += 0.8
-                            matched_criteria.append(f"First name contains '{term}'")
-                        elif term in expert_last_name:
-                            match_score += 0.9
-                            matched_criteria.append(f"Last name contains '{term}'")
-                        elif term in expert_middle_name:
-                            match_score += 0.7
-                            matched_criteria.append(f"Middle name contains '{term}'")
-                        elif term in full_name:
-                            match_score += 0.6
-                            matched_criteria.append(f"Full name contains '{term}'")
+                    # If no specific terms beyond "list experts", skip detailed matching
+                    if name_terms or not is_list_request:
+                        for term in name_terms:
+                            if term in expert_first_name:
+                                match_score += 0.8
+                                matched_criteria.append(f"First name contains '{term}'")
+                            elif term in expert_last_name:
+                                match_score += 0.9
+                                matched_criteria.append(f"Last name contains '{term}'")
+                            elif term in expert_middle_name:
+                                match_score += 0.7
+                                matched_criteria.append(f"Middle name contains '{term}'")
+                            elif term in full_name:
+                                match_score += 0.6
+                                matched_criteria.append(f"Full name contains '{term}'")
                     
                     # 2. EXPERTISE MATCHING - check expertise, domains, fields, skills
                     if expertise_terms:
@@ -526,8 +740,11 @@ class GeminiLLMManager:
                                 match_score += 0.4
                                 matched_criteria.append(f"Biography contains '{term}'")
                     
-                    # If we have any match, prepare the expert data
-                    if match_score > 0:
+                    # MODIFIED: Adjust threshold based on request type
+                    # If we have any match OR this is a list request, prepare the expert data
+                    match_threshold = 0.1 if is_list_request else 0.3  # Lower threshold for list requests
+                    
+                    if match_score > match_threshold:
                         logger.info(f"Expert {expert_id} matched with score {match_score:.2f}: {', '.join(matched_criteria[:3])}")
                         
                         # Get embedding from Redis
@@ -616,10 +833,40 @@ class GeminiLLMManager:
 
             logger.info(f"Found {len(experts)} matching experts for query: {query}")
             
+            # MODIFIED: For list requests with no results, return top experts instead of empty list
+            if is_list_request and len(experts) == 0:
+                logger.info("No matches for list request - returning top experts instead")
+                # Process first 5-10 experts without filtering
+                count = 0
+                for key in keys[:10]:  # Try first 10 keys
+                    if count >= limit:
+                        break
+                    
+                    try:
+                        expert = {}
+                        if is_async_redis:
+                            if hasattr(self.redis_manager.redis_text, 'ahgetall'):
+                                expert = await self.redis_manager.redis_text.ahgetall(key)
+                            else:
+                                expert = await self.redis_manager.redis_text.hgetall(key)
+                        else:
+                            expert = self.redis_manager.redis_text.hgetall(key)
+                        
+                        if expert:
+                            expert_id = expert.get('id') or key.split(':')[-1]
+                            expert['match_score'] = 0.5  # Default score
+                            expert['matched_criteria'] = ["Top expert"]
+                            expert['publications'] = []
+                            experts.append(expert)
+                            count += 1
+                    except Exception as e:
+                        logger.warning(f"Error processing fallback expert: {e}")
+                        continue
+            
             # If we have too many matches, filter and rank them
             if len(experts) > limit:
                 # Rank experts by multiple criteria
-                if query_embedding is not None:
+                if query_embedding is not None and not is_list_request:  # Skip complex ranking for list requests
                     try:
                         # For experts with embeddings, calculate semantic similarity
                         experts_with_embeddings = [e for e in experts if 'embedding' in e and e['embedding'] is not None]
@@ -655,18 +902,6 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error fetching experts: {e}")
             return [], str(e)
-            
-    def semantic_search(self, query: str, embeddings: List[np.ndarray], texts: List[str], top_k: int = 3) -> List[str]:
-        try:
-            query_embedding = self.embedding_model.encode(query)
-            similarities = cos_sim(query_embedding, embeddings).numpy().flatten()
-            top_indices = np.argsort(similarities)[-top_k:][::-1]
-            return [texts[i] for i in top_indices]
-        except Exception as e:
-            logger.error(f"Error in semantic search: {e}")
-            return []
-        
-    
             
     def _create_tailored_prompt(self, intent, context_type: str, message_style: str) -> str:
         """
@@ -847,6 +1082,40 @@ class GeminiLLMManager:
         else:
             return "conversational"
         
+    def safely_decode_binary_data(self, binary_data, default_encoding='utf-8'):
+        """
+        Safely decode binary data using multiple encoding attempts.
+        Addresses the 'utf-8' codec can't decode byte issues.
+        
+        Args:
+            binary_data (bytes): The binary data to decode
+            default_encoding (str): The default encoding to try first
+            
+        Returns:
+            str: The decoded string or None if decoding fails
+        """
+        if not binary_data:
+            return None
+            
+        if not isinstance(binary_data, bytes):
+            return str(binary_data)
+        
+        # Try multiple encodings in order of likelihood
+        encodings = [default_encoding, 'latin-1', 'cp1252', 'ascii']
+        
+        for encoding in encodings:
+            try:
+                return binary_data.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        
+        # If all explicit encodings fail, use replace mode as last resort
+        try:
+            return binary_data.decode('latin-1', errors='replace')
+        except Exception as e:
+            logger.warning(f"All decoding attempts failed: {e}")
+            return None
+        
     async def generate_async_response(self, message: str, user_interests: str = "") -> AsyncGenerator[str, None]:
         """
         Generates a response with enhanced prompting strategies tailored to detected intent,
@@ -854,21 +1123,27 @@ class GeminiLLMManager:
         and personalization based on user interests.
         """
         try:
-            # Step 1: Intent Detection (unchanged)
+            # Step 1: Intent Detection 
             intent_result = await self.detect_intent(message)
             intent = intent_result['intent']
             confidence = intent_result.get('confidence', 0.0)
             
-            # Determine conversation style based on message analysis (unchanged)
+            # ADDED: Check if this is a list request
+            is_list_request = intent_result.get('is_list_request', False)
+            
+            # Determine conversation style based on message analysis
             message_style = self._analyze_message_style(message)
             
-            # Step 2: Context preparation based on intent (unchanged)
+            # Step 2: Context preparation based on intent
             context = ""
             context_type = "general"
             
-            # Handle EXPERT Intent (unchanged)
+            # Handle EXPERT Intent
             if intent == QueryIntent.EXPERT:
-                experts, error = await self.get_experts(message, limit=5)
+                # MODIFIED: Adjust limit for list requests
+                expert_limit = 5 if is_list_request else 3
+                experts, error = await self.get_experts(message, limit=expert_limit)
+                
                 if experts:
                     # Check if we have a valid embedding model
                     if self.embedding_model:
@@ -876,13 +1151,22 @@ class GeminiLLMManager:
                             # Get query embedding
                             query_embedding = self.embedding_model.encode(message)
                             
-                            # Sort experts by similarity when both embeddings exist
-                            ranked_experts = sorted(
-                                experts,
-                                key=lambda e: cos_sim(query_embedding, e['embedding'])[0][0] 
-                                if 'embedding' in e and e['embedding'] is not None else 0,
-                                reverse=True
-                            )
+                            # ADDED: Only sort by similarity for non-list requests
+                            if not is_list_request:
+                                # Sort experts by similarity when both embeddings exist
+                                ranked_experts = sorted(
+                                    experts,
+                                    key=lambda e: cos_sim(query_embedding, e['embedding'])[0][0] 
+                                    if 'embedding' in e and e['embedding'] is not None else 0,
+                                    reverse=True
+                                )
+                            else:
+                                # For list requests, use original order or rank by match score
+                                ranked_experts = sorted(
+                                    experts,
+                                    key=lambda e: e.get('match_score', 0),
+                                    reverse=True
+                                )
                         except Exception as e:
                             logger.warning(f"Error ranking experts: {e}")
                             ranked_experts = experts  # Fall back to original order
@@ -898,7 +1182,9 @@ class GeminiLLMManager:
             
             # Handle PUBLICATION Intent (unchanged)
             elif intent == QueryIntent.PUBLICATION:
-                publications, error = await self.get_publications(message, limit=3)
+                # MODIFIED: Adjust limit for list requests
+                pub_limit = 5 if is_list_request else 3
+                publications, error = await self.get_publications(message, limit=pub_limit)
                 if publications:
                     context = self.format_publication_context(publications)
                     context_type = "publication"
@@ -916,14 +1202,22 @@ class GeminiLLMManager:
                 context = "How can I assist you with APHRC research today?"
                 context_type = "general"
             
-            # Step 3: Stream Metadata (unchanged)
-            yield json.dumps({'is_metadata': True, 'metadata': {'intent': intent.value, 'style': message_style}})
+            # Step 3: Stream Metadata
+            yield json.dumps({'is_metadata': True, 'metadata': {'intent': intent.value, 'style': message_style, 'is_list_request': is_list_request}})
             
             # Step 4: Create tailored prompt with tone, style guidance, and user interests
-            system_message = self._create_tailored_prompt(intent, context_type, message_style, user_interests)
+            # MODIFIED: Pass is_list_request to the prompt creation method
+            system_message = self._create_tailored_prompt(intent, context_type, message_style, user_interests, is_list_request)
             
-            # Step 5: Prepare the full context with system guidance and user query (unchanged)
+            # Step 5: Prepare the full context with system guidance and user query
             full_prompt = f"{system_message}\n\nContext:\n{context}\n\nUser Query: {message}"
+            
+            # ADDED: For list requests, add specific instructions
+            if is_list_request:
+                if intent == QueryIntent.EXPERT:
+                    full_prompt += "\n\nThis is a request for a LIST of experts. Please format your response as a clear, numbered list with concise details about each expert."
+                elif intent == QueryIntent.PUBLICATION:
+                    full_prompt += "\n\nThis is a request for a LIST of publications. Please format your response as a clear, numbered list with concise details about each publication."
             
             # Step 6: Stream Enhanced Response from Gemini (unchanged)
             model = self._setup_gemini()
@@ -1496,6 +1790,8 @@ class GeminiLLMManager:
         self._rate_limited = False
         logger.info(f"Rate limit cooldown expired after {seconds} seconds")
 
+    
+        
     def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
         """
         Format expert information into a rich, conversational presentation with 
@@ -1507,10 +1803,15 @@ class GeminiLLMManager:
         Returns:
             Formatted context string with engaging expert presentations
         """
+        # UNCHANGED: Handle empty experts case
         if not experts:
             return "I couldn't find any expert information on this topic. Would you like me to help you search for something else?"
         
+        # MODIFIED: Detect if this is likely a list request based on number of experts
+        is_list_request = len(experts) >= 3
+        
         # Create engaging introduction based on number of experts found
+        # MODIFIED: More robust introduction handling
         if len(experts) == 1:
             context_parts = [f"I found an APHRC expert who specializes in this area:"]
         elif len(experts) == 2:
@@ -1520,7 +1821,7 @@ class GeminiLLMManager:
         else:
             context_parts = [f"I've identified several APHRC experts in this area. Here are the most relevant ones:"]
         
-        # Add transitions between experts
+        # UNCHANGED: Add transitions between experts
         transitions = [
             "",  # No transition for first expert
             "Another expert in this field is ",
@@ -1531,83 +1832,148 @@ class GeminiLLMManager:
             "The research team also includes "
         ]
         
-        # Build expert information with better narrative flow
+        # MODIFIED: Improved expert information processing with better error handling
         for idx, expert in enumerate(experts):
-            full_name = f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip()
+            try:
+                # Extract name components with fallbacks for missing data
+                first_name = expert.get('first_name', '').strip()
+                last_name = expert.get('last_name', '').strip()
+                
+                # Skip if no name available at all
+                if not first_name and not last_name:
+                    logger.warning(f"Skipping expert at index {idx} due to missing name")
+                    continue
+                    
+                full_name = f"{first_name} {last_name}".strip()
+                
+                # Create expert entry with appropriate transition for position in list
+                if idx == 0:
+                    # First expert gets number and bold name
+                    expert_info = [f"{idx+1}. **{full_name}**"]
+                else:
+                    # Subsequent experts get a transition phrase
+                    transition = transitions[min(idx, len(transitions)-1)]
+                    expert_info = [f"{idx+1}. {transition}**{full_name}**"]
+                
+                # MODIFIED: Better handling of expertise areas with improved error handling
+                try:
+                    expertise = expert.get('expertise', [])
+                    if expertise:
+                        # Handle both string and JSON formats
+                        if isinstance(expertise, str):
+                            try:
+                                expertise = json.loads(expertise)
+                            except json.JSONDecodeError:
+                                # If not valid JSON, use as-is
+                                expertise = [expertise]
+                        
+                        # Format expertise based on type
+                        if isinstance(expertise, dict):
+                            # Extract values from dictionary
+                            expertise_values = []
+                            for key, values in expertise.items():
+                                if isinstance(values, list):
+                                    expertise_values.extend(values)
+                                else:
+                                    expertise_values.append(values)
+                            expertise = expertise_values
+                        
+                        # Ensure expertise is a list
+                        if not isinstance(expertise, list):
+                            expertise = [expertise]
+                        
+                        # Format expertise list
+                        if len(expertise) == 1:
+                            expert_info.append(f"* Specializes in {expertise[0]}")
+                        elif len(expertise) > 1:
+                            expertise_text = ", ".join(str(e) for e in expertise[:-1])
+                            expert_info.append(f"* Areas of expertise include {expertise_text}, and {expertise[-1]}")
+                except Exception as exp_err:
+                    logger.warning(f"Error formatting expertise for expert {full_name}: {exp_err}")
+                    # Fallback: Use generic expertise line if available
+                    if expert.get('expertise'):
+                        expert_info.append(f"* Has expertise in various research areas")
+                
+                # MODIFIED: Improved research interests handling
+                try:
+                    research_interests = expert.get('research_interests', [])
+                    if research_interests:
+                        # Handle string format
+                        if isinstance(research_interests, str):
+                            try:
+                                research_interests = json.loads(research_interests)
+                            except json.JSONDecodeError:
+                                research_interests = [research_interests]
+                        
+                        # Ensure it's a list
+                        if not isinstance(research_interests, list):
+                            research_interests = [research_interests]
+                        
+                        # Format research interests
+                        if research_interests and len(research_interests) > 0:
+                            if len(research_interests) == 1:
+                                expert_info.append(f"* Current research focuses on {research_interests[0]}")
+                            else:
+                                interests_text = ", ".join(str(ri) for ri in research_interests[:-1])
+                                expert_info.append(f"* Research interests span {interests_text}, and {research_interests[-1]}")
+                except Exception as ri_err:
+                    logger.warning(f"Error formatting research interests for expert {full_name}: {ri_err}")
+                
+                # UNCHANGED: Add position and department with natural phrasing
+                position = expert.get('position', '')
+                department = expert.get('department', '')
+                
+                if position and department:
+                    expert_info.append(f"* Serves as {position} in the {department}")
+                elif position:
+                    expert_info.append(f"* Current role: {position}")
+                elif department:
+                    expert_info.append(f"* Works in the {department}")
+                
+                # UNCHANGED: Add contact info with more helpful framing
+                email = expert.get('email', '')
+                if email:
+                    expert_info.append(f"* You can reach them at {email}")
+                
+                # MODIFIED: Improved publication handling with better error checks
+                try:
+                    publications = expert.get('publications', [])
+                    if publications:
+                        if len(publications) == 1:
+                            pub = publications[0]
+                            pub_title = pub.get('title', 'Untitled')
+                            expert_info.append(f"* Notable publication: \"{pub_title}\"")
+                        elif len(publications) > 1:
+                            expert_info.append("* Notable publications include:")
+                            for i, pub in enumerate(publications[:2]):  # Limit to 2 publications
+                                pub_title = pub.get('title', 'Untitled')
+                                pub_year = pub.get('publication_year', '')
+                                year_text = f" ({pub_year})" if pub_year else ""
+                                expert_info.append(f"  * \"{pub_title}\"{year_text}")
+                except Exception as pub_err:
+                    logger.warning(f"Error formatting publications for expert {full_name}: {pub_err}")
+                
+                # Combine all information about this expert with proper line breaks
+                context_parts.append("\n".join(expert_info))
             
-            # Skip if no name available
-            if not full_name:
+            except Exception as expert_err:
+                logger.error(f"Error processing expert at index {idx}: {expert_err}")
+                # Skip this expert but continue processing others
                 continue
-            
-            # Create expert entry with appropriate transition for position in list
-            if idx == 0:
-                # First expert gets number and bold name
-                expert_info = [f"{idx+1}. **{full_name}**"]
-            else:
-                # Subsequent experts get a transition phrase
-                transition = transitions[min(idx, len(transitions)-1)]
-                expert_info = [f"{idx+1}. {transition}**{full_name}**"]
-            
-            # Add expertise areas with improved formatting
-            expertise = expert.get('expertise', [])
-            if expertise:
-                if isinstance(expertise, list) and len(expertise) > 0:
-                    if len(expertise) == 1:
-                        expert_info.append(f"* Specializes in {expertise[0]}")
-                    else:
-                        expert_info.append(f"* Areas of expertise include {', '.join(expertise[:-1])}, and {expertise[-1]}")
-                elif expertise and not isinstance(expertise, list):
-                    expert_info.append(f"* Specializes in {expertise}")
-            
-            # Add research interests with better phrasing
-            research_interests = expert.get('research_interests', [])
-            if research_interests and isinstance(research_interests, list) and len(research_interests) > 0:
-                if len(research_interests) == 1:
-                    expert_info.append(f"* Current research focuses on {research_interests[0]}")
-                else:
-                    expert_info.append(f"* Research interests span {', '.join(research_interests[:-1])}, and {research_interests[-1]}")
-            
-            # Add position and department with more natural phrasing
-            position = expert.get('position', '')
-            department = expert.get('department', '')
-            
-            if position and department:
-                expert_info.append(f"* Serves as {position} in the {department}")
-            elif position:
-                expert_info.append(f"* Current role: {position}")
-            elif department:
-                expert_info.append(f"* Works in the {department}")
-            
-            # Add contact info with more helpful framing
-            email = expert.get('email', '')
-            if email:
-                expert_info.append(f"* You can reach them at {email}")
-            
-            # Add publications with better descriptions
-            publications = expert.get('publications', [])
-            if publications:
-                if len(publications) == 1:
-                    pub = publications[0]
-                    pub_title = pub.get('title', 'Untitled')
-                    expert_info.append(f"* Notable publication: \"{pub_title}\"")
-                else:
-                    expert_info.append("* Notable publications include:")
-                    for pub in publications[:2]:  # Limit to 2 publications
-                        pub_title = pub.get('title', 'Untitled')
-                        pub_year = pub.get('publication_year', '')
-                        year_text = f" ({pub_year})" if pub_year else ""
-                        expert_info.append(f"  * \"{pub_title}\"{year_text}")
-            
-            # Combine all information about this expert with proper line breaks
-            context_parts.append("\n".join(expert_info))
         
-        # Add helpful conclusion with follow-up invitation
+        # MODIFIED: Add appropriate conclusion based on expert count
         if len(experts) > 1:
-            context_parts.append("Would you like more detailed information about any of these experts or their research areas?")
+            # For list presentations, add more specific follow-up options
+            if is_list_request:
+                context_parts.append("Would you like more detailed information about any specific expert from this list? You can ask by name or area of expertise.")
+            else:
+                context_parts.append("Would you like more detailed information about any of these experts or their research areas?")
         else:
             context_parts.append("Would you like to know more about this expert's research or publications?")
         
+        # Join with double newlines for better readability
         return "\n\n".join(context_parts)
+
     def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
         Format publication information into a rich, conversational presentation with
