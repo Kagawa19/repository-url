@@ -1908,45 +1908,69 @@ class GeminiLLMManager:
 
         for idx, pub in enumerate(publications):
             try:
-                # Extract title
+                # Extract title - use strong formatting to match expert formatting style
                 title = pub.get('title', 'Untitled')
                 markdown_text += f"{idx + 1}. **{title}**\n\n"
 
-                # Add year
+                # Add year with consistent indentation and field formatting
                 pub_year = pub.get('publication_year', '')
                 if pub_year:
-                    markdown_text += f"   - **Published in:** {pub_year}\n\n"
+                    markdown_text += f"    - **Publication Year:** {pub_year}\n\n"
 
-                # Add authors
+                # Add authors with consistent indentation and field formatting
                 authors = pub.get('authors', [])
                 if authors:
+                    # Ensure authors is a list even if it's not already
+                    if not isinstance(authors, list):
+                        try:
+                            if isinstance(authors, str):
+                                # Try to parse JSON if it's a string
+                                import json
+                                authors = json.loads(authors)
+                                if not isinstance(authors, list):
+                                    authors = [authors]
+                            else:
+                                authors = [authors]
+                        except:
+                            authors = [str(authors)]
+                    
+                    # Format author list with proper length handling
                     if len(authors) > 3:
                         author_text = f"{', '.join(str(a) for a in authors[:2])} et al."
                     elif len(authors) == 2:
                         author_text = f"{authors[0]} and {authors[1]}"
                     else:
                         author_text = ', '.join(str(a) for a in authors)
-                    markdown_text += f"   - **Authors:** {author_text}\n\n"
+                    
+                    markdown_text += f"    - **Authors:** {author_text}\n\n"
 
-                # Add abstract
+                # Add abstract with consistent indentation, field formatting, and length management
                 abstract = pub.get('abstract', '')
                 if abstract:
+                    # Clean and format abstract text
+                    abstract = abstract.replace('\n', ' ').strip()
                     trimmed_abstract = abstract[:300] + "..." if len(abstract) > 300 else abstract
-                    markdown_text += f"   - **Abstract:** {trimmed_abstract}\n\n"
+                    markdown_text += f"    - **Abstract:** {trimmed_abstract}\n\n"
 
-                # Add DOI as a Markdown link
+                # Add DOI as a Markdown link with consistent indentation and field formatting
                 doi = pub.get('doi', '')
                 if doi:
+                    # Clean DOI and ensure proper formatting
+                    doi = doi.strip()
                     doi_url = f"https://doi.org/{doi}" if not doi.startswith('http') else doi
-                    markdown_text += f"   - **DOI:** [{doi}]({doi_url})\n"
+                    markdown_text += f"    - **DOI:** [{doi}]({doi_url})\n\n"
+                
+                # Add a separator between publications for visual clarity (except for the last one)
+                if idx < len(publications) - 1:
+                    markdown_text += "\n"
 
             except Exception as e:
                 logger.error(f"Error formatting publication {idx + 1}: {e}")
                 continue
 
         # Add closing message
-        markdown_text += "\n\nWould you like more detailed information about any of these publications or related research areas?"
-        return markdown_text             
+        markdown_text += "Would you like more detailed information about any of these publications or related research areas?"
+        return markdown_text       
    
     async def analyze_quality(self, message: str, response: str = "") -> Dict:
         """
