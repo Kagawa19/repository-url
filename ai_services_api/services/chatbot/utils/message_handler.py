@@ -168,15 +168,10 @@ class MessageHandler:
         # Return empty string if field not found
         return ""
 
-    
-    
-    
-  
-
     async def process_stream_response(self, response_stream):
         """
-        Process the streaming response with enhanced formatting for expert lists.
-        Detects and applies special formatting for expert and publication lists.
+        Process the streaming response with enhanced formatting for expert and publication lists.
+        Detects and applies special formatting for structured content.
         """
         buffer = ""
         metadata = None
@@ -188,9 +183,9 @@ class MessageHandler:
         structured_buffer = ""
         content_type = None
         
-        # ADDED: Variables for detecting expert lists
+        # Variables for detecting expert and publication lists
         is_expert_list = False
-        expert_list_detected = False
+        is_publication_list = False
         
         try:
             async for chunk in response_stream:
@@ -199,9 +194,11 @@ class MessageHandler:
                     self.metadata = metadata
                     if metadata and 'intent' in metadata:
                         detected_intent = metadata.get('intent')
-                        # Check if this is an expert query
+                        # Check if this is an expert or publication query
                         if detected_intent == 'expert':
                             is_expert_list = bool(metadata.get('is_list_request', False))
+                        elif detected_intent == 'publication':
+                            is_publication_list = bool(metadata.get('is_list_request', False))
                             
                     print(f"[INFO] Detected intent for response styling: {detected_intent}")
                     print(f"[INFO] Captured metadata: {json.dumps(metadata, default=str) if metadata else 'None'}")
@@ -229,7 +226,7 @@ class MessageHandler:
 
                 text = re.sub(r'^(\s*[}\]]+\s*)+', '', text)
 
-                # ADDED: Detect expert list content with improved patterns
+                # Detect expert list content with improved patterns
                 if not in_structured_content and (
                     # Numbered expert list (1. Expert Name)
                     re.search(r'\d+\.\s+\*\*[^*]+\*\*', text) or
@@ -250,12 +247,31 @@ class MessageHandler:
                         in_structured_content = True
                         content_type = "expert_list"
                         structured_buffer = buffer + text
-                        expert_list_detected = True
                         buffer = ""
                         print(f"[INFO] Entered expert list formatting mode")
                         continue
                 
-                # ADDED: Special handling for expert lists
+                # Detect publication list content
+                if not in_structured_content and (
+                    re.search(r'\d+\.\s+\*\*[^*]+\*\*', text) or
+                    re.search(r'# Publications|publications (on|about) APHRC|Publication List', text) or
+                    re.search(r'publications (related to|on the topic of)', text) or
+                    re.search(r'(paper|article|publication|research) (titled|published in|by)', text)
+                ):
+                    # Check if this is likely a publication list
+                    if (
+                        is_publication_list or
+                        re.search(r'publication|paper|article|research|study|doi', text.lower()) or
+                        detected_intent == 'publication'
+                    ):
+                        in_structured_content = True
+                        content_type = "publication_list"
+                        structured_buffer = buffer + text
+                        buffer = ""
+                        print(f"[INFO] Entered publication list formatting mode")
+                        continue
+                
+                # Process expert list
                 if in_structured_content and content_type == "expert_list":
                     structured_buffer += text
                     
@@ -263,15 +279,22 @@ class MessageHandler:
                     if re.search(r'Would you like more detailed|more information about|anything else', structured_buffer):
                         structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
                         
-                        # Format the expert list with rich formatting
+                        # Format the expert list with clean, consistent formatting
                         try:
-                            # Use the new rich expert formatting
-                            formatted_text = self._format_expert_list_rich(structured_buffer)
-                            print(f"[INFO] Yielding richly formatted expert list")
+                            # Extract expert information from the structured buffer
+                            expert_data = self._extract_experts_from_text(structured_buffer)
+                            if expert_data:
+                                # Use the new clean formatter
+                                formatted_text = self.format_expert_list_clean(expert_data)
+                            else:
+                                # Fall back to simpler formatting if extraction fails
+                                formatted_text = self._format_expert_list(structured_buffer)
+                                
+                            print(f"[INFO] Yielding formatted expert list")
                             yield formatted_text
                         except Exception as format_err:
-                            print(f"[ERROR] Error in rich expert formatting: {format_err}")
-                            # Fall back to basic formatting if rich formatting fails
+                            print(f"[ERROR] Error in expert formatting: {format_err}")
+                            # Fall back to basic formatting
                             formatted_text = self._format_expert_list(structured_buffer)
                             yield formatted_text
                             
@@ -281,19 +304,34 @@ class MessageHandler:
                         
                     continue
                 
-                # Process publication list (unchanged)
+                # Process publication list
                 if in_structured_content and content_type == "publication_list":
                     structured_buffer += text
                     if re.search(r'Would you like more detailed|Is there anything else', structured_buffer):
                         structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
-                        # Use the new dedicated method for formatting publications
-                        formatted_text = self._format_publication_list(structured_buffer)
-                        print(f"[INFO] Yielding formatted publication list")
-                        yield formatted_text
-
+                        
+                        try:
+                            # Extract publication information
+                            pub_data = self._extract_publications_from_text(structured_buffer)
+                            if pub_data:
+                                # Use the new clean formatter
+                                formatted_text = self.format_publication_list_clean(pub_data)
+                            else:
+                                # Fall back to original formatter
+                                formatted_text = self._format_publication_list(structured_buffer)
+                                
+                            print(f"[INFO] Yielding formatted publication list")
+                            yield formatted_text
+                        except Exception as pub_err:
+                            print(f"[ERROR] Error in publication formatting: {pub_err}")
+                            # Fall back to original formatter
+                            formatted_text = self._format_publication_list(structured_buffer)
+                            yield formatted_text
+                            
                         in_structured_content = False
                         structured_buffer = ""
                         content_type = None
+                        
                     continue
 
                 buffer += text
@@ -314,22 +352,32 @@ class MessageHandler:
 
                 if content_type == "expert_list":
                     try:
-                        # Try rich formatting first
-                        formatted_text = self._format_expert_list_rich(structured_buffer)
-                        print(f"[INFO] Final rich expert list yielded")
+                        # Try extraction and clean formatting first
+                        expert_data = self._extract_experts_from_text(structured_buffer)
+                        if expert_data:
+                            formatted_text = self.format_expert_list_clean(expert_data)
+                        else:
+                            formatted_text = self._format_expert_list(structured_buffer)
+                        print(f"[INFO] Final expert list yielded")
                     except Exception:
                         # Fall back to basic formatting
                         formatted_text = self._format_expert_list(structured_buffer)
                         print(f"[INFO] Final basic expert list yielded")
                     yield formatted_text
                 elif content_type == "publication_list":
-                    # Use the new dedicated method for formatting publications
-                    formatted_text = self._format_publication_list(structured_buffer)
-                    print(f"[INFO] Final structured publication list yielded")
+                    try:
+                        pub_data = self._extract_publications_from_text(structured_buffer)
+                        if pub_data:
+                            formatted_text = self.format_publication_list_clean(pub_data)
+                        else:
+                            formatted_text = self._format_publication_list(structured_buffer)
+                        print(f"[INFO] Final publication list yielded")
+                    except Exception:
+                        formatted_text = self._format_publication_list(structured_buffer)
                     yield formatted_text
                 else:
                     cleaned_content = self._clean_structured_content(structured_buffer, "list")
-                    print(f"[INFO] Final structured content (non-expert/non-publication list) yielded")
+                    print(f"[INFO] Final structured content yielded")
                     yield cleaned_content
 
             elif buffer.strip():
@@ -348,15 +396,23 @@ class MessageHandler:
                 try:
                     if content_type == "expert_list":
                         try:
-                            # Try rich formatting first
-                            formatted_text = self._format_expert_list_rich(structured_buffer)
+                            expert_data = self._extract_experts_from_text(structured_buffer)
+                            if expert_data:
+                                formatted_text = self.format_expert_list_clean(expert_data)
+                            else:
+                                formatted_text = self._format_expert_list(structured_buffer)
                         except Exception:
-                            # Fall back to basic formatting
                             formatted_text = self._format_expert_list(structured_buffer)
                         yield formatted_text
                     elif content_type == "publication_list":
-                        # Use the new dedicated method for formatting publications
-                        formatted_text = self._format_publication_list(structured_buffer)
+                        try:
+                            pub_data = self._extract_publications_from_text(structured_buffer)
+                            if pub_data:
+                                formatted_text = self.format_publication_list_clean(pub_data)
+                            else:
+                                formatted_text = self._format_publication_list(structured_buffer)
+                        except Exception:
+                            formatted_text = self._format_publication_list(structured_buffer)
                         yield formatted_text
                     else:
                         yield self._clean_structured_content(structured_buffer, "list")
@@ -365,6 +421,342 @@ class MessageHandler:
             elif buffer.strip():
                 buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', buffer)
                 yield self._clean_text_for_user(buffer)
+
+    def _extract_experts_from_text(self, text: str) -> List[Dict[str, Any]]:
+        """
+        Extract structured expert data from text response.
+        
+        Args:
+            text: Text containing expert information
+            
+        Returns:
+            List of expert dictionaries with structured fields
+        """
+        experts = []
+        
+        # Look for numbered expert entries
+        expert_blocks = re.findall(r'(\d+\.\s+\*\*[^*\n]+\*\*(?:(?!\d+\.\s+\*\*).)*)', text, re.DOTALL)
+        
+        for block in expert_blocks:
+            expert = {}
+            
+            # Extract name
+            name_match = re.search(r'\d+\.\s+\*\*([^*\n]+)\*\*', block)
+            if name_match:
+                full_name = name_match.group(1).strip()
+                name_parts = full_name.split()
+                if len(name_parts) >= 2:
+                    expert['first_name'] = ' '.join(name_parts[:-1])
+                    expert['last_name'] = name_parts[-1]
+                else:
+                    expert['first_name'] = full_name
+                    expert['last_name'] = ''
+            else:
+                continue  # Skip if no name found
+            
+            # Extract other fields
+            designation_match = re.search(r'(?:Designation|Position):\s*([^\n]+)', block, re.IGNORECASE)
+            if designation_match:
+                expert['designation'] = designation_match.group(1).strip()
+            
+            theme_match = re.search(r'Theme:\s*([^\n]+)', block, re.IGNORECASE)
+            if theme_match:
+                theme_text = theme_match.group(1).strip()
+                # Extract abbreviation if parentheses are present
+                theme_abbr_match = re.search(r'([A-Z]+)\s*\(', theme_text)
+                if theme_abbr_match:
+                    expert['theme'] = theme_abbr_match.group(1).strip()
+                else:
+                    expert['theme'] = theme_text
+            
+            unit_match = re.search(r'Unit:\s*([^\n]+)', block, re.IGNORECASE)
+            if unit_match:
+                unit_text = unit_match.group(1).strip()
+                # Extract abbreviation if parentheses are present
+                unit_abbr_match = re.search(r'([A-Z]+)\s*\(', unit_text)
+                if unit_abbr_match:
+                    expert['unit'] = unit_abbr_match.group(1).strip()
+                else:
+                    expert['unit'] = unit_text
+            
+            expertise_match = re.search(r'(?:Expertise|Knowledge).*?:\s*([^\n]+)', block, re.IGNORECASE)
+            if expertise_match:
+                expert['knowledge_expertise'] = expertise_match.group(1).strip()
+            
+            experts.append(expert)
+        
+        return experts
+
+    def _extract_publications_from_text(self, text: str) -> List[Dict[str, Any]]:
+        """
+        Extract structured publication data from text response.
+        
+        Args:
+            text: Text containing publication information
+            
+        Returns:
+            List of publication dictionaries with structured fields
+        """
+        publications = []
+        
+        # Look for numbered publication entries
+        pub_blocks = re.findall(r'(\d+\.\s+\*\*[^*\n]+\*\*(?:(?!\d+\.\s+\*\*).)*)', text, re.DOTALL)
+        
+        for block in pub_blocks:
+            pub = {}
+            
+            # Extract title
+            title_match = re.search(r'\d+\.\s+\*\*([^*\n]+)\*\*', block)
+            if title_match:
+                pub['title'] = title_match.group(1).strip()
+            else:
+                continue  # Skip if no title found
+            
+            # Extract other fields
+            authors_match = re.search(r'Authors?:\s*([^\n]+)', block, re.IGNORECASE)
+            if authors_match:
+                pub['authors'] = authors_match.group(1).strip()
+            
+            source_match = re.search(r'(?:Published in|Journal|Source):\s*([^\n]+)', block, re.IGNORECASE)
+            if source_match:
+                pub['source'] = source_match.group(1).strip()
+            
+            year_match = re.search(r'(?:Year|Published|Publication date):\s*([^\n]+)', block, re.IGNORECASE)
+            if year_match:
+                pub['publication_year'] = year_match.group(1).strip()
+            
+            theme_match = re.search(r'Theme:\s*([^\n]+)', block, re.IGNORECASE)
+            if theme_match:
+                pub['theme'] = theme_match.group(1).strip()
+            
+            summary_match = re.search(r'(?:Summary|Abstract):\s*([^\n]+)', block, re.IGNORECASE)
+            if summary_match:
+                pub['summary'] = summary_match.group(1).strip()
+                
+            doi_match = re.search(r'DOI:\s*([^\n]+)', block, re.IGNORECASE)
+            if doi_match:
+                pub['doi'] = doi_match.group(1).strip()
+            
+            publications.append(pub)
+        
+        return publications
+    
+    def format_expert_list_clean(self, experts: List[Dict[str, Any]]) -> str:
+        """
+        Format expert information into clean, consistent numbered list format.
+        
+        Args:
+            experts: List of expert dictionaries
+            
+        Returns:
+            Formatted string with properly structured expert presentations
+        """
+        if not experts:
+            return "I couldn't find any experts matching your criteria. Would you like me to suggest some related experts instead?"
+
+        # Initialize the output
+        lines = []
+        
+        # Add a descriptive header
+        if len(experts) > 1:
+            lines.append("# APHRC Experts\n")
+        else:
+            lines.append("# APHRC Expert Profile\n")
+
+        # Format each expert according to the required format
+        for idx, expert in enumerate(experts):
+            # Get basic info
+            first_name = expert.get('first_name', '').strip()
+            last_name = expert.get('last_name', '').strip()
+            full_name = f"{first_name} {last_name}".strip()
+            
+            # Add numbered list item with properly formatted name
+            lines.append(f"{idx + 1}. **{full_name}**")
+            
+            # Add designation if available
+            if expert.get('designation'):
+                lines.append(f"   **Designation:** {expert['designation']}")
+            
+            # Add theme with expansion
+            if expert.get('theme'):
+                theme = expert['theme']
+                # Dictionary of theme expansions
+                theme_expansions = {
+                    'HAW': 'Health and Wellbeing',
+                    'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
+                    'UHP': 'Urban Health and Poverty',
+                    'ECD': 'Early Childhood Development',
+                    'PEC': 'Population, Environment, and Climate',
+                    'RSD': 'Research Systems Development',
+                    'RRCS': 'Research Capacity Strengthening',
+                    'MEL': 'Monitoring, Evaluation and Learning'
+                }
+                
+                # Format with expansion if available
+                if theme in theme_expansions:
+                    theme_text = f"{theme} ({theme_expansions[theme]})"
+                else:
+                    theme_text = theme
+                lines.append(f"   **Theme:** {theme_text}")
+            
+            # Add unit with expansion
+            if expert.get('unit'):
+                unit = expert.get('unit')
+                # Dictionary of unit expansions
+                unit_expansions = {
+                    'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
+                    'RSD': 'Research Systems Development',
+                    'IDSSS': 'Innovations and Data Systems Support Services',
+                    'KDHS': 'Kenya Demographic Health Survey',
+                    'CSI': 'Center Strategic Initiatives'
+                }
+                
+                # Format with expansion if available
+                if unit in unit_expansions:
+                    unit_text = f"{unit} ({unit_expansions[unit]})"
+                else:
+                    unit_text = unit
+                lines.append(f"   **Unit:** {unit_text}")
+            
+            # Add expertise
+            expertise = ""
+            if expert.get('knowledge_expertise'):
+                # Format expertise as pipe-separated list
+                if isinstance(expert['knowledge_expertise'], str):
+                    if ',' in expert['knowledge_expertise']:
+                        expertise_items = [item.strip() for item in expert['knowledge_expertise'].split(',')][:3]
+                        expertise = " | ".join(expertise_items)
+                    else:
+                        expertise = expert['knowledge_expertise']
+                elif isinstance(expert['knowledge_expertise'], list):
+                    expertise_items = [str(item) for item in expert['knowledge_expertise']][:3]
+                    expertise = " | ".join(expertise_items)
+            
+            # If no knowledge_expertise, try other fields
+            if not expertise and expert.get('expertise'):
+                try:
+                    exp_data = json.loads(expert['expertise']) if isinstance(expert['expertise'], str) else expert['expertise']
+                    if isinstance(exp_data, dict):
+                        expertise_items = []
+                        for k, v in exp_data.items():
+                            if isinstance(v, list):
+                                expertise_items.extend([str(item) for item in v][:3])
+                            else:
+                                expertise_items.append(str(v))
+                        expertise = " | ".join(expertise_items[:3])
+                    elif isinstance(exp_data, list):
+                        expertise = " | ".join([str(item) for item in exp_data][:3])
+                    else:
+                        expertise = str(exp_data)
+                except:
+                    expertise = str(expert['expertise'])
+            
+            if expertise:
+                lines.append(f"   **Knowledge & Expertise:** {expertise}")
+            
+            # Add empty line between experts for clear separation
+            if idx < len(experts) - 1:
+                lines.append("")
+        
+        # Add closing line
+        lines.append("\nYou can ask for more details about any of these experts or request information about their publications.")
+        
+        # Join all lines with newlines
+        return "\n".join(lines)
+  
+
+    def format_publication_list_clean(self, publications: List[Dict[str, Any]]) -> str:
+        """
+        Format publication information into clean, consistent numbered list format.
+        
+        Args:
+            publications: List of publication dictionaries
+            
+        Returns:
+            Formatted string with properly structured publication presentations
+        """
+        if not publications:
+            return "I couldn't find any publications matching your criteria. Would you like me to suggest some related research areas instead?"
+
+        # Initialize the output
+        lines = []
+        
+        # Add a descriptive header
+        lines.append("# APHRC Publications\n")
+
+        # Format each publication according to the required format
+        for idx, pub in enumerate(publications):
+            # Get title (with fallback)
+            title = pub.get('title', 'Untitled Publication')
+            
+            # Start with the numbered list item
+            lines.append(f"{idx + 1}. **{title}**")
+            
+            # Add authors
+            authors = []
+            if pub.get('authors'):
+                # Parse authors from various formats
+                if isinstance(pub['authors'], str):
+                    try:
+                        # Try to parse JSON string
+                        authors_data = json.loads(pub['authors'])
+                        if isinstance(authors_data, list):
+                            authors = authors_data
+                        else:
+                            authors = [pub['authors']]
+                    except:
+                        # If not JSON, use as is
+                        authors = [pub['authors']]
+                elif isinstance(pub['authors'], list):
+                    authors = pub['authors']
+            
+            # Format authors string
+            if authors:
+                # Limit to 3 authors plus et al. if needed
+                if len(authors) > 3:
+                    authors_text = f"{', '.join(str(a) for a in authors[:3])} et al."
+                else:
+                    authors_text = f"{', '.join(str(a) for a in authors)}"
+                lines.append(f"   **Authors:** {authors_text}")
+            
+            # Add source/journal
+            if pub.get('source'):
+                lines.append(f"   **Published in:** {pub['source']}")
+            
+            # Add year
+            if pub.get('publication_year'):
+                lines.append(f"   **Year:** {pub['publication_year']}")
+            
+            # Add theme if available
+            if pub.get('theme'):
+                lines.append(f"   **Theme:** {pub['theme']}")
+            
+            # Add summary/abstract (shortened if needed)
+            summary = ""
+            if pub.get('abstract'):
+                summary = pub['abstract']
+            elif pub.get('summary'):
+                summary = pub['summary']
+                
+            if summary:
+                # Truncate long summaries
+                if len(summary) > 200:
+                    summary = summary[:197] + "..."
+                lines.append(f"   **Summary:** {summary}")
+            
+            # Add DOI if available
+            if pub.get('doi'):
+                lines.append(f"   **DOI:** {pub['doi']}")
+            
+            # Add empty line between publications for clear separation
+            if idx < len(publications) - 1:
+                lines.append("")
+        
+        # Add closing line
+        lines.append("\nYou can ask for more details about any of these publications or request information about related research.")
+        
+        # Join all lines with newlines
+        return "\n".join(lines)
 
     def _format_expert_list(self, text: str) -> str:
         """
