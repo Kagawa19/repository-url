@@ -33,61 +33,6 @@ class MessageHandler:
         # This maintains backward compatibility while using enhanced cleaning
         return MessageHandler._clean_text_for_user(text)
 
-    def _format_publication_field(self, entry_text: str, field_name: str, display_name: str = None) -> str:
-        """
-        Helper method to extract and format a specific field from a publication entry.
-        
-        Args:
-            entry_text (str): The full text of the publication entry
-            field_name (str): The name of the field to extract
-            display_name (str, optional): Display name for the field. Defaults to field_name.
-            
-        Returns:
-            str: Formatted field string with proper indentation and structure
-        """
-        if not display_name:
-            display_name = field_name
-            
-        # Create various patterns to match different field formatting
-        patterns = [
-            rf'[-–•]?\s*\*\*{field_name}:\*\*\s*(.*?)(?=\s*[-–•]?\s*\*\*|\Z)',  # Bold marker format
-            rf'[-–•]?\s*{field_name}:\s*(.*?)(?=\s*[-–•]?\s*|\Z)',              # Regular format
-            rf'\b{field_name}\b:\s*(.*?)(?=\s*\b\w+\b:\s*|\Z)'                  # Simple format
-        ]
-        
-        # Try each pattern
-        for pattern in patterns:
-            match = re.search(pattern, entry_text, re.IGNORECASE | re.DOTALL)
-            if match:
-                field_content = match.group(1).strip()
-                
-                # Special handling for DOI links
-                if field_name.lower() == 'doi':
-                    # Clean the DOI string and create a proper link
-                    doi_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', field_content)
-                    doi_text = doi_text.replace(' ', '')
-                    
-                    # Check if it's a complete URL or just a DOI
-                    if doi_text.startswith('http'):
-                        return f"    - **{display_name}:** {doi_text}\n\n"
-                    else:
-                        return f"    - **{display_name}:** {doi_text}\n\n"
-                
-                # Truncate abstract if too long
-                if field_name.lower() == 'abstract' and len(field_content) > 300:
-                    field_content = field_content[:297] + "..."
-                    
-                # Return properly formatted field
-                return f"    - **{display_name}:** {field_content}\n\n"
-                
-        # Return empty string if field not found
-        return ""
-
-    
-    
-    
-  
-
     def _clean_structured_content(self, text: str, content_type: str) -> str:
         """
         Specialized cleaning for structured content like publication lists or expert profiles.
@@ -121,184 +66,13 @@ class MessageHandler:
         if content_type == "list":
             # Check if this is a publication list specifically
             if re.search(r'(publication|paper|article|study|research)', text.lower()):
-                # ENHANCED: Publication list formatting with improved structure
-                
-                # Extract introduction paragraph if present
-                intro_match = re.search(r'^(.*?)(?=\d+\.|$)', text, re.DOTALL)
-                intro = intro_match.group(1).strip() if intro_match else ""
-                
-                # Remove duplicate headers/intros that might be included in each item
-                for pattern in [
-                    r'Research Domains:.*?(?=\n|\Z)',
-                    r'Summary:.*?(?=\n|\Z)',
-                    r'Regarding.*?publications:.*?(?=\n|\Z)'
-                ]:
-                    matches = list(re.finditer(pattern, text, re.DOTALL | re.IGNORECASE))
-                    if len(matches) > 1:
-                        # Keep only the first instance
-                        first_match_end = matches[0].end()
-                        for match in matches[1:]:
-                            text = text[:match.start()] + text[match.end():]
-                
-                # NEW: Extract publication entries with improved pattern matching
-                entries = []
-                entry_pattern = r'(\d+\.\s+(?:\*\*)?[^*\n]+(?:\*\*)?(?:(?!\d+\.\s+(?:\*\*)?).)*)'
-                raw_entries = re.findall(entry_pattern, text, re.DOTALL)
-                
-                for entry in raw_entries:
-                    if not entry.strip():
-                        continue
-                    
-                    # Extract the number and title
-                    number_title_match = re.match(r'(\d+)\.\s+(?:\*\*)?([^*\n]+)(?:\*\*)?', entry)
-                    if not number_title_match:
-                        entries.append(entry)  # Just add as-is if pattern doesn't match
-                        continue
-                        
-                    number = number_title_match.group(1)
-                    title = number_title_match.group(2).strip()
-                    
-                    # Format the entry with consistent structure
-                    formatted_entry = f"{number}. **{title}**\n"
-                    
-                    # Extract and format fields with improved patterns
-                    # Note: Using helper functions for consistent field formatting
-                    formatted_entry += self._format_publication_field(entry, "Publication Year", "Publication Year")
-                    formatted_entry += self._format_publication_field(entry, "Authors", "Authors")
-                    formatted_entry += self._format_publication_field(entry, "DOI", "DOI")
-                    formatted_entry += self._format_publication_field(entry, "Abstract", "Abstract")
-                    
-                    entries.append(formatted_entry)
-                
-                # Find any closing message
-                closing_match = re.search(r'Would you like more detailed.*$', text, re.DOTALL)
-                closing = closing_match.group(0) if closing_match else ""
-                
-                # Reconstruct the text with proper formatting
-                if intro:
-                    formatted_text = f"{intro}\n\n"
-                else:
-                    formatted_text = ""
-                    
-                formatted_text += "\n\n".join(entries)
-                
-                if closing:
-                    formatted_text += f"\n\n{closing}"
-                    
-                # Clean DOI links specifically for publications
-                formatted_text = re.sub(
-                    r'(DOI:?\s*)(10\.\s*\d+\s*/\s*[^\s\)]+)',
-                    lambda m: f"{m.group(1)}{m.group(2).replace(' ', '')}",
-                    formatted_text
-                )
-                
-                # Ensure consistent newlines between sections
-                formatted_text = re.sub(r'\n{3,}', '\n\n', formatted_text)
-                
-                # Fix missing line breaks before numbered list items
-                formatted_text = re.sub(r'([:.\n])\s*(\d+\.\s+)', r'\1\n\n\2', formatted_text)
-                
-                return formatted_text
+                # Use the new dedicated publication formatter method
+                return self._format_publication_list(text)
                 
             # Check if this is an expert list specifically
             elif re.search(r'(expert|researcher|scientist|professor|specialist)', text.lower()):
-                # COMPLETE REWRITE of expert list formatting for more reliability
-                
-                # Extract the header/intro before any expert entries
-                intro_pattern = r'^(.*?)(?=(?:\d+\.|\s+[A-Z][a-z]+\s+[A-Z][a-z]+\s*\n\s*Expertise:|\s+[A-Z][a-z]+\s*\n))'
-                intro_match = re.search(intro_pattern, text, re.DOTALL)
-                intro = intro_match.group(1).strip() if intro_match else ""
-                
-                # Prepare for text processing
-                result_text = intro
-                
-                # First, ensure each expert has proper formatting and numbering
-                # MODIFIED: Fix unnumbered experts - if we find a name followed by Expertise: pattern without a number
-                text = re.sub(
-                    r'([^\d\n])\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*\n\s*Expertise:',
-                    r'\1\n\n1. \2\nExpertise:',
-                    text
-                )
-                
-                # Now let's extract all expert entries using multiple patterns to catch all variations
-                expert_entries = []
-                
-                # Pattern for numbered experts
-                numbered_pattern = r'(\d+\.)([^.\d]+)(?=\d+\.|$)'
-                numbered_experts = re.findall(numbered_pattern, text, re.DOTALL)
-                
-                # Process each numbered expert
-                for number, content in numbered_experts:
-                    # Extract the expert's name
-                    name_pattern = r'\s*(?:\*\*)?(.*?)(?:\*\*)?(?:\s*\n|\s*$)'
-                    name_match = re.search(name_pattern, content)
-                    name = name_match.group(1).strip() if name_match else content.strip()
-                    
-                    # MODIFIED: Extract expertise if present
-                    expertise_match = re.search(r'Expertise:\s*([^\n]+)', content, re.IGNORECASE)
-                    expertise = expertise_match.group(1) if expertise_match else ""
-                    
-                    # Create properly formatted entry
-                    entry = f"{number} **{name}**"
-                    if expertise:
-                        entry += f"\nExpertise: {expertise}"
-                    
-                    expert_entries.append(entry)
-                
-                # If we didn't find any numbered experts, try alternative patterns
-                if not expert_entries:
-                    # MODIFIED: Look for name/expertise pairs
-                    pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*\n\s*Expertise:\s*([^\n]+)'
-                    expert_matches = re.findall(pattern, text)
-                    
-                    for i, (name, expertise) in enumerate(expert_matches, 1):
-                        entry = f"{i}. **{name.strip()}**\nExpertise: {expertise}"
-                        expert_entries.append(entry)
-                
-                # Ensure we have at least captured names without expertise
-                if not expert_entries:
-                    # Last resort pattern for just names
-                    name_pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)'
-                    names = re.findall(name_pattern, text)
-                    
-                    # Filter out common words that might be falsely matched
-                    filtered_names = [name for name in names if len(name.split()) >= 2 and 
-                                    not re.search(r'\b(would|like|more|detailed|information|about|any|these|experts)\b', 
-                                                name.lower())]
-                    
-                    for i, name in enumerate(filtered_names, 1):
-                        entry = f"{i}. **{name.strip()}**"
-                        expert_entries.append(entry)
-                
-                # Find the closing message
-                closing_match = re.search(r'Would you like more detailed.*$', text, re.DOTALL)
-                closing = closing_match.group(0) if closing_match else ""
-                
-                # Build the final formatted text
-                if intro:
-                    result_text = f"{intro}\n\n"
-                else:
-                    result_text = ""
-                    
-                result_text += "\n\n".join(expert_entries)
-                
-                if closing:
-                    result_text += f"\n\n{closing}"
-                
-                # Final formatting fixes
-                # Fix multiple newlines
-                result_text = re.sub(r'\n{3,}', '\n\n', result_text)
-                
-                # MODIFIED: Ensure expertise is properly spaced and on its own line
-                result_text = re.sub(r'(\*\*)\s+Expertise:', r'\1\nExpertise:', result_text)
-                
-                # Fix missing line breaks before numbered list items
-                result_text = re.sub(r'([:.\n])\s*(\d+\.\s+)', r'\1\n\n\2', result_text)
-                
-                # MODIFIED: Make sure no expertise runs into next numbered item
-                result_text = re.sub(r'(Expertise:[^\n]+)(\s*)(\d+\.)', r'\1\n\n\3', result_text)
-                
-                return result_text
+                # Continue to use the expert list formatter
+                return self._format_expert_list(text)
             
             # For non-list content, just apply general cleaning
             return self._clean_text_for_user(text)
@@ -313,6 +87,256 @@ class MessageHandler:
         cleaned_text = re.sub(r'(Expertise:[^\n]+)(\s*)(\d+\.)', r'\1\n\n\3', cleaned_text)
         
         return cleaned_text
+
+    def _format_publication_field(self, entry_text: str, field_name: str, display_name: str = None) -> str:
+        """
+        Enhanced helper method to extract and format a specific field from a publication entry.
+        Improved to handle more formatting variants and better DOI handling.
+        
+        Args:
+            entry_text (str): The full text of the publication entry
+            field_name (str): The name of the field to extract
+            display_name (str, optional): Display name for the field. Defaults to field_name.
+            
+        Returns:
+            str: Formatted field string with proper indentation and structure
+        """
+        if not display_name:
+            display_name = field_name
+            
+        # Create various patterns to match different field formatting
+        patterns = [
+            rf'[-–•]?\s*\*\*{field_name}:\*\*\s*(.*?)(?=\s*[-–•]?\s*\*\*|\Z)',  # Bold marker format
+            rf'[-–•]?\s*{field_name}:\s*(.*?)(?=\s*[-–•]?\s*|\Z)',              # Regular format
+            rf'\b{field_name}\b:\s*(.*?)(?=\s*\b\w+\b:\s*|\Z)',                  # Simple format
+            rf'\s+[-–•]\s*\*\*{field_name}:\*\*\s*(.*?)(?=\s+[-–•]|\Z)'         # Indented format
+        ]
+        
+        # Try each pattern
+        for pattern in patterns:
+            match = re.search(pattern, entry_text, re.IGNORECASE | re.DOTALL)
+            if match:
+                field_content = match.group(1).strip()
+                
+                # Special handling for DOI links
+                if field_name.lower() == 'doi':
+                    # Clean the DOI string and create a proper link
+                    doi_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', field_content)
+                    # Remove any whitespace in the DOI
+                    doi_text = re.sub(r'\s+', '', doi_text)
+                    
+                    # Handle different DOI formats
+                    if doi_text.startswith('http'):
+                        return f"    - **{display_name}:** {doi_text}\n\n"
+                    elif doi_text.startswith('10.'):
+                        return f"    - **{display_name}:** {doi_text}\n\n"
+                    else:
+                        return f"    - **{display_name}:** {doi_text}\n\n"
+                
+                # Truncate abstract if too long
+                if field_name.lower() == 'abstract' and len(field_content) > 300:
+                    field_content = field_content[:297] + "..."
+                    
+                # Improved author handling
+                if field_name.lower() == 'author' or field_name.lower() == 'authors':
+                    # Check if it's a list or has commas
+                    if '[' in field_content and ']' in field_content:
+                        # Try to parse JSON list
+                        try:
+                            import json
+                            author_list = json.loads(field_content.replace("'", '"'))
+                            if isinstance(author_list, list) and len(author_list) > 0:
+                                if len(author_list) > 3:
+                                    authors_display = f"{', '.join(author_list[:3])} et al."
+                                else:
+                                    authors_display = ', '.join(author_list)
+                                field_content = authors_display
+                        except:
+                            # If parsing fails, leave as is
+                            pass
+                    
+                # Handle publication year to ensure it's clean
+                if field_name.lower() in ['year', 'publication year', 'published']:
+                    # Extract just the year if it contains other text
+                    year_match = re.search(r'\b(19|20)\d{2}\b', field_content)
+                    if year_match:
+                        field_content = year_match.group(0)
+                
+                # Return properly formatted field
+                return f"    - **{display_name}:** {field_content}\n\n"
+                
+        # Return empty string if field not found
+        return ""
+
+    
+    
+    
+  
+
+    async def process_stream_response(self, response_stream):
+        """
+        Process the streaming response with enhanced formatting, structure preservation,
+        and improved natural language elements.
+        """
+        buffer = ""
+        metadata = None
+        detected_intent = None
+        is_first_chunk = True
+        transition_inserted = False
+        
+        in_structured_content = False
+        structured_buffer = ""
+        content_type = None
+        
+        try:
+            async for chunk in response_stream:
+                if isinstance(chunk, dict) and chunk.get('is_metadata'):
+                    metadata = chunk.get('metadata', chunk)
+                    self.metadata = metadata
+                    if metadata and 'intent' in metadata:
+                        detected_intent = metadata.get('intent')
+                        print(f"[INFO] Detected intent for response styling: {detected_intent}")
+                    print(f"[INFO] Captured metadata: {json.dumps(metadata, default=str) if metadata else 'None'}")
+                    yield chunk
+                    continue
+
+                if isinstance(chunk, dict):
+                    text = chunk.get('chunk', chunk.get('content', chunk.get('text', '')))
+                elif isinstance(chunk, (str, bytes)):
+                    text = chunk.decode('utf8') if isinstance(chunk, bytes) else chunk
+                elif hasattr(chunk, 'content'):
+                    text = chunk.content
+                elif hasattr(chunk, 'text'):
+                    text = chunk.text
+                else:
+                    print(f"[DEBUG] Skipping unknown chunk format: {type(chunk)}")
+                    continue
+
+                if not text.strip():
+                    continue
+
+                if is_first_chunk:
+                    text = re.sub(r'^[}\]]*', '', text)
+                    is_first_chunk = False
+
+                text = re.sub(r'^(\s*[}\]]+\s*)+', '', text)
+
+                # Detect expert list content
+                if not in_structured_content and (
+                    re.search(r'\d+\.\s+\*\*[^*]+\*\*', text) or
+                    re.search(r'# Experts|experts (in|at) APHRC|Expert Profile', text) or
+                    re.search(r'([A-Z][a-z]+\s+[A-Z][a-z]+)[^A-Z]*?specializes in', text)
+                ):
+                    in_structured_content = True
+                    content_type = "expert_list"
+                    structured_buffer = buffer + text
+                    buffer = ""
+                    print(f"[INFO] Entered structured content mode (expert list)")
+                    continue
+                
+                # Detect publication list content
+                if not in_structured_content and (
+                    re.search(r'\d+\.\s+\*\*[^*]+\*\*', text) or
+                    re.search(r'# Publications|publications (on|about) APHRC|Publication List', text) or
+                    re.search(r'publications (related to|on the topic of)', text) or
+                    re.search(r'(paper|article|publication|research) (titled|published in|by)', text)
+                ):
+                    # If we detect keywords specific to publications
+                    if re.search(r'publication|paper|article|research|study|doi', text.lower()):
+                        in_structured_content = True
+                        content_type = "publication_list"
+                        structured_buffer = buffer + text
+                        buffer = ""
+                        print(f"[INFO] Entered structured content mode (publication list)")
+                        continue
+
+                # Process expert list
+                if in_structured_content and content_type == "expert_list":
+                    structured_buffer += text
+                    if re.search(r'Would you like more detailed', structured_buffer):
+                        structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
+                        formatted_text = self._format_expert_list(structured_buffer)
+                        print(f"[INFO] Yielding formatted expert list")
+                        yield formatted_text
+
+                        in_structured_content = False
+                        structured_buffer = ""
+                        content_type = None
+                    continue
+                
+                # Process publication list
+                if in_structured_content and content_type == "publication_list":
+                    structured_buffer += text
+                    if re.search(r'Would you like more detailed|Is there anything else', structured_buffer):
+                        structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
+                        # Use the new dedicated method for formatting publications
+                        formatted_text = self._format_publication_list(structured_buffer)
+                        print(f"[INFO] Yielding formatted publication list")
+                        yield formatted_text
+
+                        in_structured_content = False
+                        structured_buffer = ""
+                        content_type = None
+                    continue
+
+                buffer += text
+
+                sentences = re.split(r'(?<=[.!?])\s+', buffer)
+                if len(sentences) > 1:
+                    for sentence in sentences[:-1]:
+                        if sentence.strip():
+                            cleaned_sentence = self._clean_text_for_user(sentence)
+                            print(f"[DEBUG] Yielding cleaned sentence: {cleaned_sentence}")
+                            yield cleaned_sentence
+
+                    buffer = sentences[-1]
+
+            # Handle any remaining content in the buffers
+            if in_structured_content and structured_buffer.strip():
+                structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
+
+                if content_type == "expert_list":
+                    formatted_text = self._format_expert_list(structured_buffer)
+                    print(f"[INFO] Final structured expert list yielded")
+                    yield formatted_text
+                elif content_type == "publication_list":
+                    # Use the new dedicated method for formatting publications
+                    formatted_text = self._format_publication_list(structured_buffer)
+                    print(f"[INFO] Final structured publication list yielded")
+                    yield formatted_text
+                else:
+                    cleaned_content = self._clean_structured_content(structured_buffer, "list")
+                    print(f"[INFO] Final structured content (non-expert/non-publication list) yielded")
+                    yield cleaned_content
+
+            elif buffer.strip():
+                buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', buffer)
+                cleaned_text = self._clean_text_for_user(buffer)
+                print(f"[DEBUG] Yielding final cleaned buffer: {cleaned_text}")
+                yield cleaned_text
+
+        except Exception as e:
+            print(f"[ERROR] Error processing stream response: {e}")
+            import traceback
+            traceback.print_exc()
+
+            if in_structured_content and structured_buffer.strip():
+                structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
+                try:
+                    if content_type == "expert_list":
+                        formatted_text = self._format_expert_list(structured_buffer)
+                        yield formatted_text
+                    elif content_type == "publication_list":
+                        # Use the new dedicated method for formatting publications
+                        formatted_text = self._format_publication_list(structured_buffer)
+                        yield formatted_text
+                    else:
+                        yield self._clean_structured_content(structured_buffer, "list")
+                except:
+                    yield self._clean_text_for_user(structured_buffer)
+            elif buffer.strip():
+                buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', buffer)
+                yield self._clean_text_for_user(buffer)
 
     def _format_expert_list(self, text: str) -> str:
         """
@@ -509,130 +533,7 @@ class MessageHandler:
         
         # If no patterns match, fall back to the original text
         return text
-
-    async def process_stream_response(self, response_stream):
-        """
-        Process the streaming response with enhanced formatting, structure preservation,
-        and improved natural language elements.
-        """
-        buffer = ""
-        metadata = None
-        detected_intent = None
-        is_first_chunk = True
-        transition_inserted = False
-        
-        in_structured_content = False
-        structured_buffer = ""
-        content_type = None
-        
-        try:
-            async for chunk in response_stream:
-                if isinstance(chunk, dict) and chunk.get('is_metadata'):
-                    metadata = chunk.get('metadata', chunk)
-                    self.metadata = metadata
-                    if metadata and 'intent' in metadata:
-                        detected_intent = metadata.get('intent')
-                        print(f"[INFO] Detected intent for response styling: {detected_intent}")
-                    print(f"[INFO] Captured metadata: {json.dumps(metadata, default=str) if metadata else 'None'}")
-                    yield chunk
-                    continue
-
-                if isinstance(chunk, dict):
-                    text = chunk.get('chunk', chunk.get('content', chunk.get('text', '')))
-                elif isinstance(chunk, (str, bytes)):
-                    text = chunk.decode('utf8') if isinstance(chunk, bytes) else chunk
-                elif hasattr(chunk, 'content'):
-                    text = chunk.content
-                elif hasattr(chunk, 'text'):
-                    text = chunk.text
-                else:
-                    print(f"[DEBUG] Skipping unknown chunk format: {type(chunk)}")
-                    continue
-
-                if not text.strip():
-                    continue
-
-                if is_first_chunk:
-                    text = re.sub(r'^[}\]]*', '', text)
-                    is_first_chunk = False
-
-                text = re.sub(r'^(\s*[}\]]+\s*)+', '', text)
-
-                if not in_structured_content and (
-                    re.search(r'\d+\.\s+\*\*[^*]+\*\*', text) or
-                    re.search(r'# Experts|experts (in|at) APHRC|Expert Profile', text) or
-                    re.search(r'([A-Z][a-z]+\s+[A-Z][a-z]+)[^A-Z]*?specializes in', text)
-                ):
-                    in_structured_content = True
-                    content_type = "expert_list"
-                    structured_buffer = buffer + text
-                    buffer = ""
-                    print(f"[INFO] Entered structured content mode (expert list)")
-                    continue
-
-                if in_structured_content and content_type == "expert_list":
-                    structured_buffer += text
-                    if re.search(r'Would you like more detailed', structured_buffer):
-                        structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
-                        formatted_text = self._format_expert_list(structured_buffer)
-                        print(f"[INFO] Yielding formatted expert list")
-                        yield formatted_text
-
-                        in_structured_content = False
-                        structured_buffer = ""
-                        content_type = None
-                    continue
-
-                buffer += text
-
-                sentences = re.split(r'(?<=[.!?])\s+', buffer)
-                if len(sentences) > 1:
-                    for sentence in sentences[:-1]:
-                        if sentence.strip():
-                            cleaned_sentence = self._clean_text_for_user(sentence)
-                            print(f"[DEBUG] Yielding cleaned sentence: {cleaned_sentence}")
-                            yield cleaned_sentence
-
-                    buffer = sentences[-1]
-
-            if in_structured_content and structured_buffer.strip():
-                structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
-
-                if content_type == "expert_list":
-                    formatted_text = self._format_expert_list(structured_buffer)
-                    print(f"[INFO] Final structured expert list yielded")
-                    yield formatted_text
-                else:
-                    cleaned_content = self._clean_structured_content(structured_buffer, "list")
-                    print(f"[INFO] Final structured content (non-expert list) yielded")
-                    yield cleaned_content
-
-            elif buffer.strip():
-                buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', buffer)
-                cleaned_text = self._clean_text_for_user(buffer)
-                print(f"[DEBUG] Yielding final cleaned buffer: {cleaned_text}")
-                yield cleaned_text
-
-        except Exception as e:
-            print(f"[ERROR] Error processing stream response: {e}")
-            import traceback
-            traceback.print_exc()
-
-            if in_structured_content and structured_buffer.strip():
-                structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
-                if content_type == "expert_list":
-                    try:
-                        formatted_text = self._format_expert_list(structured_buffer)
-                        yield formatted_text
-                    except:
-                        yield self._clean_structured_content(structured_buffer, "list")
-                else:
-                    yield self._clean_structured_content(structured_buffer, "list")
-            elif buffer.strip():
-                buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', buffer)
-                yield self._clean_text_for_user(buffer)
-
-
+    
     @staticmethod
     def _clean_text_for_user(text: str) -> str:
         """
@@ -673,6 +574,204 @@ class MessageHandler:
         text = re.sub(r'^(Alright!?|Sure!?|Here|I can help|Let me)(\s*\1)+', r'\1', text, flags=re.IGNORECASE)
 
         return text.strip()
+
+    
+
+    def _format_publication_list(self, text: str) -> str:
+        """
+        Specialized formatter for publication lists to ensure proper structure and formatting.
+        
+        Args:
+            text (str): The text containing publication information
+            
+        Returns:
+            str: Properly formatted publication list with each publication clearly structured
+        """
+        # Remove any stray JSON characters
+        text = re.sub(r'^(\s*[}\]]+\s*)+', '', text)
+        text = re.sub(r'(\s*[}\]]+\s*)+$', '', text)
+        
+        # Clean up any duplicated introductory phrases
+        text = re.sub(r'^(Alright!?|Sure!?|Here|I can help|Let me)(\s*\1)+', r'\1', text, flags=re.IGNORECASE)
+        
+        # Check if this is actually a publication list
+        if not re.search(r'publication|paper|article|research|study', text.lower()):
+            return text
+            
+        # Extract the introduction/header
+        header_match = re.search(r'^(.*?)(?=\d+\.\s+\*\*|[A-Z][a-z]+\s+et al\.)', text, re.DOTALL)
+        introduction = header_match.group(1).strip() if header_match else ""
+        
+        # Look for numbered publications
+        numbered_pubs = re.findall(r'(\d+\.\s+\*\*[^*\n]+\*\*(?:(?!\d+\.).)*)', text, re.DOTALL)
+        
+        if numbered_pubs:
+            # Already in numbered format, just ensure proper spacing and structure
+            formatted_parts = [introduction] if introduction else []
+            
+            for pub in numbered_pubs:
+                # Extract the number and title
+                match = re.match(r'(\d+\.\s+\*\*)([^*\n]+)(\*\*)', pub)
+                if not match:
+                    formatted_parts.append(pub.strip())
+                    continue
+                    
+                number_prefix = match.group(1)
+                title = match.group(2)
+                suffix = match.group(3)
+                
+                # Extract publication metadata
+                pub_year_match = re.search(r'(Year|Publication Year|Published):\s*([^\n,]+)', pub, re.IGNORECASE)
+                pub_year = pub_year_match.group(2).strip() if pub_year_match else ""
+                
+                authors_match = re.search(r'Authors?:\s*([^\n]+)', pub, re.IGNORECASE)
+                authors = authors_match.group(1).strip() if authors_match else ""
+                
+                doi_match = re.search(r'DOI:\s*([^\n,]+)', pub, re.IGNORECASE)
+                doi = doi_match.group(1).strip() if doi_match else ""
+                
+                abstract_match = re.search(r'Abstract:\s*([^\n]+)', pub, re.IGNORECASE)
+                abstract = abstract_match.group(1).strip() if abstract_match else ""
+                
+                # Format with proper structure
+                formatted_pub = f"{number_prefix}{title}{suffix}\n"
+                
+                # Add metadata with consistent formatting
+                if pub_year:
+                    formatted_pub += f"    - **Publication Year:** {pub_year}\n"
+                if authors:
+                    formatted_pub += f"    - **Authors:** {authors}\n"
+                if doi:
+                    # Clean DOI format
+                    doi = re.sub(r'\s+', '', doi)
+                    formatted_pub += f"    - **DOI:** {doi}\n"
+                if abstract:
+                    # Truncate long abstracts
+                    if len(abstract) > 300:
+                        abstract = abstract[:297] + "..."
+                    formatted_pub += f"    - **Abstract:** {abstract}\n"
+                    
+                formatted_parts.append(formatted_pub)
+            
+            # Find closing text
+            closing_match = re.search(r'Would you like more detailed.*?$', text, re.DOTALL)
+            closing = closing_match.group(0) if closing_match else ""
+            
+            if closing:
+                formatted_parts.append("\n" + closing)
+                
+            return "\n\n".join(formatted_parts)
+        
+        # If not numbered, try to extract publications by other patterns
+        # Look for author patterns like "Smith et al. (2020)"
+        author_patterns = re.findall(r'([A-Z][a-z]+(?:\s+et al\.|\s+and\s+[A-Z][a-z]+)\s+\(\d{4}\)[^.]+\.)', text)
+        
+        if author_patterns:
+            # Format as a numbered list
+            formatted_parts = [introduction] if introduction else []
+            
+            for i, pub_text in enumerate(author_patterns, 1):
+                # Extract year
+                year_match = re.search(r'\((\d{4})\)', pub_text)
+                year = year_match.group(1) if year_match else ""
+                
+                # Extract title - assume it's the text after the year
+                title_match = re.search(r'\)\s+([^.]+)', pub_text)
+                title = title_match.group(1).strip() if title_match else pub_text
+                
+                # Extract authors - text before the year
+                author_match = re.search(r'^([^(]+)', pub_text)
+                authors = author_match.group(1).strip() if author_match else ""
+                
+                # Format with proper structure
+                formatted_pub = f"{i}. **{title}**\n"
+                if year:
+                    formatted_pub += f"    - **Publication Year:** {year}\n"
+                if authors:
+                    formatted_pub += f"    - **Authors:** {authors}\n"
+                    
+                formatted_parts.append(formatted_pub)
+            
+            # Find closing text
+            closing_match = re.search(r'Would you like more detailed.*?$', text, re.DOTALL)
+            closing = closing_match.group(0) if closing_match else ""
+            
+            if closing:
+                formatted_parts.append("\n" + closing)
+                
+            return "\n\n".join(formatted_parts)
+        
+        # Check for DOI patterns
+        doi_patterns = re.findall(r'(doi\.org\/10\.\d+\/[^\s\)]+|10\.\d+\/[^\s\)]+)', text)
+        
+        if doi_patterns and len(doi_patterns) >= 2:
+            # This suggests multiple publications with DOIs - try to split by DOI
+            parts = re.split(r'(doi\.org\/10\.\d+\/[^\s\)]+|10\.\d+\/[^\s\)]+)', text)
+            
+            if len(parts) >= 3:  # Need at least one split to have occurred
+                formatted_parts = [introduction] if introduction else []
+                
+                current_pub = ""
+                pub_count = 0
+                
+                for i, part in enumerate(parts):
+                    if re.match(r'(doi\.org\/10\.\d+\/[^\s\)]+|10\.\d+\/[^\s\)]+)', part):
+                        # This is a DOI - add it to the current publication
+                        current_pub += f"    - **DOI:** {part.strip()}\n"
+                    elif i > 0 and re.match(r'(doi\.org\/10\.\d+\/[^\s\)]+|10\.\d+\/[^\s\)]+)', parts[i-1]):
+                        # This follows a DOI, likely the next publication or continuation
+                        if current_pub:
+                            formatted_parts.append(current_pub)
+                        
+                        # Extract a title from this part
+                        title_match = re.search(r'([^.,;:]+)', part)
+                        title = title_match.group(1).strip() if title_match else "Publication"
+                        
+                        # Start a new publication
+                        pub_count += 1
+                        current_pub = f"{pub_count}. **{title}**\n"
+                        
+                        # Try to extract other metadata
+                        year_match = re.search(r'\((\d{4})\)', part)
+                        if year_match:
+                            current_pub += f"    - **Publication Year:** {year_match.group(1)}\n"
+                        
+                        authors_match = re.search(r'([A-Z][a-z]+(?:\s+et al\.|\s+and\s+[A-Z][a-z]+))', part)
+                        if authors_match:
+                            current_pub += f"    - **Authors:** {authors_match.group(1)}\n"
+                
+                # Add the last publication
+                if current_pub:
+                    formatted_parts.append(current_pub)
+                
+                # Find closing text
+                closing_match = re.search(r'Would you like more detailed.*?$', text, re.DOTALL)
+                closing = closing_match.group(0) if closing_match else ""
+                
+                if closing:
+                    formatted_parts.append("\n" + closing)
+                    
+                return "\n\n".join(formatted_parts)
+        
+        # If we reach here, we couldn't parse a structured publication list
+        # At least improve line breaks and spacing for readability
+        cleaned_text = re.sub(r'([A-Z][a-z]+\s+et al\.\s+\(\d{4}\))', r'\n\n\1', text)
+        cleaned_text = re.sub(r'(doi\.org\/10\.\d+\/[^\s\)]+|10\.\d+\/[^\s\)]+)', r'\nDOI: \1\n', cleaned_text)
+        
+        # Clean up DOI formatting
+        cleaned_text = re.sub(r'(doi\.org\/\s*)([\d\.]+(/\s*)?[^\s\)]*)', 
+                            lambda m: m.group(1).replace(' ', '') + m.group(2).replace(' ', ''), 
+                            cleaned_text)
+        cleaned_text = re.sub(r'(10\.\s*\d+\s*/\s*[^\s\)]+)', 
+                            lambda m: m.group(1).replace(' ', ''), 
+                            cleaned_text)
+        
+        # If we've made changes, return the cleaned version
+        if cleaned_text != text:
+            return cleaned_text
+        
+        # If no patterns match, fall back to the original text
+        return text
 
 
 
