@@ -521,25 +521,22 @@ class MessageHandler:
         is_first_chunk = True
         transition_inserted = False
         
-        # Track different content segments for better processing
         in_structured_content = False
         structured_buffer = ""
         content_type = None
         
         try:
             async for chunk in response_stream:
-                # Capture metadata with improved detection
                 if isinstance(chunk, dict) and chunk.get('is_metadata'):
                     metadata = chunk.get('metadata', chunk)
                     self.metadata = metadata
                     if metadata and 'intent' in metadata:
                         detected_intent = metadata.get('intent')
-                        logger.debug(f"Detected intent for response styling: {detected_intent}")
-                    logger.debug(f"Captured metadata: {json.dumps(metadata, default=str) if metadata else 'None'}")
-                    yield chunk  # Pass metadata through for downstream handling
+                        print(f"[INFO] Detected intent for response styling: {detected_intent}")
+                    print(f"[INFO] Captured metadata: {json.dumps(metadata, default=str) if metadata else 'None'}")
+                    yield chunk
                     continue
 
-                # Extract text from chunk
                 if isinstance(chunk, dict):
                     text = chunk.get('chunk', chunk.get('content', chunk.get('text', '')))
                 elif isinstance(chunk, (str, bytes)):
@@ -549,22 +546,18 @@ class MessageHandler:
                 elif hasattr(chunk, 'text'):
                     text = chunk.text
                 else:
-                    logger.debug(f"Skipping unknown chunk format: {type(chunk)}")
+                    print(f"[DEBUG] Skipping unknown chunk format: {type(chunk)}")
                     continue
 
                 if not text.strip():
                     continue
-                    
-                # CRITICAL FIX: Remove stray JSON characters at the beginning of a chunk
-                # This specifically targets the "}" issue
+
                 if is_first_chunk:
                     text = re.sub(r'^[}\]]*', '', text)
                     is_first_chunk = False
-                
-                # Also clean stray JSON characters at the start of any chunk
+
                 text = re.sub(r'^(\s*[}\]]+\s*)+', '', text)
 
-                # Check if this is an expert list
                 if not in_structured_content and (
                     re.search(r'\d+\.\s+\*\*[^*]+\*\*', text) or
                     re.search(r'# Experts|experts (in|at) APHRC|Expert Profile', text) or
@@ -574,69 +567,59 @@ class MessageHandler:
                     content_type = "expert_list"
                     structured_buffer = buffer + text
                     buffer = ""
+                    print(f"[INFO] Entered structured content mode (expert list)")
                     continue
-                
-                # If we're in an expert list, collect and process it
+
                 if in_structured_content and content_type == "expert_list":
                     structured_buffer += text
-                    
-                    # Check if we have a complete expert list
                     if re.search(r'Would you like more detailed', structured_buffer):
-                        # Clean stray JSON characters before formatting
                         structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
-                        
-                        # We have a complete response, format it
                         formatted_text = self._format_expert_list(structured_buffer)
+                        print(f"[INFO] Yielding formatted expert list")
                         yield formatted_text
-                        
-                        # Reset for normal processing
+
                         in_structured_content = False
                         structured_buffer = ""
                         content_type = None
                     continue
-                
-                # Normal text processing
+
                 buffer += text
-                
-                # Process complete sentences from the buffer
+
                 sentences = re.split(r'(?<=[.!?])\s+', buffer)
                 if len(sentences) > 1:
-                    # Process and yield complete sentences
                     for sentence in sentences[:-1]:
                         if sentence.strip():
-                            # Apply general text cleaning
                             cleaned_sentence = self._clean_text_for_user(sentence)
+                            print(f"[DEBUG] Yielding cleaned sentence: {cleaned_sentence}")
                             yield cleaned_sentence
-                    
-                    # Keep the last incomplete sentence in the buffer
+
                     buffer = sentences[-1]
 
-            # Process any remaining content
             if in_structured_content and structured_buffer.strip():
-                # Clean stray JSON characters before final formatting
                 structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
-                
+
                 if content_type == "expert_list":
                     formatted_text = self._format_expert_list(structured_buffer)
+                    print(f"[INFO] Final structured expert list yielded")
                     yield formatted_text
                 else:
                     cleaned_content = self._clean_structured_content(structured_buffer, "list")
+                    print(f"[INFO] Final structured content (non-expert list) yielded")
                     yield cleaned_content
-                    
+
             elif buffer.strip():
-                # Clean any remaining content in the buffer
-                # Remove stray JSON characters first
                 buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', buffer)
                 cleaned_text = self._clean_text_for_user(buffer)
+                print(f"[DEBUG] Yielding final cleaned buffer: {cleaned_text}")
                 yield cleaned_text
 
         except Exception as e:
-            logger.error(f"Error processing stream response: {e}", exc_info=True)
-            # Return any remaining buffered content if there's an error
+            print(f"[ERROR] Error processing stream response: {e}")
+            import traceback
+            traceback.print_exc()
+
             if in_structured_content and structured_buffer.strip():
-                # Clean stray JSON characters before error handling formatting
                 structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
-                
                 if content_type == "expert_list":
                     try:
                         formatted_text = self._format_expert_list(structured_buffer)
@@ -646,9 +629,9 @@ class MessageHandler:
                 else:
                     yield self._clean_structured_content(structured_buffer, "list")
             elif buffer.strip():
-                # Clean stray JSON characters before final cleanup
                 buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', buffer)
                 yield self._clean_text_for_user(buffer)
+
 
     @staticmethod
     def _clean_text_for_user(text: str) -> str:
@@ -679,6 +662,10 @@ class MessageHandler:
         # Preserve markdown bold formatting
         text = re.sub(r'\*\*\s*(.+?)\s*\*\*', r'**\1**', text)
 
+        # Fix stray asterisks at the start or end of the text
+        text = re.sub(r'^\*\*(?!\s*\w)', '', text)  # Remove opening '**' with no closing pair
+        text = re.sub(r'\*\*$', '', text)          # Remove closing '**' if not followed by text
+
         # Normalize bullet points
         text = re.sub(r'^\s*[-*]\s*', '- ', text, flags=re.MULTILINE)
 
@@ -687,7 +674,8 @@ class MessageHandler:
 
         return text.strip()
 
-        
+
+
     async def send_message_async(self, message: str, user_id: str, session_id: str) -> AsyncGenerator:
         """
         Stream messages with enhanced conversation awareness, contextual references,
