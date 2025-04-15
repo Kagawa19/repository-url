@@ -661,35 +661,30 @@ class MessageHandler:
 
         import re
 
+        # Remove complete or broken JSON metadata blocks
+        text = re.sub(r'\{.*?"is_metadata"\s*:\s*true.*?(?:\}|(?=[A-Z]))', '', text, flags=re.DOTALL)
+
         # Remove stray closing brackets or braces at the start
         text = re.sub(r'^\s*[}\]]+\s*', '', text)
 
         # Remove any stray closing brace '}' anywhere in the text
         text = re.sub(r'\s*}\s*', ' ', text)
 
-        # Remove JSON metadata that might have slipped through
-        metadata_pattern = r'^\s*\{\"is_metadata\"\s*:\s*true.*?\}\s*'
-        text = re.sub(metadata_pattern, '', text, flags=re.MULTILINE)
-
-        # Remove malformed or partial metadata blocks (even if not closed properly)
-        text = re.sub(r'\{.*?"is_metadata"\s*:\s*true.*?(?:\}|\n)', '', text, flags=re.DOTALL)
-
         # Fix potential duplicate heading markers
         text = re.sub(r'(#+)\s*(#+)\s*', r'\1 ', text)
 
         # Normalize heading formatting
-        text = re.sub(r'(#+)(\w)', r'\1 \2', text)  # Ensure space after heading markers
+        text = re.sub(r'(#+)(\w)', r'\1 \2', text)
 
-        # Preserve markdown bold formatting (ensure spaces are correct)
+        # Preserve markdown bold formatting
         text = re.sub(r'\*\*\s*(.+?)\s*\*\*', r'**\1**', text)
 
-        # Normalize bullet points (could be * or - in markdown)
-        text = re.sub(r'^\s*[-*]\s*', '- ', text, flags=re.MULTILINE)  # Standardize to dash style
+        # Normalize bullet points
+        text = re.sub(r'^\s*[-*]\s*', '- ', text, flags=re.MULTILINE)
 
-        # Clean up repeated starter phrases like "Alright, alright"
+        # Clean repeated openers like "Alright, alright"
         text = re.sub(r'^(Alright!?|Sure!?|Here|I can help|Let me)(\s*\1)+', r'\1', text, flags=re.IGNORECASE)
 
-        # Final trim of any leading/trailing whitespace
         return text.strip()
 
         
