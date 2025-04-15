@@ -661,7 +661,7 @@ class MessageHandler:
 
         import re
 
-        # CRITICAL FIX: Remove any stray JSON characters at the beginning
+        # Remove stray closing brackets or braces at the start
         text = re.sub(r'^\s*[}\]]+\s*', '', text)
 
         # Remove any stray closing brace '}' anywhere in the text
@@ -670,6 +670,9 @@ class MessageHandler:
         # Remove JSON metadata that might have slipped through
         metadata_pattern = r'^\s*\{\"is_metadata\"\s*:\s*true.*?\}\s*'
         text = re.sub(metadata_pattern, '', text, flags=re.MULTILINE)
+
+        # Remove malformed or partial metadata blocks (even if not closed properly)
+        text = re.sub(r'\{.*?"is_metadata"\s*:\s*true.*?(?:\}|\n)', '', text, flags=re.DOTALL)
 
         # Fix potential duplicate heading markers
         text = re.sub(r'(#+)\s*(#+)\s*', r'\1 ', text)
