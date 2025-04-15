@@ -1670,7 +1670,7 @@ class GeminiLLMManager:
     def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
         Format publication information into Markdown format with focused presentation.
-        Only includes title, summary, and DOI link.
+        Only includes title, summary, and DOI link with correct formatting.
         
         Args:
             publications: List of publication dictionaries
@@ -1681,7 +1681,7 @@ class GeminiLLMManager:
         if not publications:
             return "I couldn't find any publications matching your criteria. Would you like me to suggest some related research areas instead?"
 
-        # Create header based on the number of publications
+        # Create header 
         markdown_text = "# APHRC Publications\n\n" 
 
         for idx, publication in enumerate(publications):
@@ -1719,7 +1719,7 @@ class GeminiLLMManager:
                         doi_url = doi
                     
                     # Add as a clickable link with "Check it out" text
-                    markdown_text += f"   [Check it out]({doi_url})\n"
+                    markdown_text += f"   **DOI:** [Check it out]({doi_url})\n"
 
                 # Add an extra line break between publications for clear separation
                 if idx < len(publications) - 1:
