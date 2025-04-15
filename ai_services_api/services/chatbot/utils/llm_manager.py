@@ -706,12 +706,15 @@ class GeminiLLMManager:
                             fields = json.loads(expert.get('fields', '[]')) if expert.get('fields') else []
                             skills = json.loads(expert.get('normalized_skills', '[]')) if expert.get('normalized_skills') else []
                             keywords = json.loads(expert.get('keywords', '[]')) if expert.get('keywords') else []
+                            # ADDED: Parse knowledge_expertise
+                            knowledge_expertise = expert.get('knowledge_expertise', '')
                         except json.JSONDecodeError:
                             expert_expertise = {}
                             domains = []
                             fields = []
                             skills = []
                             keywords = []
+                            knowledge_expertise = ''
                         
                         # Flatten expertise into a list of terms
                         expertise_values = []
@@ -721,6 +724,13 @@ class GeminiLLMManager:
                                     expertise_values.extend([str(v).lower() for v in values if v])
                                 elif values:
                                     expertise_values.append(str(values).lower())
+                        
+                        # ADDED: Add knowledge_expertise to expertise values
+                        if knowledge_expertise:
+                            if isinstance(knowledge_expertise, str):
+                                expertise_values.append(knowledge_expertise.lower())
+                            elif isinstance(knowledge_expertise, list):
+                                expertise_values.extend([str(k).lower() for k in knowledge_expertise if k])
                         
                         # Check if any expertise term matches query terms
                         for term in expertise_terms:
@@ -788,6 +798,58 @@ class GeminiLLMManager:
                                     logger.warning(f"Failed to load embedding for {expert_id}: {safe_load_err}")
                         except Exception as emb_err:
                             logger.warning(f"Failed to load embedding for {expert_id}: {emb_err}")
+                        
+                        # ADDED: Ensure knowledge_expertise is explicitly retrieved and included
+                        if 'knowledge_expertise' not in expert or not expert['knowledge_expertise']:
+                            # Try to get knowledge_expertise from a different field or attribute
+                            if 'expertise' in expert:
+                                try:
+                                    # Try parsing expertise as JSON to extract knowledge areas
+                                    expertise_data = json.loads(expert['expertise']) if isinstance(expert['expertise'], str) else expert['expertise']
+                                    if isinstance(expertise_data, dict):
+                                        # Extract first few values or a specific key as knowledge_expertise
+                                        expertise_values = []
+                                        for k, v in expertise_data.items():
+                                            if isinstance(v, list):
+                                                expertise_values.extend(v)
+                                            else:
+                                                expertise_values.append(v)
+                                        
+                                        if expertise_values:
+                                            expert['knowledge_expertise'] = ", ".join(str(v) for v in expertise_values[:3])
+                                    elif isinstance(expertise_data, list):
+                                        expert['knowledge_expertise'] = ", ".join(str(v) for v in expertise_data[:3])
+                                except (json.JSONDecodeError, TypeError):
+                                    # If parsing fails, use the raw string
+                                    if expert['expertise']:
+                                        expert['knowledge_expertise'] = str(expert['expertise'])
+                            
+                            # Check additional fields if knowledge_expertise is still missing
+                            if not expert.get('knowledge_expertise') and expert.get('normalized_skills'):
+                                try:
+                                    skills = json.loads(expert['normalized_skills']) if isinstance(expert['normalized_skills'], str) else expert['normalized_skills']
+                                    if skills and isinstance(skills, list):
+                                        expert['knowledge_expertise'] = ", ".join(str(s) for s in skills[:3])
+                                except (json.JSONDecodeError, TypeError):
+                                    pass
+                            
+                            # If still no knowledge_expertise, use areas or domains
+                            if not expert.get('knowledge_expertise'):
+                                for field in ['research_areas', 'domains', 'fields']:
+                                    if expert.get(field):
+                                        try:
+                                            data = json.loads(expert[field]) if isinstance(expert[field], str) else expert[field]
+                                            if data and isinstance(data, list):
+                                                expert['knowledge_expertise'] = ", ".join(str(d) for d in data[:3])
+                                                break
+                                        except (json.JSONDecodeError, TypeError):
+                                            if expert[field]:
+                                                expert['knowledge_expertise'] = str(expert[field])
+                                                break
+                            
+                            # Fallback to a placeholder if still no knowledge_expertise
+                            if not expert.get('knowledge_expertise'):
+                                expert['knowledge_expertise'] = "Health research"
                         
                         # Retrieve and add linked publications
                         links_key = f"links:expert:{expert_id}:resources"
@@ -874,6 +936,30 @@ class GeminiLLMManager:
                             expert['match_score'] = 0.5  # Default score
                             expert['matched_criteria'] = ["Top expert"]
                             expert['publications'] = []
+                            
+                            # ADDED: Ensure knowledge_expertise is included for fallback experts too
+                            if 'knowledge_expertise' not in expert or not expert['knowledge_expertise']:
+                                # Try to extract from expertise or other fields
+                                if expert.get('expertise'):
+                                    try:
+                                        expertise_data = json.loads(expert['expertise']) if isinstance(expert['expertise'], str) else expert['expertise']
+                                        if isinstance(expertise_data, dict):
+                                            # Extract values as knowledge_expertise
+                                            values = []
+                                            for v in expertise_data.values():
+                                                if isinstance(v, list):
+                                                    values.extend(v)
+                                                else:
+                                                    values.append(v)
+                                            if values:
+                                                expert['knowledge_expertise'] = ", ".join(str(v) for v in values[:3])
+                                        elif isinstance(expertise_data, list):
+                                            expert['knowledge_expertise'] = ", ".join(str(v) for v in expertise_data[:3])
+                                    except (json.JSONDecodeError, TypeError):
+                                        expert['knowledge_expertise'] = str(expert.get('expertise', 'Health research'))
+                                else:
+                                    expert['knowledge_expertise'] = "Health research"
+                            
                             experts.append(expert)
                             count += 1
                     except Exception as e:
@@ -932,7 +1018,9 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error fetching experts: {e}")
             return [], str(e)
-            
+
+    
+                
     def _create_tailored_prompt(self, intent, context_type: str, message_style: str) -> str:
         """
         Create a tailored system prompt based on detected intent, context type, and message style.
@@ -1833,6 +1921,122 @@ class GeminiLLMManager:
         self._rate_limited = False
         logger.info(f"Rate limit cooldown expired after {seconds} seconds")
 
+    
+
+    def format_expert_with_publications(self, expert: Dict[str, Any]) -> str:
+        """
+        Format a single expert with their publications for presentation.
+        
+        Args:
+            expert: Expert dictionary with publications included
+            
+        Returns:
+            Formatted string with expert information and their publications
+        """
+        if not expert:
+            return "No expert information available."
+        
+        # Build the expert context
+        full_name = f"{expert.get('first_name', '')} {expert.get('last_name', '')}".strip()
+        
+        context_parts = [f"Expert information for {full_name}:"]
+        
+        # Expert basic info
+        expert_info = [f"**{full_name}**"]
+        
+        # Add position and department
+        position = expert.get('position', '')
+        if position:
+            expert_info.append(f"* Position: {position}")
+            
+        department = expert.get('department', '')
+        if department:
+            expert_info.append(f"* Department: {department}")
+        
+        # MODIFIED: Add knowledge_expertise instead of email
+        knowledge_expertise = expert.get('knowledge_expertise', '')
+        if knowledge_expertise:
+            expert_info.append(f"* Knowledge Expertise: {knowledge_expertise}")
+        
+        # Add expertise areas as bullet points
+        expertise = expert.get('expertise', [])
+        if expertise and isinstance(expertise, list):
+            expert_info.append("* Areas of expertise:")
+            for area in expertise:
+                expert_info.append(f"  * {area}")
+        elif expertise:
+            expert_info.append(f"* Expertise: {expertise}")
+        
+        # Add research interests
+        research_interests = expert.get('research_interests', [])
+        if research_interests and isinstance(research_interests, list):
+            expert_info.append("* Research interests:")
+            for interest in research_interests:
+                expert_info.append(f"  * {interest}")
+        
+        # REMOVED: Email contact information section
+        
+        # Add expert bio if available
+        bio = expert.get('bio', '')
+        if bio:
+            # Truncate long bios
+            if len(bio) > 300:
+                bio = bio[:297] + "..."
+            expert_info.append(f"* Bio: {bio}")
+        
+        # Add the expert info section
+        context_parts.append("\n".join(expert_info))
+        
+        # Add publications section with clear formatting
+        publications = expert.get('publications', [])
+        if publications:
+            pub_section = [f"\nPublications by {full_name}:"]
+            
+            for idx, pub in enumerate(publications):
+                title = pub.get('title', 'Untitled')
+                pub_info = [f"{idx+1}. **{title}**"]
+                
+                # Publication year
+                year = pub.get('publication_year', '')
+                if year:
+                    pub_info.append(f"* Published: {year}")
+                
+                # DOI if available
+                doi = pub.get('doi', '')
+                if doi:
+                    pub_info.append(f"* DOI: {doi}")
+                
+                # Authors
+                authors = pub.get('authors', [])
+                if authors:
+                    if isinstance(authors, list):
+                        # Format author list
+                        if len(authors) > 3:
+                            author_text = f"{', '.join(str(a) for a in authors[:3])} et al."
+                        else:
+                            author_text = f"{', '.join(str(a) for a in authors)}"
+                        pub_info.append(f"* Authors: {author_text}")
+                    else:
+                        pub_info.append(f"* Authors: {authors}")
+                
+                # Abstract snippet
+                abstract = pub.get('abstract', '')
+                if abstract:
+                    # Truncate long abstracts
+                    if len(abstract) > 250:
+                        abstract = abstract[:247] + "..."
+                    pub_info.append(f"* Abstract: {abstract}")
+                
+                pub_section.append("\n".join(pub_info))
+            
+            # Add all publications
+            context_parts.append("\n\n".join(pub_section))
+        else:
+            context_parts.append(f"\nNo publications found for {full_name}.")
+        
+        # Combine all parts
+        return "\n\n".join(context_parts)
+
     def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
         """
         Format expert information into Markdown format for rendering in the frontend.
@@ -1869,11 +2073,20 @@ class GeminiLLMManager:
                 elif department:
                     markdown_text += f"    - **Department:** {department}\n\n"
 
-                # UPDATED: Ensure email is on a separate line with consistent indentation
-                # Add email with consistent label format
-                email = expert.get('email', '')
-                if email:
-                    markdown_text += f"    - **Email:** {email}\n\n"
+                # MODIFIED: Replace email with knowledge_expertise
+                # Instead of displaying email, show expertise
+                knowledge_expertise = expert.get('knowledge_expertise', '')
+                if knowledge_expertise:
+                    markdown_text += f"    - **Expertise:** {knowledge_expertise}\n\n"
+                else:
+                    # Try to get expertise from other fields if knowledge_expertise is not available
+                    expertise_fields = expert.get('expertise', [])
+                    if expertise_fields:
+                        if isinstance(expertise_fields, list):
+                            expertise_str = ", ".join(expertise_fields)
+                        else:
+                            expertise_str = str(expertise_fields)
+                        markdown_text += f"    - **Expertise:** {expertise_str}\n\n"
 
                 # Add notable publications with consistent indentation
                 publications = expert.get('publications', [])
@@ -1891,86 +2104,7 @@ class GeminiLLMManager:
 
         # Add closing message
         markdown_text += "\nWould you like more detailed information about any of these experts? You can ask by name or area of expertise."
-        return markdown_text
-    def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
-        """
-        Format publication information into Markdown format for rendering in the frontend.
-        Args:
-            publications: List of publication dictionaries
-        Returns:
-            Formatted Markdown string with structured publication presentations
-        """
-        if not publications:
-            return "I couldn't find any publications matching your query. Would you like me to help you search for related topics instead?"
-
-        # Create header based on publication count
-        markdown_text = f"# APHRC Publications ({len(publications)}):\n\n"
-
-        for idx, pub in enumerate(publications):
-            try:
-                # Extract title - use strong formatting to match expert formatting style
-                title = pub.get('title', 'Untitled')
-                markdown_text += f"{idx + 1}. **{title}**\n\n"
-
-                # Add year with consistent indentation and field formatting
-                pub_year = pub.get('publication_year', '')
-                if pub_year:
-                    markdown_text += f"    - **Publication Year:** {pub_year}\n\n"
-
-                # Add authors with consistent indentation and field formatting
-                authors = pub.get('authors', [])
-                if authors:
-                    # Ensure authors is a list even if it's not already
-                    if not isinstance(authors, list):
-                        try:
-                            if isinstance(authors, str):
-                                # Try to parse JSON if it's a string
-                                import json
-                                authors = json.loads(authors)
-                                if not isinstance(authors, list):
-                                    authors = [authors]
-                            else:
-                                authors = [authors]
-                        except:
-                            authors = [str(authors)]
-                    
-                    # Format author list with proper length handling
-                    if len(authors) > 3:
-                        author_text = f"{', '.join(str(a) for a in authors[:2])} et al."
-                    elif len(authors) == 2:
-                        author_text = f"{authors[0]} and {authors[1]}"
-                    else:
-                        author_text = ', '.join(str(a) for a in authors)
-                    
-                    markdown_text += f"    - **Authors:** {author_text}\n\n"
-
-                # Add abstract with consistent indentation, field formatting, and length management
-                abstract = pub.get('abstract', '')
-                if abstract:
-                    # Clean and format abstract text
-                    abstract = abstract.replace('\n', ' ').strip()
-                    trimmed_abstract = abstract[:300] + "..." if len(abstract) > 300 else abstract
-                    markdown_text += f"    - **Abstract:** {trimmed_abstract}\n\n"
-
-                # Add DOI as a Markdown link with consistent indentation and field formatting
-                doi = pub.get('doi', '')
-                if doi:
-                    # Clean DOI and ensure proper formatting
-                    doi = doi.strip()
-                    doi_url = f"https://doi.org/{doi}" if not doi.startswith('http') else doi
-                    markdown_text += f"    - **DOI:** [{doi}]({doi_url})\n\n"
-                
-                # Add a separator between publications for visual clarity (except for the last one)
-                if idx < len(publications) - 1:
-                    markdown_text += "\n"
-
-            except Exception as e:
-                logger.error(f"Error formatting publication {idx + 1}: {e}")
-                continue
-
-        # Add closing message
-        markdown_text += "Would you like more detailed information about any of these publications or related research areas?"
-        return markdown_text       
+        return markdown_text      
    
     async def analyze_quality(self, message: str, response: str = "") -> Dict:
         """
@@ -2483,13 +2617,25 @@ class GeminiLLMManager:
         
         return False
 
+    
+
     def _format_expert_profile(self, expert: Dict) -> str:
         """Formats an expert profile WITHOUT publications."""
+        # MODIFIED: Replace email with expertise
+        expertise = expert.get('knowledge_expertise', '')
+        if not expertise:
+            # Fall back to expertise field if knowledge_expertise is not available
+            expertise_list = expert.get('expertise', [])
+            if expertise_list:
+                if isinstance(expertise_list, list):
+                    expertise = ", ".join(expertise_list)
+                else:
+                    expertise = str(expertise_list)
+        
         return f"""
         **Expert Profile: {expert.get('first_name')} {expert.get('last_name')}**
         - Position: {expert.get('position', 'N/A')}
-        - Expertise: {', '.join(expert.get('expertise', []))}
-        - Email: {expert.get('email', 'N/A')}
+        - Expertise: {expertise}
         """
 
 
@@ -2503,6 +2649,7 @@ class GeminiLLMManager:
         - Prioritizes publications from expert-resource links
         - Maintains existing enrichment logic
         - Ensures efficient publication retrieval
+        - ADDED: Ensures knowledge_expertise is included
         """
         if not experts:
             return experts
@@ -2512,6 +2659,44 @@ class GeminiLLMManager:
                 expert_id = expert.get('id')
                 if not expert_id:
                     continue
+                
+                # ADDED: Ensure knowledge_expertise is present
+                if 'knowledge_expertise' not in expert or not expert['knowledge_expertise']:
+                    # Try to extract from expertise or other fields
+                    if expert.get('expertise'):
+                        try:
+                            expertise_data = json.loads(expert['expertise']) if isinstance(expert['expertise'], str) else expert['expertise']
+                            if isinstance(expertise_data, dict):
+                                # Extract values as knowledge_expertise
+                                values = []
+                                for v in expertise_data.values():
+                                    if isinstance(v, list):
+                                        values.extend(v)
+                                    else:
+                                        values.append(v)
+                                if values:
+                                    expert['knowledge_expertise'] = ", ".join(str(v) for v in values[:3])
+                            elif isinstance(expertise_data, list):
+                                expert['knowledge_expertise'] = ", ".join(str(v) for v in expertise_data[:3])
+                        except (json.JSONDecodeError, TypeError):
+                            expert['knowledge_expertise'] = str(expert.get('expertise', 'Health research'))
+                    else:
+                        # Check other potential sources of expertise information
+                        for field in ['research_areas', 'normalized_skills', 'domains', 'fields']:
+                            if expert.get(field):
+                                try:
+                                    field_data = json.loads(expert[field]) if isinstance(expert[field], str) else expert[field]
+                                    if isinstance(field_data, list) and field_data:
+                                        expert['knowledge_expertise'] = ", ".join(str(item) for item in field_data[:3])
+                                        break
+                                except (json.JSONDecodeError, TypeError):
+                                    if expert[field]:
+                                        expert['knowledge_expertise'] = str(expert[field])
+                                        break
+                        
+                        # If still nothing found, set a default
+                        if 'knowledge_expertise' not in expert or not expert['knowledge_expertise']:
+                            expert['knowledge_expertise'] = "Health research"
                 
                 # Skip if already has sufficient publications
                 if expert.get('publications') and len(expert.get('publications', [])) >= limit_per_expert:
@@ -2565,7 +2750,6 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error enriching experts with publications: {e}")
             return experts
-
     async def _enrich_publications_with_experts(self, publications: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Enhanced method to enrich publications with expert information from targeted indexing.
