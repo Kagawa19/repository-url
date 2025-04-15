@@ -313,6 +313,92 @@ class MessageHandler:
         cleaned_text = re.sub(r'(Expertise:[^\n]+)(\s*)(\d+\.)', r'\1\n\n\3', cleaned_text)
         
         return cleaned_text
+
+    @staticmethod
+    def _clean_text_for_user(text: str) -> str:
+        """
+        Enhanced text cleaning for user-facing responses in Markdown format.
+        Removes technical artifacts, properly formats Markdown, and improves readability.
+        Args:
+            text (str): The input text that may contain technical artifacts or raw Markdown
+        Returns:
+            str: Clean, well-formatted text suitable for user display with improved readability
+        """
+        if not text:
+            return ""
+
+        # Remove JSON metadata that might have slipped through
+        metadata_pattern = r'^\s*\{\"is_metadata\"\s*:\s*true.*?\}\s*'
+        text = re.sub(metadata_pattern, '', text, flags=re.MULTILINE)
+        
+        # Fix potential duplicate heading markers
+        text = re.sub(r'(#+)\s*(#+)\s*', r'\1 ', text)
+        
+        # Normalize heading formatting
+        text = re.sub(r'(#+)(\w)', r'\1 \2', text)  # Ensure space after heading markers
+        
+        # Preserve markdown bold formatting (ensure spaces are correct)
+        text = re.sub(r'\*\*\s*(.+?)\s*\*\*', r'**\1**', text)
+        
+        # Normalize bullet points (could be * or - in markdown)
+        text = re.sub(r'^\s*[-*]\s*', '- ', text, flags=re.MULTILINE)  # Standardize to dash style
+        
+        # Fix spaces in DOI links - special case for academic content
+        # First, handle standard DOI URLs
+        text = re.sub(
+            r'(https?://doi\.org/\s*)([\d\.]+(/\s*)?[^\s\)]*)',
+            lambda m: m.group(1).replace(' ', '') + m.group(2).replace(' ', ''),
+            text
+        )
+        
+        # Then handle bare DOI references
+        text = re.sub(
+            r'(DOI:?\s*)(10\.\s*\d+\s*/\s*[^\s\)]+)',
+            lambda m: m.group(1) + m.group(2).replace(' ', ''),
+            text
+        )
+        
+        # Handle numbered lists consistently
+        text = re.sub(r'(\d+)\.\s+([A-Z])', r'\1. \2', text)  # Ensure proper spacing after numbers
+        
+        # Fix missing line breaks before numbered list items
+        text = re.sub(r'([:.\n])\s*(\d+\.\s+)', r'\1\n\n\2', text)
+        
+        # MODIFIED: Updated to handle expertise instead of email
+        # CRITICAL FIX: Ensure expertise information doesn't run into the next numbered item
+        text = re.sub(r'(Expertise:[^\n]+)(\s*)(\d+\.)', r'\1\n\n\3', text)
+        
+        # Clean up excess whitespace while preserving meaningful structure
+        text = re.sub(r'[ \t]+', ' ', text)  # Replace multiple spaces/tabs with single space
+        
+        # Ensure proper Markdown line breaks
+        # Single newlines become Markdown line breaks (with two spaces)
+        text = re.sub(r'(?<!\n)\n(?!\n)', '  \n', text)
+        
+        # But multiple newlines are preserved for paragraph breaks
+        text = re.sub(r'\n{3,}', '\n\n', text)  # Normalize multiple newlines to exactly two
+        
+        # Remove trailing whitespace
+        text = re.sub(r'\s+$', '', text, flags=re.MULTILINE)
+        
+        # Ensure consistent formatting for publication information
+        text = re.sub(r'(Title|Authors|Publication Year|DOI|Abstract|Summary):\s*', r'**\1**: ', text)
+        
+        # CRITICAL FIX: Ensure each bold section starts on a new line
+        text = re.sub(r'([^\n])\s*\*\*([^*:]+):\*\*', r'\1\n\n**\2:**', text)
+        
+        # Fix numbered list items to ensure they're properly formatted with bold names
+        text = re.sub(r'(\d+\.\s+)([^*\n]+)(?=\n)', r'\1**\2**', text)
+        
+        # MODIFIED: Updated to handle expertise instead of email
+        # Fix line breaks for expert entries and expertise 
+        text = re.sub(r'(\d+\.\s+\*\*[^*]+\*\*)\s+Expertise:', r'\1\nExpertise:', text)
+        
+        # Ensure proper spacing between numbered items in a list
+        text = re.sub(r'(\d+\.\s+\*\*[^*]+\*\*(?:\n[^\n]+)?)(\s*)(\d+\.)', r'\1\n\n\3', text)
+        
+        # Final trim of any leading/trailing whitespace
+        return text.strip()
     
     async def process_stream_response(self, response_stream):
         """
