@@ -659,8 +659,13 @@ class MessageHandler:
         if not text:
             return ""
 
-        # CRITICAL FIX: Remove any stray JSON characters (even a single }) at the beginning
+        import re
+
+        # CRITICAL FIX: Remove any stray JSON characters at the beginning
         text = re.sub(r'^\s*[}\]]+\s*', '', text)
+
+        # Remove any stray closing brace '}' anywhere in the text
+        text = re.sub(r'\s*}\s*', ' ', text)
 
         # Remove JSON metadata that might have slipped through
         metadata_pattern = r'^\s*\{\"is_metadata\"\s*:\s*true.*?\}\s*'
@@ -678,7 +683,7 @@ class MessageHandler:
         # Normalize bullet points (could be * or - in markdown)
         text = re.sub(r'^\s*[-*]\s*', '- ', text, flags=re.MULTILINE)  # Standardize to dash style
 
-        # ADDED: Clean up any "Alright" or similar starter phrases that might be duplicated
+        # Clean up repeated starter phrases like "Alright, alright"
         text = re.sub(r'^(Alright!?|Sure!?|Here|I can help|Let me)(\s*\1)+', r'\1', text, flags=re.IGNORECASE)
 
         # Final trim of any leading/trailing whitespace
