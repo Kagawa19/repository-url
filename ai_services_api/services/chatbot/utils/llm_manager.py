@@ -1666,6 +1666,103 @@ class GeminiLLMManager:
         except Exception as e:
             logger.warning(f"All decoding attempts failed: {e}")
             return None
+
+    def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
+        """
+        Format publication information into Markdown format for rendering in the frontend.
+        
+        Args:
+            publications: List of publication dictionaries
+            
+        Returns:
+            Formatted Markdown string with structured publication presentations
+        """
+        if not publications:
+            return "I couldn't find any publications matching your criteria. Would you like me to suggest some related research areas instead?"
+
+        # Create header based on the number of publications
+        markdown_text = "# APHRC Publications\n\n" 
+
+        for idx, publication in enumerate(publications):
+            try:
+                # Extract title
+                title = publication.get('title', 'Untitled Publication').strip()
+                
+                # Use numbered list with clear formatting
+                markdown_text += f"{idx + 1}. **{title}**\n"
+
+                # Add authors with consistent formatting
+                if publication.get('authors'):
+                    authors = publication.get('authors')
+                    # Handle different formats of authors data
+                    if isinstance(authors, str):
+                        try:
+                            authors_data = json.loads(authors)
+                            if isinstance(authors_data, list):
+                                authors = authors_data
+                            else:
+                                authors = [authors]
+                        except json.JSONDecodeError:
+                            authors = [authors]
+                    
+                    if isinstance(authors, list):
+                        # Format author list (limit to 3 with et al.)
+                        if len(authors) > 3:
+                            authors_text = f"{', '.join(str(a) for a in authors[:3])} et al."
+                        else:
+                            authors_text = ', '.join(str(a) for a in authors)
+                        markdown_text += f"   **Authors:** {authors_text}\n"
+                
+                # Add source/journal if available
+                if publication.get('source'):
+                    markdown_text += f"   **Published in:** {publication.get('source')}\n"
+                
+                # Add year if available
+                if publication.get('publication_year'):
+                    markdown_text += f"   **Year:** {publication.get('publication_year')}\n"
+                
+                # Add topic/theme if available
+                if publication.get('topics'):
+                    topics = publication.get('topics')
+                    if isinstance(topics, str):
+                        try:
+                            topics = json.loads(topics)
+                        except json.JSONDecodeError:
+                            pass
+                    
+                    if isinstance(topics, dict) and topics:
+                        # Use the first few topics
+                        topics_text = ', '.join(list(topics.keys())[:3])
+                        markdown_text += f"   **Topics:** {topics_text}\n"
+                
+                # Add summary/abstract (shortened for readability)
+                summary = ""
+                if publication.get('abstract'):
+                    summary = publication.get('abstract')
+                elif publication.get('summary'):
+                    summary = publication.get('summary')
+                    
+                if summary:
+                    # Truncate long summaries
+                    if len(summary) > 200:
+                        summary = summary[:197] + "..."
+                    markdown_text += f"   **Summary:** {summary}\n"
+                
+                # Add DOI if available
+                if publication.get('doi'):
+                    markdown_text += f"   **DOI:** {publication.get('doi')}\n"
+
+                # Add an extra line break between publications for clear separation
+                if idx < len(publications) - 1:
+                    markdown_text += "\n"
+
+            except Exception as e:
+                logger.error(f"Error formatting publication {idx + 1}: {e}")
+                continue
+
+        # Add closing message
+        markdown_text += "\nYou can ask for more details about any of these publications or request information about related research."
+        return markdown_text
         
     async def generate_async_response(self, message: str, user_interests: str = "") -> AsyncGenerator[str, None]:
         """
