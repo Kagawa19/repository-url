@@ -452,81 +452,70 @@ class MessageHandler:
 
    
 
+
     def _format_expert_list_fixed(self, experts_text: str) -> str:
         """
-        Direct fix for expert list formatting issues.
         Parses input text and produces a clean, consistent expert list.
+        Supports both structured lists and paragraph-style text.
         """
         # Add header
         result = "# APHRC Experts\n\n"
-        
-        # Try to extract expert entries using regex
-        expert_entries = re.findall(r'\d+\..*?(?=\d+\.|$)', experts_text, re.DOTALL)
-        
-        # If we couldn't extract numbered entries, try other patterns
+
+        # Try to find paragraph-style expert entries
+        expert_entries = re.findall(r'([A-Z][a-z]+(?:\s[A-Z][a-z]+)*):\s+(.*?)(?=\n[A-Z][a-z]+:|$)', experts_text, re.DOTALL)
+
         if not expert_entries:
-            # Try bulleted or dash items
-            expert_entries = re.findall(r'[-•*].*?(?=[-•*]|$)', experts_text, re.DOTALL)
-        
-        # If we still have nothing, just use the original text with minimal fixes
+            # Fallback to bullet or dash or numbered format
+            expert_entries = re.findall(r'\d+\..*?(?=\d+\.|$)', experts_text, re.DOTALL)
+            if not expert_entries:
+                expert_entries = re.findall(r'[-•*].*?(?=[-•*]|$)', experts_text, re.DOTALL)
+
         if not expert_entries:
             return "# APHRC Experts\n\n" + re.sub(r'\*([^*]+)\*', r'**\1**', experts_text)
-        
-        # Process each expert entry
+
         for i, entry in enumerate(expert_entries):
-            # Clean up the entry
-            entry = entry.strip()
-            
-            # Extract the name
-            name_match = re.search(r'(?:\d+\.|[-•*])\s*(.*?)(?:\s*\n|\s*$)', entry)
-            if name_match:
-                name = name_match.group(1).strip()
-                # Fix improper bold formatting
-                name = re.sub(r'\*([^*]+)\*', r'\1', name)  # Remove single asterisks
-                name = re.sub(r'\*\*([^*]+)\*\*', r'\1', name)  # Remove existing double asterisks
-                
-                # Add properly formatted name
-                result += f"{i+1}. **{name}**\n"
+            if isinstance(entry, tuple):
+                name, description = entry
             else:
-                result += f"{i+1}. **Expert**\n"
-            
-            # Extract other fields
-            designation = re.search(r'(?:Designation|Position):\s*(.*?)(?:\n|$)', entry)
+                # fallback structure
+                name_match = re.match(r'(?:\d+\.|[-•*])?\s*([^\n:]+):?\s*(.*)', entry.strip(), re.DOTALL)
+                if name_match:
+                    name = name_match.group(1).strip()
+                    description = name_match.group(2).strip()
+                else:
+                    name = "Expert"
+                    description = entry.strip()
+
+            result += f"{i + 1}. **{name}**\n"
+
+            # Extract Designation
+            designation = re.search(r'(?:An?|The)?\s*(.*?)\s+in\s+the\s+(.*?)\s+theme', description)
             if designation:
                 result += f"   **Designation:** {designation.group(1).strip()}\n"
-            
-            theme = re.search(r'Theme:\s*(.*?)(?:\n|$)', entry)
-            if theme:
-                theme_text = theme.group(1).strip()
-                # Add expansions for common themes
-                if "HAW" in theme_text and "(" not in theme_text:
-                    theme_text = "HAW (Health and Wellbeing)"
-                elif "SRMNCAH" in theme_text and "(" not in theme_text:
-                    theme_text = "SRMNCAH (Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health)"
-                result += f"   **Theme:** {theme_text}\n"
-            
-            unit = re.search(r'Unit:\s*(.*?)(?:\n|$)', entry)
+                result += f"   **Theme:** {designation.group(2).strip()}\n"
+
+            # Extract Unit
+            unit = re.search(r'within\s+the\s+(.*?)\s+unit', description)
             if unit:
-                unit_text = unit.group(1).strip()
-                # Add expansions for common units
-                if "SRMNCAH" in unit_text and "(" not in unit_text:
-                    unit_text = "SRMNCAH (Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health)"
-                elif "CSI" in unit_text and "(" not in unit_text:
-                    unit_text = "CSI (Center Strategic Initiatives)"
-                result += f"   **Unit:** {unit_text}\n"
-            
-            expertise = re.search(r'(?:Knowledge|Expertise).*?:\s*(.*?)(?:\n|$)', entry)
+                result += f"   **Unit:** {unit.group(1).strip()}\n"
+
+            # Extract Expertise
+            expertise = re.findall(r'expertise.*?in\s+(.*?)(?:\.|\n|$)', description, re.IGNORECASE)
             if expertise:
-                result += f"   **Knowledge & Expertise:** {expertise.group(1).strip()}\n"
-            
-            # Add space between experts
+                result += f"   **Knowledge & Expertise:** {', '.join(e.strip() for e in expertise)}\n"
+            else:
+                # Try fallback extraction from keywords
+                fallback = re.findall(r'specializes in\s+(.*?)(?:\.|\n|$)', description)
+                if fallback:
+                    result += f"   **Knowledge & Expertise:** {', '.join(e.strip() for e in fallback)}\n"
+
             if i < len(expert_entries) - 1:
                 result += "\n"
-        
-        # Add closing
+
         result += "\nYou can ask for more details about any of these experts or request information about their publications."
-        
+
         return result
+
 
     async def process_stream_response(self, response_stream):
         """
