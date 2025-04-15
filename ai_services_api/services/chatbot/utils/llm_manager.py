@@ -1667,100 +1667,46 @@ class GeminiLLMManager:
             logger.warning(f"All decoding attempts failed: {e}")
             return None
 
-    
-
-
-    def _format_publication_list_fixed(self, publications_text: str) -> str:
+    def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
-        Direct fix for publication list formatting issues.
-        Parses input text and produces a clean, consistent publication list.
+        Format publication information into Markdown format with focused presentation.
+        Includes title, summary (trimmed), and DOI link with 'Check it out' text.
         """
-        print("\nStarting formatting of publication list...")
-        
-        # Add header
-        result = "# APHRC Publications\n\n"
-        
-        # Try to extract publication entries using regex
-        pub_entries = re.findall(r'\d+\..*?(?=\d+\.|$)', publications_text, re.DOTALL)
-        print(f"\nExtracted numbered entries: {len(pub_entries)}")
+        if not publications:
+            return "I couldn't find any publications matching your criteria. Would you like me to suggest some related research areas instead?"
 
-        # If we couldn't extract numbered entries, try other patterns
-        if not pub_entries:
-            pub_entries = re.findall(r'[-•*].*?(?=[-•*]|$)', publications_text, re.DOTALL)
-            print(f"\nFallback to bulleted entries: {len(pub_entries)}")
+        markdown_text = "# APHRC Publications\n\n"
 
-        # If we still have nothing, try paragraph-based separation
-        if not pub_entries:
-            pub_entries = re.split(r'\n\s*\n', publications_text)
-            print(f"\nFallback to paragraph split: {len(pub_entries)}")
+        for idx, publication in enumerate(publications):
+            try:
+                title = publication.get('title', 'Untitled Publication').strip()
+                markdown_text += f"{idx + 1}. **{title}**\n"
 
-        # If we still have nothing, just use the original text with minimal fixes
-        if not pub_entries:
-            print("\nNo identifiable entries found. Returning original text with minor formatting.")
-            return "# APHRC Publications\n\n" + re.sub(r'\*([^*]+)\*', r'**\1**', publications_text)
-        
-        # Process each publication entry
-        for i, entry in enumerate(pub_entries):
-            print(f"\nProcessing publication {i+1}")
-            entry = entry.strip()
+                # Add summary/abstract (trimmed to 200 characters max, ending at word boundary)
+                summary = publication.get('abstract') or publication.get('summary') or ""
+                if summary:
+                    trimmed_summary = summary.strip()
+                    if len(trimmed_summary) > 200:
+                        # Trim at the nearest word boundary
+                        trimmed_summary = trimmed_summary[:200].rsplit(" ", 1)[0] + "..."
+                    markdown_text += f"   **Summary:** {trimmed_summary}\n"
 
-            # Extract the title
-            title_match = re.search(r'(?:\d+\.|[-•*])\s*(.*?)(?:\s*\n|\s*$)', entry)
-            if title_match:
-                title = title_match.group(1).strip()
-                title = re.sub(r'\*([^*]+)\*', r'\1', title)  # Remove single asterisks
-                title = re.sub(r'\*\*([^*]+)\*\*', r'\1', title)  # Remove existing double asterisks
-                print(f"  Title: {title}")
-                result += f"{i+1}. **{title}**\n"
-            else:
-                print("  Title not found, using default.")
-                result += f"{i+1}. **Publication**\n"
+                # Add DOI with consistent formatting
+                if publication.get('doi'):
+                    doi = publication['doi'].strip()
+                    if not doi.startswith('http'):
+                        doi = f"https://doi.org/{doi}"
+                    markdown_text += f"   **DOI:** [Check it out]({doi})\n"
 
-            # Extract other fields with debug prints
-            authors = re.search(r'Authors?:\s*(.*?)(?:\n|$)', entry)
-            if authors:
-                print(f"  Authors: {authors.group(1).strip()}")
-                result += f"   **Authors:** {authors.group(1).strip()}\n"
+                if idx < len(publications) - 1:
+                    markdown_text += "\n"
 
-            source = re.search(r'(?:Published in|Journal|Source):\s*(.*?)(?:\n|$)', entry)
-            if source:
-                print(f"  Source: {source.group(1).strip()}")
-                result += f"   **Published in:** {source.group(1).strip()}\n"
+            except Exception as e:
+                logger.error(f"Error formatting publication {idx + 1}: {e}")
 
-            year = re.search(r'(?:Year|Published|Publication date):\s*(.*?)(?:\n|$)', entry)
-            if year:
-                print(f"  Year: {year.group(1).strip()}")
-                result += f"   **Year:** {year.group(1).strip()}\n"
+        markdown_text += "\nYou can ask for more details about any of these publications or request information about related research."
+        return markdown_text
 
-            theme = re.search(r'Theme:\s*(.*?)(?:\n|$)', entry)
-            if theme:
-                print(f"  Theme: {theme.group(1).strip()}")
-                result += f"   **Theme:** {theme.group(1).strip()}\n"
-
-            summary = re.search(r'(?:Summary|Abstract):\s*(.*?)(?:\n|$)', entry)
-            if summary:
-                summary_text = summary.group(1).strip()
-                if len(summary_text) > 200:
-                    summary_text = summary_text[:197] + "..."
-                print(f"  Summary: {summary_text}")
-                result += f"   **Summary:** {summary_text}\n"
-
-            doi = re.search(r'DOI:\s*(.*?)(?:\n|$)', entry)
-            if doi:
-                print(f"  DOI: {doi.group(1).strip()}")
-                result += f"   **DOI:** {doi.group(1).strip()}\n"
-
-            if i < len(pub_entries) - 1:
-                result += "\n"
-
-        # Add closing
-        result += "\nYou can ask for more details about any of these publications or request information about related research."
-
-        print("\nFinal formatted result:\n", result)
-        return result
-
-
-  
 
         
     async def generate_async_response(self, message: str, user_interests: str = "") -> AsyncGenerator[str, None]:
