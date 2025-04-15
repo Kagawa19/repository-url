@@ -175,8 +175,8 @@ class MessageHandler:
 
     async def process_stream_response(self, response_stream):
         """
-        Process the streaming response with enhanced formatting, structure preservation,
-        and improved natural language elements.
+        Process the streaming response with enhanced formatting for expert lists.
+        Detects and applies special formatting for expert and publication lists.
         """
         buffer = ""
         metadata = None
@@ -188,6 +188,10 @@ class MessageHandler:
         structured_buffer = ""
         content_type = None
         
+        # ADDED: Variables for detecting expert lists
+        is_expert_list = False
+        expert_list_detected = False
+        
         try:
             async for chunk in response_stream:
                 if isinstance(chunk, dict) and chunk.get('is_metadata'):
@@ -195,7 +199,11 @@ class MessageHandler:
                     self.metadata = metadata
                     if metadata and 'intent' in metadata:
                         detected_intent = metadata.get('intent')
-                        print(f"[INFO] Detected intent for response styling: {detected_intent}")
+                        # Check if this is an expert query
+                        if detected_intent == 'expert':
+                            is_expert_list = bool(metadata.get('is_list_request', False))
+                            
+                    print(f"[INFO] Detected intent for response styling: {detected_intent}")
                     print(f"[INFO] Captured metadata: {json.dumps(metadata, default=str) if metadata else 'None'}")
                     yield chunk
                     continue
@@ -221,50 +229,59 @@ class MessageHandler:
 
                 text = re.sub(r'^(\s*[}\]]+\s*)+', '', text)
 
-                # Detect expert list content
+                # ADDED: Detect expert list content with improved patterns
                 if not in_structured_content and (
+                    # Numbered expert list (1. Expert Name)
                     re.search(r'\d+\.\s+\*\*[^*]+\*\*', text) or
+                    # Expert list header
                     re.search(r'# Experts|experts (in|at) APHRC|Expert Profile', text) or
-                    re.search(r'([A-Z][a-z]+\s+[A-Z][a-z]+)[^A-Z]*?specializes in', text)
+                    # Named experts with expertise
+                    re.search(r'([A-Z][a-z]+\s+[A-Z][a-z]+)[^A-Z]*?specializes in', text) or
+                    # Theme/Unit specific formatting
+                    re.search(r'\d+\.\s+\*\*[^*]+\*\*\s*\n\s*\*\*Designation:', text) or
+                    re.search(r'\d+\.\s+\*\*[^*]+\*\*\s*\n\s*\*\*Theme:', text)
                 ):
-                    in_structured_content = True
-                    content_type = "expert_list"
-                    structured_buffer = buffer + text
-                    buffer = ""
-                    print(f"[INFO] Entered structured content mode (expert list)")
-                    continue
-                
-                # Detect publication list content
-                if not in_structured_content and (
-                    re.search(r'\d+\.\s+\*\*[^*]+\*\*', text) or
-                    re.search(r'# Publications|publications (on|about) APHRC|Publication List', text) or
-                    re.search(r'publications (related to|on the topic of)', text) or
-                    re.search(r'(paper|article|publication|research) (titled|published in|by)', text)
-                ):
-                    # If we detect keywords specific to publications
-                    if re.search(r'publication|paper|article|research|study|doi', text.lower()):
+                    # Further check if this is likely an expert list
+                    if (
+                        is_expert_list or
+                        re.search(r'(expert|researcher|scientist)', text.lower()) or
+                        detected_intent == 'expert'
+                    ):
                         in_structured_content = True
-                        content_type = "publication_list"
+                        content_type = "expert_list"
                         structured_buffer = buffer + text
+                        expert_list_detected = True
                         buffer = ""
-                        print(f"[INFO] Entered structured content mode (publication list)")
+                        print(f"[INFO] Entered expert list formatting mode")
                         continue
-
-                # Process expert list
+                
+                # ADDED: Special handling for expert lists
                 if in_structured_content and content_type == "expert_list":
                     structured_buffer += text
-                    if re.search(r'Would you like more detailed', structured_buffer):
+                    
+                    # Check if we've reached the end of the expert list
+                    if re.search(r'Would you like more detailed|more information about|anything else', structured_buffer):
                         structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
-                        formatted_text = self._format_expert_list(structured_buffer)
-                        print(f"[INFO] Yielding formatted expert list")
-                        yield formatted_text
-
+                        
+                        # Format the expert list with rich formatting
+                        try:
+                            # Use the new rich expert formatting
+                            formatted_text = self._format_expert_list_rich(structured_buffer)
+                            print(f"[INFO] Yielding richly formatted expert list")
+                            yield formatted_text
+                        except Exception as format_err:
+                            print(f"[ERROR] Error in rich expert formatting: {format_err}")
+                            # Fall back to basic formatting if rich formatting fails
+                            formatted_text = self._format_expert_list(structured_buffer)
+                            yield formatted_text
+                            
                         in_structured_content = False
                         structured_buffer = ""
                         content_type = None
+                        
                     continue
                 
-                # Process publication list
+                # Process publication list (unchanged)
                 if in_structured_content and content_type == "publication_list":
                     structured_buffer += text
                     if re.search(r'Would you like more detailed|Is there anything else', structured_buffer):
@@ -296,8 +313,14 @@ class MessageHandler:
                 structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
 
                 if content_type == "expert_list":
-                    formatted_text = self._format_expert_list(structured_buffer)
-                    print(f"[INFO] Final structured expert list yielded")
+                    try:
+                        # Try rich formatting first
+                        formatted_text = self._format_expert_list_rich(structured_buffer)
+                        print(f"[INFO] Final rich expert list yielded")
+                    except Exception:
+                        # Fall back to basic formatting
+                        formatted_text = self._format_expert_list(structured_buffer)
+                        print(f"[INFO] Final basic expert list yielded")
                     yield formatted_text
                 elif content_type == "publication_list":
                     # Use the new dedicated method for formatting publications
@@ -324,7 +347,12 @@ class MessageHandler:
                 structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
                 try:
                     if content_type == "expert_list":
-                        formatted_text = self._format_expert_list(structured_buffer)
+                        try:
+                            # Try rich formatting first
+                            formatted_text = self._format_expert_list_rich(structured_buffer)
+                        except Exception:
+                            # Fall back to basic formatting
+                            formatted_text = self._format_expert_list(structured_buffer)
                         yield formatted_text
                     elif content_type == "publication_list":
                         # Use the new dedicated method for formatting publications

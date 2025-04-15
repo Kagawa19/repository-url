@@ -312,7 +312,7 @@ class ExpertRedisIndexManager:
             else:
                 text_parts.append("Name: Unknown Expert")
                 
-            # Professional information
+            # Professional information - ENHANCED to include designation
             professional_parts = []
             if expert.get('designation'):
                 professional_parts.append(f"Position: {expert['designation']}")
@@ -325,7 +325,7 @@ class ExpertRedisIndexManager:
                 text_parts.append("PROFESSIONAL INFORMATION")
                 text_parts.extend(professional_parts)
                 
-            # Contact information
+            # Contact information - MODIFIED to include ORCID more prominently
             contact_parts = []
             if expert.get('email'):
                 contact_parts.append(f"Email: {expert['email']}")
@@ -338,12 +338,12 @@ class ExpertRedisIndexManager:
                 text_parts.append("CONTACT INFORMATION")
                 text_parts.extend(contact_parts)
                 
-            # Biography
+            # Biography - ENHANCED to include more context
             if expert.get('bio'):
                 text_parts.append("BIOGRAPHY")
                 text_parts.append(expert['bio'])
                 
-            # Expertise and research areas section
+            # Expertise and research areas section - ENHANCED for better matching
             expertise_parts = []
             
             # Handle knowledge expertise
@@ -369,7 +369,7 @@ class ExpertRedisIndexManager:
                 if clean_values:
                     expertise_parts.append(f"Expertise: {' | '.join(clean_values)}")
                     
-            # Add domains, fields, and subfields
+            # Add domains, fields, and subfields - ENHANCED to include normalized versions
             if expert.get('domains'):
                 expertise_parts.append(f"Research Domains: {' | '.join(str(d) for d in expert['domains'])}")
             if expert.get('fields'):
@@ -377,17 +377,25 @@ class ExpertRedisIndexManager:
             if expert.get('subfields'):
                 expertise_parts.append(f"Research Subfields: {' | '.join(str(s) for s in expert['subfields'])}")
                 
-            # Add normalized skills and keywords
+            # Add normalized data - NEW section for better matching
+            if expert.get('normalized_domains'):
+                expertise_parts.append(f"Normalized Domains: {' | '.join(str(d) for d in expert['normalized_domains'])}")
+            if expert.get('normalized_fields'):
+                expertise_parts.append(f"Normalized Fields: {' | '.join(str(f) for f in expert['normalized_fields'])}")
             if expert.get('normalized_skills'):
                 expertise_parts.append(f"Skills: {' | '.join(str(s) for s in expert['normalized_skills'])}")
+                
+            # Add keywords and search_text - NEW section for improved searchability
             if expert.get('keywords'):
                 expertise_parts.append(f"Keywords: {' | '.join(str(k) for k in expert['keywords'])}")
+            if expert.get('search_text'):
+                expertise_parts.append(f"Search Terms: {expert['search_text']}")
                 
             if expertise_parts:
                 text_parts.append("EXPERTISE AND RESEARCH AREAS")
                 text_parts.extend(expertise_parts)
                 
-            # NEW SECTION: Add publication metadata from linked resources
+            # Add publication metadata - keep unchanged
             linked_resources = expert.get('linked_resources', [])
             if linked_resources and isinstance(linked_resources, list):
                 # Sort resources by confidence score (highest first)

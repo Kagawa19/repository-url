@@ -145,6 +145,9 @@ class GeminiLLMManager:
             self.context_expiry = 1800
             self.confidence_threshold = 0.6
 
+            self.expert_list_cache = {}
+            self.cache_expiry = 3600
+
             # New enhancements
             self._rate_limited = False
             self._last_rate_limit_time = 0
@@ -204,6 +207,50 @@ class GeminiLLMManager:
             if self.state == "half-open":
                 self.state = "closed"
             self.failures = 0
+
+    async def get_experts_with_caching(self, query: str, limit: int = 5) -> Tuple[List[Dict], Optional[str]]:
+        """
+        Get experts with caching for repeated queries, especially list queries.
+        
+        Args:
+            query (str): Search query
+            limit (int): Maximum number of results
+            
+        Returns:
+            Tuple[List[Dict], Optional[str]]: Expert data and optional message
+        """
+        # Generate cache key from normalized query
+        cache_key = query.lower().strip()
+        
+        # Check cache first
+        now = time.time()
+        if cache_key in self.expert_list_cache:
+            cached_data, timestamp = self.expert_list_cache[cache_key]
+            # If cache is still valid
+            if now - timestamp < self.cache_expiry:
+                logger.info(f"Using cached expert data for query: {query}")
+                return cached_data[0][:limit], cached_data[1]
+        
+        # Get fresh results
+        experts, message = await self.get_experts(query, limit)
+        
+        # Store in cache
+        self.expert_list_cache[cache_key] = ((experts, message), now)
+        
+        # Clean up expired cache entries
+        self._cleanup_expert_cache()
+        
+        return experts, message
+
+    def _cleanup_expert_cache(self):
+        """Clean up expired cache entries."""
+        now = time.time()
+        expired_keys = [
+            key for key, (_, timestamp) in self.expert_list_cache.items()
+            if now - timestamp > self.cache_expiry
+        ]
+        for key in expired_keys:
+            del self.expert_list_cache[key]
 
 
     def _safe_load_embedding(self, embedding_data):
@@ -565,8 +612,17 @@ class GeminiLLMManager:
             # Check if this is a "list experts" request
             is_list_request = bool(re.search(r'\b(list|show|all|many)\b.*?\b(expert|researcher|scientist|specialist)', query.lower()))
             
-            # Adjust limit for list requests - FIXED: Changed 'O' to '0'
-            if is_list_request and limit < 0:  # Fixed from "limit < O"
+            # ADDED: Check for theme-specific queries like "theme HAW"
+            theme_match = re.search(r'\b(theme|unit|department|field)\s+([A-Za-z0-9]+)\b', query.lower())
+            search_field = None
+            search_value = None
+            if theme_match:
+                search_field = theme_match.group(1)
+                search_value = theme_match.group(2).upper()  # Convert to uppercase for matching abbreviations
+                logger.info(f"Detected specific {search_field} search for '{search_value}'")
+            
+            # Adjust limit for list requests
+            if is_list_request and limit < 5:
                 limit = 5  # Increase limit for explicit list requests
                 logger.info(f"Detected list request, increased limit to {limit}")
 
@@ -638,7 +694,7 @@ class GeminiLLMManager:
                 # Skip very short terms and common words
                 if len(term) <= 2 or term in ['is', 'there', 'an', 'expert', 'who', 'the', 'a', 'of', 'and', 
                                             'what', 'where', 'when', 'how', 'why', 'which', 'this', 'that',
-                                            'list', 'show', 'all', 'many']:  # Skip request indicators
+                                            'list', 'show', 'all', 'many', 'theme', 'unit', 'department', 'field']:
                     continue
                     
                 # Categorize terms (could be in multiple categories)
@@ -674,6 +730,34 @@ class GeminiLLMManager:
                     if is_list_request:
                         match_score = 0.3  # Base score for list requests
                         matched_criteria.append("Included in expert list")
+                    
+                    # ADDED: Handle specific theme/unit search
+                    if search_field and search_value:
+                        expert_value = None
+                        if search_field == 'theme':
+                            expert_value = expert.get('theme', '').upper()
+                        elif search_field in ['unit', 'department']:
+                            expert_value = expert.get('unit', '').upper()
+                        elif search_field == 'field':
+                            # Check fields JSON array
+                            try:
+                                fields = json.loads(expert.get('fields', '[]'))
+                                expert_value = ' '.join([str(f).upper() for f in fields if f])
+                            except:
+                                expert_value = ''
+                        
+                        # Exact match gives high score
+                        if expert_value and search_value in expert_value:
+                            match_score += 0.9
+                            matched_criteria.append(f"Matched {search_field} '{search_value}'")
+                            # For exact theme match, add 0.5 to the score (total 1.4)
+                            if search_field == 'theme' and expert_value == search_value:
+                                match_score += 0.5
+                                matched_criteria.append(f"Exact {search_field} match")
+                            # For partial theme match like 'HAW' in 'HAWL', add 0.3 (total 1.2)
+                            elif search_field == 'theme' and search_value in expert_value:
+                                match_score += 0.3
+                                matched_criteria.append(f"Partial {search_field} match")
                     
                     # 1. NAME MATCHING - check first name, last name, middle name
                     expert_first_name = expert.get('first_name', '').lower()
@@ -770,34 +854,23 @@ class GeminiLLMManager:
                                 match_score += 0.4
                                 matched_criteria.append(f"Biography contains '{term}'")
                     
+                    # ADDED: Check if "HAW" or other theme abbreviation appears anywhere
+                    if theme_match and search_value:
+                        # Check designation, bio and other text fields
+                        for field in ['designation', 'bio', 'knowledge_expertise']:
+                            field_text = str(expert.get(field, '')).upper()
+                            if search_value in field_text:
+                                match_score += 0.4
+                                matched_criteria.append(f"{field.capitalize()} contains '{search_value}'")
+                    
                     # Adjust threshold based on request type
                     match_threshold = 0.1 if is_list_request else 0.3  # Lower threshold for list requests
+                    # Further lower threshold for specific theme/unit searches
+                    if search_field and search_value:
+                        match_threshold = 0.05
                     
                     if match_score > match_threshold:
                         logger.info(f"Expert {expert_id} matched with score {match_score:.2f}: {', '.join(matched_criteria[:3])}")
-                        
-                        # Get embedding from Redis
-                        embedding_key = f"emb:aphrc_expert:{expert_id}"
-                        embedding_data = None
-                        
-                        try:
-                            if is_async_redis:
-                                if hasattr(self.redis_manager.redis_text, 'aget'):
-                                    embedding_data = await self.redis_manager.redis_text.aget(embedding_key)
-                                else:
-                                    embedding_data = await self.redis_manager.redis_text.get(embedding_key)
-                            else:
-                                embedding_data = self.redis_manager.redis_text.get(embedding_key)
-                            
-                            if embedding_data:
-                                # MODIFIED: Use _safe_load_embedding helper for binary handling
-                                try:
-                                    # This new method properly handles binary data with different encodings
-                                    expert['embedding'] = self._safe_load_embedding(embedding_data)
-                                except Exception as safe_load_err:
-                                    logger.warning(f"Failed to load embedding for {expert_id}: {safe_load_err}")
-                        except Exception as emb_err:
-                            logger.warning(f"Failed to load embedding for {expert_id}: {emb_err}")
                         
                         # ADDED: Ensure knowledge_expertise is explicitly retrieved and included
                         if 'knowledge_expertise' not in expert or not expert['knowledge_expertise']:
@@ -851,54 +924,6 @@ class GeminiLLMManager:
                             if not expert.get('knowledge_expertise'):
                                 expert['knowledge_expertise'] = "Health research"
                         
-                        # Retrieve and add linked publications
-                        links_key = f"links:expert:{expert_id}:resources"
-                        if is_async_redis:
-                            if hasattr(self.redis_manager.redis_text, 'azrevrange'):
-                                resource_items = await self.redis_manager.redis_text.azrevrange(
-                                    links_key, 0, 2, withscores=True
-                                )
-                            else:
-                                resource_items = await self.redis_manager.redis_text.zrevrange(
-                                    links_key, 0, 2, withscores=True
-                                )
-                        else:
-                            resource_items = self.redis_manager.redis_text.zrevrange(
-                                links_key, 0, 2, withscores=True
-                            )
-                        
-                        publications = []
-                        if resource_items:
-                            for resource_id, confidence in resource_items:
-                                resource_key = f"meta:resource:{resource_id}"
-                                
-                                # Fetch resource metadata
-                                resource_meta = {}
-                                try:
-                                    if is_async_redis:
-                                        if hasattr(self.redis_manager.redis_text, 'ahgetall'):
-                                            resource_meta = await self.redis_manager.redis_text.ahgetall(resource_key)
-                                        else:
-                                            resource_meta = await self.redis_manager.redis_text.hgetall(resource_key)
-                                    else:
-                                        resource_meta = self.redis_manager.redis_text.hgetall(resource_key)
-                                except Exception as res_err:
-                                    logger.warning(f"Error fetching resource {resource_id}: {res_err}")
-                                
-                                if resource_meta:
-                                    # Only include essential publication info
-                                    publication = {
-                                        'id': resource_id,
-                                        'title': resource_meta.get('title', 'Untitled Publication'),
-                                        'publication_year': resource_meta.get('publication_year', ''),
-                                        'doi': resource_meta.get('doi', ''),
-                                        'confidence': confidence
-                                    }
-                                    publications.append(publication)
-                        
-                        # Add publications to expert data
-                        expert['publications'] = publications
-                        
                         # Store match score for ranking
                         expert['match_score'] = match_score
                         expert['matched_criteria'] = matched_criteria
@@ -935,7 +960,6 @@ class GeminiLLMManager:
                             expert_id = expert.get('id') or key.split(':')[-1]
                             expert['match_score'] = 0.5  # Default score
                             expert['matched_criteria'] = ["Top expert"]
-                            expert['publications'] = []
                             
                             # ADDED: Ensure knowledge_expertise is included for fallback experts too
                             if 'knowledge_expertise' not in expert or not expert['knowledge_expertise']:
@@ -965,6 +989,13 @@ class GeminiLLMManager:
                     except Exception as e:
                         logger.warning(f"Error processing fallback expert: {e}")
                         continue
+                    
+                # Add a note that these are fallback experts if we had to use fallbacks
+                if experts:
+                    if search_field and search_value:
+                        return experts[:limit], f"No experts found with exact {search_field} '{search_value}'. Showing top experts instead."
+                    else:
+                        return experts[:limit], "No experts matched your query exactly. Showing top experts instead."
             
             # If we have too many matches, filter and rank them
             if len(experts) > limit:
@@ -982,7 +1013,35 @@ class GeminiLLMManager:
                 if query_embedding is not None:
                     try:
                         # For experts with embeddings, calculate semantic similarity
-                        experts_with_embeddings = [e for e in experts if 'embedding' in e and e['embedding'] is not None]
+                        experts_with_embeddings = []
+                        for expert in experts:
+                            # Try to get embedding 
+                            if 'embedding' not in expert or expert['embedding'] is None:
+                                # Get embedding from Redis
+                                expert_id = expert.get('id', '')
+                                if expert_id:
+                                    embedding_key = f"emb:aphrc_expert:{expert_id}"
+                                    try:
+                                        embedding_data = None
+                                        if is_async_redis:
+                                            if hasattr(self.redis_manager.redis_text, 'aget'):
+                                                embedding_data = await self.redis_manager.redis_text.aget(embedding_key)
+                                            else:
+                                                embedding_data = await self.redis_manager.redis_text.get(embedding_key)
+                                        else:
+                                            embedding_data = self.redis_manager.redis_text.get(embedding_key)
+                                        
+                                        if embedding_data:
+                                            # Use _safe_load_embedding helper for binary handling
+                                            try:
+                                                expert['embedding'] = self._safe_load_embedding(embedding_data)
+                                            except Exception as safe_load_err:
+                                                logger.warning(f"Failed to load embedding for {expert_id}: {safe_load_err}")
+                                    except Exception as emb_err:
+                                        logger.warning(f"Failed to load embedding for {expert_id}: {emb_err}")
+                            
+                            if 'embedding' in expert and expert['embedding'] is not None:
+                                experts_with_embeddings.append(expert)
                         
                         if experts_with_embeddings:
                             # Calculate semantic similarity scores
@@ -1018,7 +1077,6 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error fetching experts: {e}")
             return [], str(e)
-
     
                 
     def _create_tailored_prompt(self, intent, context_type: str, message_style: str) -> str:
@@ -1200,13 +1258,273 @@ class GeminiLLMManager:
         else:
             return "conversational"
 
+    def rich_expert_summary(self, experts: List[Dict[str, Any]], include_header: bool = True) -> str:
+        """
+        Create a rich, well-formatted summary of experts optimized for readability.
+        Uses the requested format for expert listings.
+        
+        Args:
+            experts (List[Dict]): List of expert dictionaries
+            include_header (bool): Whether to include a header
+            
+        Returns:
+            str: Richly formatted expert summary
+        """
+        if not experts:
+            return "I couldn't find any experts matching your criteria. Would you like me to suggest some related experts instead?"
+        
+        # Begin with optional header
+        lines = []
+        if include_header:
+            if len(experts) > 1:
+                lines.append("# APHRC Experts\n")
+            else:
+                lines.append("# APHRC Expert Profile\n")
+        
+        # Format each expert according to the requested format
+        for i, expert in enumerate(experts):
+            # Get the expert's name
+            first_name = expert.get('first_name', '').strip()
+            last_name = expert.get('last_name', '').strip()
+            full_name = f"{first_name} {last_name}".strip()
+            
+            # Start with the numbered list item
+            lines.append(f"{i+1}. **{full_name}**")
+            
+            # Add designation
+            designation = expert.get('designation', '')
+            if designation:
+                lines.append(f"   **Designation:** {designation}")
+            
+            # Add theme with expansion
+            theme = expert.get('theme', '')
+            if theme:
+                theme_expanded = self.expand_abbreviation(theme, 'theme')
+                lines.append(f"   **Theme:** {theme_expanded}")
+            
+            # Add unit with expansion
+            unit = expert.get('unit', '')
+            if unit:
+                unit_expanded = self.expand_abbreviation(unit, 'unit')
+                lines.append(f"   **Unit:** {unit_expanded}")
+            
+            # Add knowledge expertise
+            expertise = self.format_knowledge_expertise(expert)
+            lines.append(f"   **Knowledge & Expertise:** {expertise}")
+            
+            # Add separator between experts
+            if i < len(experts) - 1:
+                lines.append("")
+        
+        # Add suggestion for further exploration
+        lines.append("\nYou can ask for more details about any specific expert or request information about their publications.")
+        
+        # Join all lines with newlines
+        return "\n".join(lines)
+
+    def extract_search_criteria(self, query: str) -> Dict[str, str]:
+        """
+        Extract search criteria from a query string.
+        Detects theme, unit, and other specific search parameters.
+        
+        Args:
+            query (str): The user's search query
+            
+        Returns:
+            Dict[str, str]: Dictionary of extracted search criteria
+        """
+        criteria = {}
+        
+        # Extract theme criteria
+        theme_match = re.search(r'\b(?:theme|in theme|with theme)\s+([A-Za-z0-9]+)\b', query.lower())
+        if theme_match:
+            criteria['theme'] = theme_match.group(1).upper()
+        
+        # Extract unit criteria
+        unit_match = re.search(r'\b(?:unit|in unit|with unit|department)\s+([A-Za-z0-9]+)\b', query.lower())
+        if unit_match:
+            criteria['unit'] = unit_match.group(1).upper()
+        
+        # Extract field/expertise criteria
+        field_match = re.search(r'\b(?:field|expertise|specializing in|working on)\s+([A-Za-z0-9\s]+?)\b(?:\s|$)', query.lower())
+        if field_match:
+            criteria['expertise'] = field_match.group(1).strip()
+        
+        # Extract location criteria
+        location_match = re.search(r'\bin\s+([A-Za-z\s]+?)\b(?:\s|$)', query.lower())
+        if location_match and 'theme' not in criteria and 'unit' not in criteria:
+            location = location_match.group(1).strip()
+            if location not in ['aphrc', 'the', 'health', 'research', 'center', 'centre']:
+                criteria['location'] = location
+        
+        # Check for list request
+        is_list_request = bool(re.search(r'\b(list|show|all|many)\b.*?\b(expert|researcher|scientist|specialist)', query.lower()))
+        if is_list_request:
+            criteria['is_list'] = 'true'
+        
+        return criteria
+
+    def format_knowledge_expertise(self, expert: Dict[str, Any], max_items: int = 3) -> str:
+        """
+        Extract and format knowledge expertise from expert data with rich fallbacks.
+        
+        Args:
+            expert (Dict[str, Any]): Expert dictionary with fields from database
+            max_items (int): Maximum number of expertise items to include
+            
+        Returns:
+            str: Formatted knowledge expertise string
+        """
+        # Try knowledge_expertise field first (preferred source)
+        if expert.get('knowledge_expertise'):
+            expertise = expert['knowledge_expertise']
+            
+            # If it's a string with commas, split and format
+            if isinstance(expertise, str) and ',' in expertise:
+                items = [item.strip() for item in expertise.split(',')]
+                return ' | '.join(items[:max_items])
+            
+            # If it's a list, format it
+            elif isinstance(expertise, list):
+                items = [str(item).strip() for item in expertise if item]
+                return ' | '.join(items[:max_items])
+            
+            # Otherwise, use as is
+            return str(expertise)
+        
+        # Try expertise field next (second choice)
+        if expert.get('expertise'):
+            try:
+                expertise = expert['expertise']
+                
+                # If it's a JSON string, parse it
+                if isinstance(expertise, str) and (expertise.startswith('{') or expertise.startswith('[')):
+                    expertise = json.loads(expertise)
+                
+                # Handle dict format
+                if isinstance(expertise, dict):
+                    # Extract values
+                    values = []
+                    for v in expertise.values():
+                        if isinstance(v, list):
+                            values.extend([str(item) for item in v if item])
+                        elif v:
+                            values.append(str(v))
+                    return ' | '.join(values[:max_items])
+                
+                # Handle list format
+                elif isinstance(expertise, list):
+                    return ' | '.join([str(item) for item in expertise[:max_items] if item])
+                
+                # Otherwise, use as string
+                return str(expertise)
+            except:
+                # If parsing fails, use as string
+                return str(expertise)
+        
+        # Try normalized_skills field (third choice)
+        if expert.get('normalized_skills'):
+            try:
+                skills = expert['normalized_skills']
+                
+                # If it's a JSON string, parse it
+                if isinstance(skills, str) and (skills.startswith('[') or skills.startswith('{')):
+                    skills = json.loads(skills)
+                
+                # Format as list
+                if isinstance(skills, list):
+                    return ' | '.join([str(item) for item in skills[:max_items] if item])
+                
+                return str(skills)
+            except:
+                return str(skills)
+        
+        # Try other fields as fallbacks
+        for field in ['fields', 'domains', 'subfields', 'keywords']:
+            if expert.get(field):
+                try:
+                    data = expert[field]
+                    
+                    # If it's a JSON string, parse it
+                    if isinstance(data, str) and (data.startswith('[') or data.startswith('{')):
+                        data = json.loads(data)
+                    
+                    # Format as list
+                    if isinstance(data, list):
+                        return ' | '.join([str(item) for item in data[:max_items] if item])
+                    
+                    return str(data)
+                except:
+                    continue
+        
+        # Last resort - check if bio exists and extract a relevant snippet
+        if expert.get('bio'):
+            bio = expert['bio']
+            expertise_snippet = re.search(r'expertise in\s+([^.]+)', bio, re.IGNORECASE)
+            if expertise_snippet:
+                return expertise_snippet.group(1).strip()
+        
+        # If all else fails
+        return "Health research"
+
+    def expand_abbreviation(self, abbreviation: str, abbr_type: str = 'theme') -> str:
+        """
+        Expand common APHRC abbreviations for themes and units to their full names.
+        
+        Args:
+            abbreviation (str): The abbreviation to expand
+            abbr_type (str): Type of abbreviation ('theme' or 'unit')
+            
+        Returns:
+            str: Expanded form or original string if not found
+        """
+        # Theme abbreviations
+        theme_expansions = {
+            'HAW': 'Health and Wellbeing',
+            'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
+            'UHP': 'Urban Health and Poverty',
+            'ECD': 'Early Childhood Development',
+            'PEC': 'Population, Environment, and Climate',
+            'RSD': 'Research Systems Development',
+            'HDSS': 'Health and Demographic Surveillance System',
+            'MCH': 'Maternal and Child Health',
+            'NCDA': 'Non-Communicable Diseases Alliance',
+            'SRHR': 'Sexual and Reproductive Health and Rights'
+        }
+        
+        # Unit abbreviations
+        unit_expansions = {
+            'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
+            'RSD': 'Research Systems Development',
+            'IDSSS': 'Innovations and Data Systems Support Services',
+            'KDHS': 'Kenya Demographic Health Survey',
+            'PMTCT': 'Prevention of Mother-to-Child Transmission',
+            'SSA': 'Sub-Saharan Africa',
+            'M&E': 'Monitoring and Evaluation',
+            'HMIS': 'Health Management Information Systems',
+            'HSS': 'Health Systems Strengthening'
+        }
+        
+        # Select the appropriate expansion dictionary
+        expansions = theme_expansions if abbr_type.lower() == 'theme' else unit_expansions
+        
+        # Try to find a match (case insensitive)
+        for abbr, full_name in expansions.items():
+            if abbreviation.upper() == abbr:
+                return f"{abbreviation} ({full_name})"
+        
+        # No match found, return original
+        return abbreviation
+
    
 
     def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
         """
         Format expert information into Markdown format for rendering in the frontend.
+        
         Args:
             experts: List of expert dictionaries
+            
         Returns:
             Formatted Markdown string with structured expert presentations
         """
@@ -1226,36 +1544,79 @@ class GeminiLLMManager:
                 # Use numbered list with clear formatting
                 markdown_text += f"{idx + 1}. **{full_name}**\n\n"
 
-                # Ensure consistent indentation with 4 spaces for all fields
-                # Add position and department if available
-                position = expert.get('position', '')
-                department = expert.get('department', '')
-                if position and department:
-                    markdown_text += f"    - **Position:** {position} in the {department}\n\n"
-                elif position:
-                    markdown_text += f"    - **Position:** {position}\n\n"
-                elif department:
-                    markdown_text += f"    - **Department:** {department}\n\n"
+                # ADDED: Format and include designation (position/title)
+                designation = expert.get('designation', '')
+                if designation:
+                    markdown_text += f"    - **Designation:** {designation}\n\n"
+                
+                # ADDED: Format and include theme with expansion
+                theme = expert.get('theme', '')
+                if theme:
+                    # Expand common theme abbreviations
+                    theme_expansion = {
+                        'HAW': 'Health and Wellbeing',
+                        'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
+                        'UHP': 'Urban Health and Poverty',
+                        'ECD': 'Early Childhood Development',
+                        'PEC': 'Population, Environment, and Climate'
+                    }
+                    
+                    theme_full = f"{theme} ({theme_expansion.get(theme, '')})" if theme in theme_expansion else theme
+                    markdown_text += f"    - **Theme:** {theme_full}\n\n"
+                
+                # ADDED: Format and include unit with expansion
+                unit = expert.get('unit', '')
+                if unit:
+                    # Expand common unit abbreviations
+                    unit_expansion = {
+                        'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
+                        'RSD': 'Research Systems Development',
+                        'IDSSS': 'Innovations and Data Systems Support Services',
+                        'KDHS': 'Kenya Demographic Health Survey'
+                    }
+                    
+                    unit_full = f"{unit} ({unit_expansion.get(unit, '')})" if unit in unit_expansion else unit
+                    markdown_text += f"    - **Unit:** {unit_full}\n\n"
 
                 # Display expertise with consistent formatting
                 knowledge_expertise = expert.get('knowledge_expertise', '')
                 if knowledge_expertise:
-                    markdown_text += f"    - **Expertise:** {knowledge_expertise}\n\n"
+                    # Format knowledge expertise as a list if possible
+                    if isinstance(knowledge_expertise, str) and ',' in knowledge_expertise:
+                        expertise_items = [item.strip() for item in knowledge_expertise.split(',')][:3]  # Limit to top 3
+                        markdown_text += f"    - **Knowledge & Expertise:** {' | '.join(expertise_items)}\n\n"
+                    elif isinstance(knowledge_expertise, list):
+                        expertise_items = [str(item).strip() for item in knowledge_expertise][:3]  # Limit to top 3
+                        markdown_text += f"    - **Knowledge & Expertise:** {' | '.join(expertise_items)}\n\n"
+                    else:
+                        markdown_text += f"    - **Knowledge & Expertise:** {knowledge_expertise}\n\n"
                 else:
                     # Try to get expertise from other fields if knowledge_expertise is not available
                     expertise_fields = expert.get('expertise', [])
                     if expertise_fields:
                         if isinstance(expertise_fields, list):
-                            expertise_str = ", ".join(expertise_fields)
+                            expertise_str = " | ".join(str(item) for item in expertise_fields[:3])  # Limit to top 3
+                        elif isinstance(expertise_fields, dict):
+                            expertise_str = " | ".join(str(v) for v in list(expertise_fields.values())[:3])  # Limit to top 3
                         else:
                             expertise_str = str(expertise_fields)
-                        markdown_text += f"    - **Expertise:** {expertise_str}\n\n"
+                        markdown_text += f"    - **Knowledge & Expertise:** {expertise_str}\n\n"
 
-                # Add notable publications with consistent indentation if available
+                # ADDED: Include bio if available (but truncated for readability)
+                bio = expert.get('bio', '')
+                if bio:
+                    # Truncate long bio to about 100-150 words for readability
+                    if len(bio) > 300:
+                        bio_words = bio.split()
+                        if len(bio_words) > 50:
+                            bio = ' '.join(bio_words[:50]) + '...'
+                    markdown_text += f"    - **Bio:** {bio}\n\n"
+
+                # ADDED: Add notable publications with consistent indentation if available
                 publications = expert.get('publications', [])
                 if publications:
                     markdown_text += "    - **Notable publications:**\n\n"
-                    for pub in publications[:2]:
+                    for pub in publications[:2]:  # Limit to top 2 publications
                         pub_title = pub.get('title', 'Untitled')
                         pub_year = pub.get('publication_year', '')
                         year_text = f" ({pub_year})" if pub_year else ""
@@ -1272,7 +1633,6 @@ class GeminiLLMManager:
         # Add closing message
         markdown_text += "\nWould you like more detailed information about any of these experts? You can ask by name or area of expertise."
         return markdown_text
-            
     def safely_decode_binary_data(self, binary_data, default_encoding='utf-8'):
         """
         Safely decode binary data using multiple encoding attempts.
