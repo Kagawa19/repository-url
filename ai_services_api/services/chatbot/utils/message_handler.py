@@ -364,12 +364,18 @@ class MessageHandler:
         # Fix missing line breaks before numbered list items
         text = re.sub(r'([:.\n])\s*(\d+\.\s+)', r'\1\n\n\2', text)
         
-        # MODIFIED: Updated to handle expertise instead of email
-        # CRITICAL FIX: Ensure expertise information doesn't run into the next numbered item
+        # Ensure expertise information doesn't run into the next numbered item
         text = re.sub(r'(Expertise:[^\n]+)(\s*)(\d+\.)', r'\1\n\n\3', text)
         
         # Clean up excess whitespace while preserving meaningful structure
         text = re.sub(r'[ \t]+', ' ', text)  # Replace multiple spaces/tabs with single space
+        
+        # IMPORTANT: Ensure proper line breaks in expert lists
+        # Make sure each numbered expert entry starts with clear spacing
+        text = re.sub(r'([^\n])\n(\d+\.\s+\*\*)', r'\1\n\n\2', text)
+        
+        # Ensure proper spacing between experts in a list
+        text = re.sub(r'(\*\*Expertise:[^\n]+)\n(\d+\.)', r'\1\n\n\2', text)
         
         # Ensure proper Markdown line breaks
         # Single newlines become Markdown line breaks (with two spaces)
@@ -384,30 +390,81 @@ class MessageHandler:
         # Ensure consistent formatting for publication information
         text = re.sub(r'(Title|Authors|Publication Year|DOI|Abstract|Summary):\s*', r'**\1**: ', text)
         
-        # CRITICAL FIX: Ensure each bold section starts on a new line
+        # Ensure each bold section starts on a new line
         text = re.sub(r'([^\n])\s*\*\*([^*:]+):\*\*', r'\1\n\n**\2:**', text)
         
         # Fix numbered list items to ensure they're properly formatted with bold names
         text = re.sub(r'(\d+\.\s+)([^*\n]+)(?=\n)', r'\1**\2**', text)
         
-        # MODIFIED: Updated to handle expertise instead of email
         # Fix line breaks for expert entries and expertise 
         text = re.sub(r'(\d+\.\s+\*\*[^*]+\*\*)\s+Expertise:', r'\1\nExpertise:', text)
         
         # Ensure proper spacing between numbered items in a list
         text = re.sub(r'(\d+\.\s+\*\*[^*]+\*\*(?:\n[^\n]+)?)(\s*)(\d+\.)', r'\1\n\n\3', text)
         
+        # ADDED: Force proper formatting for bullet lists
+        # Convert dash/asterisk lists to proper bullet points with line breaks
+        text = re.sub(r'([^\n])(\n\s*[-*]\s+)', r'\1\n\n\2', text)
+        
+        # ADDED: Clean up expert listings specifically
+        if "Expert" in text and "APHRC" in text:
+            # Convert dash-based expert lists to numbered format if needed
+            if re.search(r'[-*]\s+[A-Z][a-z]+\s+[A-Z][a-z]+', text):
+                experts = re.findall(r'[-*]\s+([A-Z][a-z]+\s+[A-Z][a-z]+[^\n]*)', text)
+                if experts:
+                    for i, expert in enumerate(experts, 1):
+                        # Replace dash with numbered format
+                        pattern = r'[-*]\s+' + re.escape(expert)
+                        replacement = f"{i}. **{expert}**"
+                        text = re.sub(pattern, replacement, text)
+            
+            # Ensure expertise appears on its own line
+            text = re.sub(r'(\*\*[^*\n]+\*\*)\s+([A-Za-z]+:)', r'\1\n\2', text)
+            
+            # Convert informal lists to properly formatted expert lists
+            if "," in text and not re.search(r'\d+\.\s+\*\*', text):
+                # Extract header
+                header_match = re.search(r'^(.*?)((?:Elizabeth|Caroline|Hesborn|Dr\.|Prof\.)[^\n,]*)', text, re.DOTALL)
+                if header_match:
+                    header = header_match.group(1).strip()
+                    # Extract expert names
+                    names_text = text[header_match.end():]
+                    expert_names = re.findall(r'([A-Z][a-z]+\s+[A-Z][a-z]+)', names_text)
+                    
+                    if expert_names and len(expert_names) >= 2:
+                        formatted_text = f"{header}\n\n"
+                        for i, name in enumerate(expert_names, 1):
+                            formatted_text += f"{i}. **{name}**\n\n"
+                        
+                        # Try to match expertise for each expert
+                        expertise_matches = re.findall(r'([A-Z][a-z]+\s+[A-Z][a-z]+)[^A-Z]*?specializes in ([^\n.]+)', text)
+                        if expertise_matches:
+                            expertise_dict = {name: expertise for name, expertise in expertise_matches}
+                            
+                            # Replace the formatted text with expertise included
+                            formatted_text = f"{header}\n\n"
+                            for i, name in enumerate(expert_names, 1):
+                                formatted_text += f"{i}. **{name}**\n"
+                                if name in expertise_dict:
+                                    formatted_text += f"    - **Expertise:** {expertise_dict[name]}\n\n"
+                                else:
+                                    formatted_text += "\n"
+                            
+                        # Add the closing message
+                        closing_match = re.search(r'(Would you like more detailed.*?)$', text, re.DOTALL)
+                        if closing_match:
+                            formatted_text += closing_match.group(1)
+                        
+                        text = formatted_text
+        
         # Final trim of any leading/trailing whitespace
         return text.strip()
-    
+
+
     async def process_stream_response(self, response_stream):
         """
         Process the streaming response with enhanced formatting, structure preservation,
-        and improved natural language elements. Now with better publication handling.
-        Args:
-            response_stream: Async generator of response chunks
-        Yields:
-            str or dict: Cleaned and formatted response chunks with natural language improvements
+        and improved natural language elements.
         """
         buffer = ""
         metadata = None
@@ -418,7 +475,7 @@ class MessageHandler:
         # Track different content segments for better processing
         in_structured_content = False
         structured_buffer = ""
-        content_type = None  # Will be "publication_list" or "expert_list" for more specific handling
+        content_type = None  # Will be "publication_list" or "expert_list" for specific handling
         
         try:
             async for chunk in response_stream:
@@ -449,143 +506,35 @@ class MessageHandler:
                 if not text.strip():
                     continue
 
-                # Add natural language improvements for first chunk based on intent
-                if is_first_chunk and detected_intent and not transition_inserted:
-                    intro_text = ""
-                    if detected_intent == "publication":
-                        intro_prefix = self._get_random_intro("publication")
-                        if intro_prefix and not text.startswith(intro_prefix):
-                            intro_text = intro_prefix
-                    elif detected_intent == "expert":
-                        intro_prefix = self._get_random_intro("expert")
-                        if intro_prefix and not text.startswith(intro_prefix):
-                            intro_text = intro_prefix
-                    elif detected_intent == "navigation":
-                        intro_prefix = self._get_random_intro("navigation")
-                        if intro_prefix and not text.startswith(intro_prefix):
-                            intro_text = intro_prefix
-                    
-                    if intro_text:
-                        yield intro_text
-                        transition_inserted = True
-                    is_first_chunk = False
-
-                # IMPROVED: Checking for multiple types of structured content with better detection
-                # Check if we're entering a publication list
+                # Check if this is an expert list
                 if not in_structured_content and (
-                    re.search(r'\d+\.\s+(Title:|Publication|Author|DOI:)', text, re.IGNORECASE) or
-                    re.search(r'# Publications|# APHRC Publications', text) or
-                    re.search(r'publications matching your query', text)
-                ):
-                    in_structured_content = True
-                    content_type = "publication_list"  # More specific content type
-                    structured_buffer = buffer + text
-                    buffer = ""
-                    
-                    # Insert appropriate transition if needed
-                    if not transition_inserted and detected_intent:
-                        if "publication" in str(detected_intent).lower():
-                            yield self._get_random_transition("publication_list")
-                        transition_inserted = True
-                    continue
-                
-                # Check if we're entering an expert list
-                elif not in_structured_content and (
                     re.search(r'\d+\.\s+\*\*[^*]+\*\*', text) or
-                    re.search(r'# Experts|experts (in|at) APHRC|Expert Profile', text)
+                    re.search(r'# Experts|experts (in|at) APHRC|Expert Profile', text) or
+                    re.search(r'([A-Z][a-z]+\s+[A-Z][a-z]+)[^A-Z]*?specializes in', text)
                 ):
                     in_structured_content = True
-                    content_type = "expert_list"  # More specific content type
+                    content_type = "expert_list"
                     structured_buffer = buffer + text
                     buffer = ""
-                    
-                    # Insert appropriate transition if needed
-                    if not transition_inserted and detected_intent:
-                        if "expert" in str(detected_intent).lower():
-                            yield self._get_random_transition("expert_list")
-                        transition_inserted = True
                     continue
                 
-                # If we're in a structured content section, keep collecting it
-                if in_structured_content:
+                # If we're in an expert list, collect and process it
+                if in_structured_content and content_type == "expert_list":
                     structured_buffer += text
                     
-                    # Check if we have a complete structured content item to yield
-                    # Different handling based on content type
-                    if content_type == "publication_list" and re.search(r'\n\d+\.', structured_buffer):
-                        # We have at least one complete numbered item
-                        items = re.split(r'(?=\n\d+\.)', structured_buffer)
+                    # Check if we have a complete expert list
+                    if re.search(r'Would you like more detailed', structured_buffer):
+                        # We have a complete response, format it
+                        formatted_text = self._format_expert_list(structured_buffer)
+                        yield formatted_text
                         
-                        # Keep the last (potentially incomplete) item
-                        if len(items) > 1:
-                            for item in items[:-1]:
-                                if item.strip():
-                                    # Apply specialized cleaning for publication content
-                                    cleaned_item = self._clean_structured_content(item, "list")
-                                    yield cleaned_item
-                                    
-                                    # Maybe add transition between items
-                                    if random.random() < 0.3:
-                                        yield self._get_random_transition("between_publications")
-                            
-                            # Keep the potentially incomplete last item in the buffer
-                            structured_buffer = items[-1]
-                    
-                    # Similar processing for expert lists, with pattern adjusted for expert content
-                    elif content_type == "expert_list" and re.search(r'\n\d+\.\s+\*\*', structured_buffer):
-                        items = re.split(r'(?=\n\d+\.\s+\*\*)', structured_buffer)
-                        
-                        if len(items) > 1:
-                            for item in items[:-1]:
-                                if item.strip():
-                                    cleaned_item = self._clean_structured_content(item, "list")
-                                    yield cleaned_item
-                            
-                            structured_buffer = items[-1]
-                    
-                    # Check if we're exiting structured content - different patterns for different types
-                    exit_conditions = False
-                    
-                    if content_type == "publication_list":
-                        # Check for publication list exit conditions
-                        exit_conditions = (
-                            len(structured_buffer) > 100 and  # Reasonable size to have complete content
-                            not re.search(r'(Title:|Authors:|Publication Year:|DOI:|Abstract:|Summary:)', 
-                                        text, re.IGNORECASE) and
-                            re.search(r'(Would you like more|In conclusion|To summarize|Is there anything else)', 
-                                    structured_buffer, re.IGNORECASE)
-                        )
-                    elif content_type == "expert_list":
-                        # Check for expert list exit conditions
-                        exit_conditions = (
-                            len(structured_buffer) > 100 and
-                            not re.search(r'(Expert|Position:|Email:|Notable publication)', 
-                                        text, re.IGNORECASE) and
-                            re.search(r'(Would you like more|In conclusion|To summarize|Is there anything else)',
-                                    structured_buffer, re.IGNORECASE)
-                        )
-                    
-                    if exit_conditions:
-                        # We're likely leaving the structured content section
-                        if structured_buffer.strip():
-                            cleaned_content = self._clean_structured_content(structured_buffer, "list")
-                            yield cleaned_content
-                            
-                            # Add appropriate conclusion transition
-                            if detected_intent:
-                                if "publication" in str(detected_intent).lower():
-                                    yield self._get_random_transition("after_publications")
-                                elif "expert" in str(detected_intent).lower():
-                                    yield self._get_random_transition("after_experts")
-                        
-                        # Reset for normal text processing
+                        # Reset for normal processing
                         in_structured_content = False
                         structured_buffer = ""
                         content_type = None
-                        
                     continue
                 
-                # Normal text processing (not in structured content)
+                # Normal text processing
                 buffer += text
                 
                 # Process complete sentences from the buffer
@@ -603,32 +552,34 @@ class MessageHandler:
 
             # Process any remaining content
             if in_structured_content and structured_buffer.strip():
-                cleaned_content = self._clean_structured_content(structured_buffer, "list")
-                yield cleaned_content
-                
-                # Add appropriate closing transition
-                if detected_intent:
-                    if "publication" in str(detected_intent).lower():
-                        yield self._get_random_transition("publication_conclusion")
-                    elif "expert" in str(detected_intent).lower():
-                        yield self._get_random_transition("expert_conclusion")
-                        
+                if content_type == "expert_list":
+                    formatted_text = self._format_expert_list(structured_buffer)
+                    yield formatted_text
+                else:
+                    cleaned_content = self._clean_structured_content(structured_buffer, "list")
+                    yield cleaned_content
+                    
             elif buffer.strip():
                 # Clean any remaining content in the buffer
                 cleaned_text = self._clean_text_for_user(buffer)
                 yield cleaned_text
-                
-                # Add general conclusion if appropriate
-                if detected_intent and not in_structured_content:
-                    yield self._get_random_transition(f"{str(detected_intent).lower()}_conclusion")
 
         except Exception as e:
             logger.error(f"Error processing stream response: {e}", exc_info=True)
             # Return any remaining buffered content if there's an error
             if in_structured_content and structured_buffer.strip():
-                yield self._clean_structured_content(structured_buffer, "list")
+                if content_type == "expert_list":
+                    try:
+                        formatted_text = self._format_expert_list(structured_buffer)
+                        yield formatted_text
+                    except:
+                        yield self._clean_structured_content(structured_buffer, "list")
+                else:
+                    yield self._clean_structured_content(structured_buffer, "list")
             elif buffer.strip():
                 yield self._clean_text_for_user(buffer)
+    
+    
         
     async def send_message_async(self, message: str, user_id: str, session_id: str) -> AsyncGenerator:
         """

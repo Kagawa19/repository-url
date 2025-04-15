@@ -1199,7 +1199,158 @@ class GeminiLLMManager:
             return "formal"
         else:
             return "conversational"
+
+    def _format_expert_list(self, text: str) -> str:
+        """
+        Specialized formatter for expert lists to ensure proper line breaks and formatting.
         
+        Args:
+            text (str): The text containing expert information
+            
+        Returns:
+            str: Properly formatted expert list with each expert on their own line
+        """
+        # Check if this is actually an expert list
+        if not re.search(r'expert|specialist|researcher|scientist', text.lower()):
+            return text
+            
+        # Extract the introduction/header
+        header_match = re.search(r'^(.*?)(?=\d+\.\s+\*\*|[A-Z][a-z]+\s+[A-Z][a-z]+\s+specializes)', text, re.DOTALL)
+        introduction = header_match.group(1).strip() if header_match else ""
+        
+        # Look for numbered experts first
+        numbered_experts = re.findall(r'(\d+\.\s+\*\*[^*\n]+\*\*(?:(?!\d+\.).)*)', text, re.DOTALL)
+        
+        if numbered_experts:
+            # Already in numbered format, just ensure proper spacing
+            formatted_parts = [introduction] if introduction else []
+            
+            for expert in numbered_experts:
+                # Extract the number and name
+                match = re.match(r'(\d+\.\s+\*\*)([^*\n]+)(\*\*)', expert)
+                if not match:
+                    formatted_parts.append(expert.strip())
+                    continue
+                    
+                number_prefix = match.group(1)
+                name = match.group(2)
+                suffix = match.group(3)
+                
+                # Extract expertise if present
+                expertise_match = re.search(r'Expertise:\s*([^\n]+)', expert)
+                expertise = expertise_match.group(1) if expertise_match else ""
+                
+                # Format with proper line breaks
+                formatted_expert = f"{number_prefix}{name}{suffix}\n"
+                if expertise:
+                    formatted_expert += f"    - **Expertise:** {expertise}\n"
+                    
+                formatted_parts.append(formatted_expert)
+            
+            # Find closing text
+            closing_match = re.search(r'Would you like more detailed.*?$', text, re.DOTALL)
+            closing = closing_match.group(0) if closing_match else ""
+            
+            if closing:
+                formatted_parts.append("\n" + closing)
+                
+            return "\n\n".join(formatted_parts)
+        
+        # If not numbered, look for expertise patterns
+        expertise_matches = re.findall(r'([A-Z][a-z]+\s+[A-Z][a-z]+)[^A-Z]*?specializes in ([^\n.]+)', text)
+        
+        if expertise_matches:
+            # Format as a numbered list
+            formatted_parts = [introduction] if introduction else []
+            
+            for i, (name, expertise) in enumerate(expertise_matches, 1):
+                formatted_expert = f"{i}. **{name}**\n"
+                formatted_expert += f"    - **Expertise:** {expertise}\n"
+                formatted_parts.append(formatted_expert)
+            
+            # Find closing text
+            closing_match = re.search(r'Would you like more detailed.*?$', text, re.DOTALL)
+            closing = closing_match.group(0) if closing_match else ""
+            
+            if closing:
+                formatted_parts.append("\n" + closing)
+                
+            return "\n\n".join(formatted_parts)
+        
+        # If no patterns match, fall back to the original text
+        return text
+
+    def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
+        """
+        Format expert information into Markdown format for rendering in the frontend.
+        Args:
+            experts: List of expert dictionaries
+        Returns:
+            Formatted Markdown string with structured expert presentations
+        """
+        if not experts:
+            return "I couldn't find any expert information on this topic. Would you like me to help you search for something else?"
+
+        # Create header based on the number of experts
+        markdown_text = "# Experts in Health Sciences at APHRC:\n\n" if len(experts) > 1 else "# Expert Profile:\n\n"
+
+        for idx, expert in enumerate(experts):
+            try:
+                # Extract name components
+                first_name = expert.get('first_name', '').strip()
+                last_name = expert.get('last_name', '').strip()
+                full_name = f"{first_name} {last_name}".strip()
+                
+                # Use numbered list with clear formatting
+                markdown_text += f"{idx + 1}. **{full_name}**\n\n"
+
+                # Ensure consistent indentation with 4 spaces for all fields
+                # Add position and department if available
+                position = expert.get('position', '')
+                department = expert.get('department', '')
+                if position and department:
+                    markdown_text += f"    - **Position:** {position} in the {department}\n\n"
+                elif position:
+                    markdown_text += f"    - **Position:** {position}\n\n"
+                elif department:
+                    markdown_text += f"    - **Department:** {department}\n\n"
+
+                # Display expertise with consistent formatting
+                knowledge_expertise = expert.get('knowledge_expertise', '')
+                if knowledge_expertise:
+                    markdown_text += f"    - **Expertise:** {knowledge_expertise}\n\n"
+                else:
+                    # Try to get expertise from other fields if knowledge_expertise is not available
+                    expertise_fields = expert.get('expertise', [])
+                    if expertise_fields:
+                        if isinstance(expertise_fields, list):
+                            expertise_str = ", ".join(expertise_fields)
+                        else:
+                            expertise_str = str(expertise_fields)
+                        markdown_text += f"    - **Expertise:** {expertise_str}\n\n"
+
+                # Add notable publications with consistent indentation if available
+                publications = expert.get('publications', [])
+                if publications:
+                    markdown_text += "    - **Notable publications:**\n\n"
+                    for pub in publications[:2]:
+                        pub_title = pub.get('title', 'Untitled')
+                        pub_year = pub.get('publication_year', '')
+                        year_text = f" ({pub_year})" if pub_year else ""
+                        markdown_text += f"        - \"{pub_title}\"{year_text}\n\n"
+
+                # Add an extra line break between experts for clear separation
+                if idx < len(experts) - 1:
+                    markdown_text += "\n"
+
+            except Exception as e:
+                logger.error(f"Error formatting expert {idx + 1}: {e}")
+                continue
+
+        # Add closing message
+        markdown_text += "\nWould you like more detailed information about any of these experts? You can ask by name or area of expertise."
+        return markdown_text
+            
     def safely_decode_binary_data(self, binary_data, default_encoding='utf-8'):
         """
         Safely decode binary data using multiple encoding attempts.
@@ -2037,74 +2188,7 @@ class GeminiLLMManager:
         # Combine all parts
         return "\n\n".join(context_parts)
 
-    def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
-        """
-        Format expert information into Markdown format for rendering in the frontend.
-        Args:
-            experts: List of expert dictionaries
-        Returns:
-            Formatted Markdown string with structured expert presentations
-        """
-        if not experts:
-            return "I couldn't find any expert information on this topic. Would you like me to help you search for something else?"
-
-        # Create header based on the number of experts
-        markdown_text = "# Experts in Health Sciences at APHRC:\n\n" if len(experts) > 1 else "# Expert Profile:\n\n"
-
-        for idx, expert in enumerate(experts):
-            try:
-                # Extract name components
-                first_name = expert.get('first_name', '').strip()
-                last_name = expert.get('last_name', '').strip()
-                full_name = f"{first_name} {last_name}".strip()
-                
-                # UPDATED: Use consistent formatting that works better with cleaning function
-                # Use numbered list with double asterisks instead of triple
-                markdown_text += f"{idx + 1}. **{full_name}**\n\n"
-
-                # UPDATED: Ensure consistent indentation with 4 spaces for all fields
-                # Add position and department
-                position = expert.get('position', '')
-                department = expert.get('department', '')
-                if position and department:
-                    markdown_text += f"    - **Position:** {position} in the {department}\n\n"
-                elif position:
-                    markdown_text += f"    - **Position:** {position}\n\n"
-                elif department:
-                    markdown_text += f"    - **Department:** {department}\n\n"
-
-                # MODIFIED: Replace email with knowledge_expertise
-                # Instead of displaying email, show expertise
-                knowledge_expertise = expert.get('knowledge_expertise', '')
-                if knowledge_expertise:
-                    markdown_text += f"    - **Expertise:** {knowledge_expertise}\n\n"
-                else:
-                    # Try to get expertise from other fields if knowledge_expertise is not available
-                    expertise_fields = expert.get('expertise', [])
-                    if expertise_fields:
-                        if isinstance(expertise_fields, list):
-                            expertise_str = ", ".join(expertise_fields)
-                        else:
-                            expertise_str = str(expertise_fields)
-                        markdown_text += f"    - **Expertise:** {expertise_str}\n\n"
-
-                # Add notable publications with consistent indentation
-                publications = expert.get('publications', [])
-                if publications:
-                    markdown_text += "    - **Notable publications:**\n\n"
-                    for pub in publications[:2]:
-                        pub_title = pub.get('title', 'Untitled')
-                        pub_year = pub.get('publication_year', '')
-                        year_text = f" ({pub_year})" if pub_year else ""
-                        markdown_text += f"        - \"{pub_title}\"{year_text}\n\n"
-
-            except Exception as e:
-                logger.error(f"Error formatting expert {idx + 1}: {e}")
-                continue
-
-        # Add closing message
-        markdown_text += "\nWould you like more detailed information about any of these experts? You can ask by name or area of expertise."
-        return markdown_text      
+    
    
     async def analyze_quality(self, message: str, response: str = "") -> Dict:
         """
