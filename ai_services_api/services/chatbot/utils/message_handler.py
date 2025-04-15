@@ -459,7 +459,7 @@ class MessageHandler:
         Supports both structured lists and paragraph-style text.
         """
         # Add header
-        result = "# APHRC Experts\n\n"
+        result = ""
 
         # Try to find paragraph-style expert entries
         expert_entries = re.findall(r'([A-Z][a-z]+(?:\s[A-Z][a-z]+)*):\s+(.*?)(?=\n[A-Z][a-z]+:|$)', experts_text, re.DOTALL)
