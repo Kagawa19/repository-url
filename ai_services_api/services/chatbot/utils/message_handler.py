@@ -413,111 +413,42 @@ class MessageHandler:
         return "\n".join(lines)
   
 
-    def format_publication_list_clean(self, publications: List[Dict[str, Any]]) -> str:
+    def _format_publication_list_fixed(self, publications_text: str) -> str:
         """
-        Format publication information into clean, consistent numbered list format.
-        Handles all fields from the resources_resource table.
-        
-        Args:
-            publications: List of publication dictionaries with rich fields
-            
-        Returns:
-            Formatted string with properly structured publication presentations
+        Parses raw publication text and returns a clean, numbered, consistently formatted list.
+        Each publication gets a new number. Only the title is bolded.
         """
-        if not publications:
-            return "I couldn't find any publications matching your criteria. Would you like me to suggest some related research areas instead?"
+        print("\nStarting formatting of publication list...")
 
-        # Initialize the output
-        lines = []
-        
-        # Add a descriptive header
-        lines.append("# APHRC Publications\n")
+        result = ""
 
-        # Format each publication according to the required format
-        for idx, pub in enumerate(publications):
-            # Get title (with fallback)
-            title = pub.get('title', 'Untitled Publication')
-            
-            # Start with the numbered list item
-            lines.append(f"{idx + 1}. **{title}**")
-            
-            # Add authors
-            authors = []
-            if pub.get('authors'):
-                # Handle various author formats
-                if isinstance(pub['authors'], list):
-                    authors = pub['authors']
-                elif isinstance(pub['authors'], str):
-                    try:
-                        # Try to parse JSON string
-                        authors_data = json.loads(pub['authors'])
-                        if isinstance(authors_data, list):
-                            authors = authors_data
-                        else:
-                            authors = [pub['authors']]
-                    except (json.JSONDecodeError, TypeError):
-                        # If not JSON, use as is
-                        authors = [pub['authors']]
-            
-            # Format authors string
-            if authors:
-                # Limit to 3 authors plus et al. if needed
-                if len(authors) > 3:
-                    authors_text = f"{', '.join(str(a) for a in authors[:3])} et al."
-                else:
-                    authors_text = f"{', '.join(str(a) for a in authors)}"
-                lines.append(f"   **Authors:** {authors_text}")
-            
-            # Add source/journal
-            if pub.get('source'):
-                lines.append(f"   **Published in:** {pub['source']}")
-            
-            # Add year
-            if pub.get('publication_year'):
-                lines.append(f"   **Year:** {pub['publication_year']}")
-            
-            # Add domains if available
-            domains = []
-            if pub.get('domains'):
-                if isinstance(pub['domains'], list):
-                    domains = pub['domains']
-                elif isinstance(pub['domains'], str):
-                    try:
-                        domains_data = json.loads(pub['domains'])
-                        if isinstance(domains_data, list):
-                            domains = domains_data
-                    except (json.JSONDecodeError, TypeError):
-                        domains = [pub['domains']]
-                        
-                if domains:
-                    lines.append(f"   **Domains:** {', '.join(str(d) for d in domains[:3])}")
-            
-            # Add summary/abstract (shortened if needed)
-            summary = ""
-            if pub.get('abstract'):
-                summary = pub.get('abstract')
-            elif pub.get('summary'):
-                summary = pub.get('summary')
-                
-            if summary:
-                # Truncate long summaries
-                if len(summary) > 200:
-                    summary = summary[:197] + "..."
-                lines.append(f"   **Summary:** {summary}")
-            
-            # Add DOI if available
-            if pub.get('doi'):
-                lines.append(f"   **DOI:** {pub['doi']}")
-            
-            # Add space between publications
-            if idx < len(publications) - 1:
-                lines.append("")
-        
-        # Add closing
-        lines.append("\nYou can ask for more details about any of these publications or request information about related research.")
-        
-        # Join all lines with newlines
-        return "\n".join(lines)
+        # Extract entries ignoring original numbering or bullets
+        pub_entries = re.split(r'\n\s*\n', publications_text.strip())
+        print(f"\nSplit into {len(pub_entries)} publication entries.")
+
+        for i, entry in enumerate(pub_entries):
+            print(f"\nProcessing publication {i + 1}")
+            entry = entry.strip()
+
+            # Extract the first non-empty line as the title
+            lines = entry.splitlines()
+            title = lines[0].strip() if lines else f"Publication {i+1}"
+            title = re.sub(r'\*([^*]+)\*', r'\1', title)
+            title = re.sub(r'\*\*([^*]+)\*\*', r'\1', title)
+            print(f"  Title: {title}")
+
+            result += f"{i + 1}. **{title}**\n"
+
+            # Remaining lines (metadata fields)
+            rest_of_entry = "\n".join(lines[1:]).strip()
+            if rest_of_entry:
+                result += f"{rest_of_entry}\n"
+
+            result += "\n"  # Add blank line between entries
+
+        print("\nFinal formatted result:\n", result)
+        return result
+
 
    
 
