@@ -659,34 +659,31 @@ class MessageHandler:
         if not text:
             return ""
 
-        # CRITICAL FIX: Remove any stray JSON characters at the beginning
-        text = re.sub(r'^(\s*[}\]]+\s*)+', '', text)
-        
+        # CRITICAL FIX: Remove any stray JSON characters (even a single }) at the beginning
+        text = re.sub(r'^\s*[}\]]+\s*', '', text)
+
         # Remove JSON metadata that might have slipped through
         metadata_pattern = r'^\s*\{\"is_metadata\"\s*:\s*true.*?\}\s*'
         text = re.sub(metadata_pattern, '', text, flags=re.MULTILINE)
-        
+
         # Fix potential duplicate heading markers
         text = re.sub(r'(#+)\s*(#+)\s*', r'\1 ', text)
-        
+
         # Normalize heading formatting
         text = re.sub(r'(#+)(\w)', r'\1 \2', text)  # Ensure space after heading markers
-        
+
         # Preserve markdown bold formatting (ensure spaces are correct)
         text = re.sub(r'\*\*\s*(.+?)\s*\*\*', r'**\1**', text)
-        
+
         # Normalize bullet points (could be * or - in markdown)
         text = re.sub(r'^\s*[-*]\s*', '- ', text, flags=re.MULTILINE)  # Standardize to dash style
-        
+
         # ADDED: Clean up any "Alright" or similar starter phrases that might be duplicated
         text = re.sub(r'^(Alright!?|Sure!?|Here|I can help|Let me)(\s*\1)+', r'\1', text, flags=re.IGNORECASE)
-        
-        # Rest of the method remains the same...
-        
+
         # Final trim of any leading/trailing whitespace
         return text.strip()
-    
-    
+
         
     async def send_message_async(self, message: str, user_id: str, session_id: str) -> AsyncGenerator:
         """
