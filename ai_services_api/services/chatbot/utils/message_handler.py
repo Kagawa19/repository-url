@@ -1041,96 +1041,95 @@ class MessageHandler:
             logger.error(f"Error in start_chat_session: {e}")
             raise
 
-    def _format_publication_response(self, text):
-        """Special formatter for publication list responses that creates clean, structured output."""
-        # Remove markdown heading symbols
-        text = re.sub(r'#{1,6}\s*', '', text)
+    def _format_publication_response(self, text: str) -> str:
+        """
+        Formats a response about publications, especially when no publications were found.
+        Ensures proper paragraph breaks and formatting of list items.
         
-        # Fix spaces in DOI links
-        text = re.sub(r'(https?://doi\.org/\s*)([\d\.]+(/\s*)?[^\s\)]*)', lambda m: m.group(1).replace(' ', '') + m.group(2).replace(' ', ''), text)
-        text = re.sub(r'(10\.\s*\d+\s*/\s*[^\s\)]+)', lambda m: m.group(1).replace(' ', ''), text)
+        Args:
+            text (str): The text response about publications
+            
+        Returns:
+            str: Properly formatted response with clear paragraph breaks
+        """
+        # Remove any stray JSON characters
+        text = re.sub(r'^(\s*[}\]]+\s*)+', '', text)
+        text = re.sub(r'(\s*[}\]]+\s*)+$', '', text)
         
-        # Remove duplicate content at the end
-        duplicate_patterns = [
-            r'These publications address different aspects of.*?\.',
-            r'Research Domains:.*?(?=\n|\Z)',
-            r'Summary:.*?(?=\n|\Z)'
-        ]
+        # Clean up any duplicated introductory phrases
+        text = re.sub(r'^(Alright!?|Sure!?|Here|I can help|Let me)(\s*\1)+', r'\1', text, flags=re.IGNORECASE)
         
-        for pattern in duplicate_patterns:
-            matches = list(re.finditer(pattern, text))
-            if len(matches) > 1:
-                # Keep only the first instance
-                first_match_end = matches[0].end()
-                for match in matches[1:]:
-                    text = text[:match.start()] + text[match.end():]
-                    
-        # Extract the introduction
-        intro_match = re.search(r'^(.*?)(?=\d+\.|$)', text, re.DOTALL)
-        intro = intro_match.group(1).strip() if intro_match else ""
+        # Ensure proper paragraph breaks after sentences
+        # This handles cases where paragraph breaks are missing
+        paragraphs = []
+        current_paragraph = ""
         
-        # Split publications by numbered items
-        items = re.split(r'(\d+\.)', text)
-        if len(items) < 3:  # Not a properly structured list
-            return text
+        # Split by existing line breaks first
+        raw_paragraphs = text.split('\n')
         
-        # Start with the introduction
-        formatted_parts = [intro] if intro else []
-        
-        # Process each publication
-        current_pub = ""
-        for i, item in enumerate(items):
-            if re.match(r'\d+\.', item):
-                # Start of a new publication
-                if current_pub:
-                    formatted_parts.append(current_pub.strip())
-                current_pub = item
-            elif i > 0 and re.match(r'\d+\.', items[i-1]):
-                # Content following a publication number
-                # Extract and format key fields
-                content = item.strip()
+        for raw_p in raw_paragraphs:
+            if not raw_p.strip():
+                if current_paragraph:
+                    paragraphs.append(current_paragraph)
+                    current_paragraph = ""
+                continue
                 
-                # Format the title
-                title_match = re.search(r'^(.+?)(?=\s*-\s*Authors:|\s*-\s*Publication|\s*-\s*DOI:|\s*-\s*Research|\s*-\s*Summary:|\Z)', content, re.DOTALL)
-                title = title_match.group(1).strip() if title_match else content
-                
-                # Build structured output with fields aligned
-                lines = [title]
-                
-                # Extract each field
-                field_patterns = [
-                    (r'-\s*Authors:\s*(.+?)(?=\s*-\s*|\Z)', "Authors: "),
-                    (r'-\s*Publication Year:\s*(.+?)(?=\s*-\s*|\Z)', "Publication Year: "),
-                    (r'-\s*DOI:\s*\[?(.+?)\]?(?=\s*-\s*|\Z)', "DOI: ")
-                ]
-                
-                for pattern, field_name in field_patterns:
-                    match = re.search(pattern, content, re.DOTALL)
-                    if match:
-                        field_content = match.group(1).strip()
-                        # Clean up any markdown link formatting
-                        field_content = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', field_content)
-                        lines.append(f"{field_name}{field_content}")
-                
-                # Combine publication content
-                current_pub += "\n" + "\n".join(lines)
+            # Check if this starts with a common paragraph starter
+            starters = ['however', 'the african', 'while ', 'would you like', 'i can also', 'do you have', 
+                    'these are', 'key research', 'in addition', 'furthermore', 'additionally']
+            
+            if any(raw_p.lower().strip().startswith(starter) for starter in starters):
+                # This is likely a new paragraph
+                if current_paragraph:
+                    paragraphs.append(current_paragraph)
+                current_paragraph = raw_p.strip()
+            else:
+                # Continue current paragraph or start new one if empty
+                if current_paragraph:
+                    current_paragraph += " " + raw_p.strip()
+                else:
+                    current_paragraph = raw_p.strip()
         
-        # Add the last publication
-        if current_pub:
-            formatted_parts.append(current_pub.strip())
+        # Add the last paragraph
+        if current_paragraph:
+            paragraphs.append(current_paragraph)
         
-        # Join with double newlines for clear separation
-        formatted_text = "\n\n".join(formatted_parts)
+        # Format bullet points and list items
+        formatted_paragraphs = []
+        for p in paragraphs:
+            # Check if this contains bullet points (started with * or -)
+            if re.search(r'\s*[-*]\s+', p):
+                # This is likely a list - split and format each item
+                lines = p.split('\n')
+                formatted_lines = []
+                
+                for line in lines:
+                    # Clean and format list items
+                    line = line.strip()
+                    if re.match(r'\s*[-*]\s+', line):
+                        # This is a list item
+                        line = re.sub(r'\s*[-*]\s+', '- ', line)
+                    formatted_lines.append(line)
+                
+                formatted_paragraphs.append('\n'.join(formatted_lines))
+            else:
+                # Regular paragraph
+                formatted_paragraphs.append(p)
         
-        # Final cleanup - remove any remaining markdown or excess whitespace
-        formatted_text = re.sub(r'\*\*|\*', '', formatted_text)  # Remove bold/italic markers
-        formatted_text = re.sub(r'\n{3,}', '\n\n', formatted_text)  # Normalize multiple newlines
-        formatted_text = re.sub(r'\s+$', '', formatted_text, flags=re.MULTILINE)  # Remove trailing whitespace
+        # Join paragraphs with double line breaks for clear separation
+        formatted_text = "\n\n".join(formatted_paragraphs)
         
-        # Remove any summary and research domains sections if this is just meant to be a list
-        if "list" in formatted_text.lower() or len(items) > 3:  # Likely a list request
-            formatted_text = re.sub(r'\s*-\s*Summary:.*?(?=\n\n|\Z)', '', formatted_text)
-            formatted_text = re.sub(r'\s*-\s*Research Domains:.*?(?=\n\n|\Z)', '', formatted_text)
+        # Ensure proper list item formatting
+        formatted_text = re.sub(r'([.!?])\s*[-*]\s+', r'\1\n\n- ', formatted_text)
+        
+        # Ensure research areas or themes are properly formatted as list items
+        formatted_text = re.sub(r'(areas|themes):(.*?)\s*-\s+', r'\1:\n\n- ', formatted_text, flags=re.IGNORECASE)
+        
+        # Replace asterisks with proper bullet points
+        formatted_text = re.sub(r'(\n\s*)\*\s+', r'\1- ', formatted_text)
+        
+        # Clean multiple consecutive line breaks
+        formatted_text = re.sub(r'\n{3,}', '\n\n', formatted_text)
         
         return formatted_text
 
