@@ -314,152 +314,201 @@ class MessageHandler:
         
         return cleaned_text
 
-    @staticmethod
-    def _clean_text_for_user(text: str) -> str:
+    def _format_expert_list(self, text: str) -> str:
         """
-        Enhanced text cleaning for user-facing responses in Markdown format.
-        Removes technical artifacts, properly formats Markdown, and improves readability.
+        Specialized formatter for expert lists to ensure proper line breaks and formatting.
+        
         Args:
-            text (str): The input text that may contain technical artifacts or raw Markdown
+            text (str): The text containing expert information
+            
         Returns:
-            str: Clean, well-formatted text suitable for user display with improved readability
+            str: Properly formatted expert list with each expert on their own line
         """
-        if not text:
-            return ""
-
-        # Remove JSON metadata that might have slipped through
-        metadata_pattern = r'^\s*\{\"is_metadata\"\s*:\s*true.*?\}\s*'
-        text = re.sub(metadata_pattern, '', text, flags=re.MULTILINE)
+        # CRITICAL FIX: Remove any stray JSON characters
+        text = re.sub(r'^(\s*[}\]]+\s*)+', '', text)
+        text = re.sub(r'(\s*[}\]]+\s*)+', ' ', text)
         
-        # Fix potential duplicate heading markers
-        text = re.sub(r'(#+)\s*(#+)\s*', r'\1 ', text)
+        # ADDED: Clean up any duplicated introductory phrases
+        text = re.sub(r'^(Alright!?|Sure!?|Here|I can help|Let me)(\s*\1)+', r'\1', text, flags=re.IGNORECASE)
         
-        # Normalize heading formatting
-        text = re.sub(r'(#+)(\w)', r'\1 \2', text)  # Ensure space after heading markers
-        
-        # Preserve markdown bold formatting (ensure spaces are correct)
-        text = re.sub(r'\*\*\s*(.+?)\s*\*\*', r'**\1**', text)
-        
-        # Normalize bullet points (could be * or - in markdown)
-        text = re.sub(r'^\s*[-*]\s*', '- ', text, flags=re.MULTILINE)  # Standardize to dash style
-        
-        # Fix spaces in DOI links - special case for academic content
-        # First, handle standard DOI URLs
-        text = re.sub(
-            r'(https?://doi\.org/\s*)([\d\.]+(/\s*)?[^\s\)]*)',
-            lambda m: m.group(1).replace(' ', '') + m.group(2).replace(' ', ''),
-            text
-        )
-        
-        # Then handle bare DOI references
-        text = re.sub(
-            r'(DOI:?\s*)(10\.\s*\d+\s*/\s*[^\s\)]+)',
-            lambda m: m.group(1) + m.group(2).replace(' ', ''),
-            text
-        )
-        
-        # Handle numbered lists consistently
-        text = re.sub(r'(\d+)\.\s+([A-Z])', r'\1. \2', text)  # Ensure proper spacing after numbers
-        
-        # Fix missing line breaks before numbered list items
-        text = re.sub(r'([:.\n])\s*(\d+\.\s+)', r'\1\n\n\2', text)
-        
-        # Ensure expertise information doesn't run into the next numbered item
-        text = re.sub(r'(Expertise:[^\n]+)(\s*)(\d+\.)', r'\1\n\n\3', text)
-        
-        # Clean up excess whitespace while preserving meaningful structure
-        text = re.sub(r'[ \t]+', ' ', text)  # Replace multiple spaces/tabs with single space
-        
-        # IMPORTANT: Ensure proper line breaks in expert lists
-        # Make sure each numbered expert entry starts with clear spacing
-        text = re.sub(r'([^\n])\n(\d+\.\s+\*\*)', r'\1\n\n\2', text)
-        
-        # Ensure proper spacing between experts in a list
-        text = re.sub(r'(\*\*Expertise:[^\n]+)\n(\d+\.)', r'\1\n\n\2', text)
-        
-        # Ensure proper Markdown line breaks
-        # Single newlines become Markdown line breaks (with two spaces)
-        text = re.sub(r'(?<!\n)\n(?!\n)', '  \n', text)
-        
-        # But multiple newlines are preserved for paragraph breaks
-        text = re.sub(r'\n{3,}', '\n\n', text)  # Normalize multiple newlines to exactly two
-        
-        # Remove trailing whitespace
-        text = re.sub(r'\s+$', '', text, flags=re.MULTILINE)
-        
-        # Ensure consistent formatting for publication information
-        text = re.sub(r'(Title|Authors|Publication Year|DOI|Abstract|Summary):\s*', r'**\1**: ', text)
-        
-        # Ensure each bold section starts on a new line
-        text = re.sub(r'([^\n])\s*\*\*([^*:]+):\*\*', r'\1\n\n**\2:**', text)
-        
-        # Fix numbered list items to ensure they're properly formatted with bold names
-        text = re.sub(r'(\d+\.\s+)([^*\n]+)(?=\n)', r'\1**\2**', text)
-        
-        # Fix line breaks for expert entries and expertise 
-        text = re.sub(r'(\d+\.\s+\*\*[^*]+\*\*)\s+Expertise:', r'\1\nExpertise:', text)
-        
-        # Ensure proper spacing between numbered items in a list
-        text = re.sub(r'(\d+\.\s+\*\*[^*]+\*\*(?:\n[^\n]+)?)(\s*)(\d+\.)', r'\1\n\n\3', text)
-        
-        # ADDED: Force proper formatting for bullet lists
-        # Convert dash/asterisk lists to proper bullet points with line breaks
-        text = re.sub(r'([^\n])(\n\s*[-*]\s+)', r'\1\n\n\2', text)
-        
-        # ADDED: Clean up expert listings specifically
-        if "Expert" in text and "APHRC" in text:
-            # Convert dash-based expert lists to numbered format if needed
-            if re.search(r'[-*]\s+[A-Z][a-z]+\s+[A-Z][a-z]+', text):
-                experts = re.findall(r'[-*]\s+([A-Z][a-z]+\s+[A-Z][a-z]+[^\n]*)', text)
-                if experts:
-                    for i, expert in enumerate(experts, 1):
-                        # Replace dash with numbered format
-                        pattern = r'[-*]\s+' + re.escape(expert)
-                        replacement = f"{i}. **{expert}**"
-                        text = re.sub(pattern, replacement, text)
+        # Check if this is actually an expert list
+        if not re.search(r'expert|specialist|researcher|scientist', text.lower()):
+            return text
             
-            # Ensure expertise appears on its own line
-            text = re.sub(r'(\*\*[^*\n]+\*\*)\s+([A-Za-z]+:)', r'\1\n\2', text)
+        # Extract the introduction/header
+        header_match = re.search(r'^(.*?)(?=\d+\.\s+\*\*|[A-Z][a-z]+\s+[A-Z][a-z]+\s+specializes)', text, re.DOTALL)
+        introduction = header_match.group(1).strip() if header_match else ""
+        
+        # Look for numbered experts first
+        numbered_experts = re.findall(r'(\d+\.\s+\*\*[^*\n]+\*\*(?:(?!\d+\.).)*)', text, re.DOTALL)
+        
+        if numbered_experts:
+            # Already in numbered format, just ensure proper spacing
+            formatted_parts = [introduction] if introduction else []
             
-            # Convert informal lists to properly formatted expert lists
-            if "," in text and not re.search(r'\d+\.\s+\*\*', text):
-                # Extract header
-                header_match = re.search(r'^(.*?)((?:Elizabeth|Caroline|Hesborn|Dr\.|Prof\.)[^\n,]*)', text, re.DOTALL)
-                if header_match:
-                    header = header_match.group(1).strip()
-                    # Extract expert names
-                    names_text = text[header_match.end():]
-                    expert_names = re.findall(r'([A-Z][a-z]+\s+[A-Z][a-z]+)', names_text)
+            for expert in numbered_experts:
+                # Extract the number and name
+                match = re.match(r'(\d+\.\s+\*\*)([^*\n]+)(\*\*)', expert)
+                if not match:
+                    formatted_parts.append(expert.strip())
+                    continue
                     
-                    if expert_names and len(expert_names) >= 2:
-                        formatted_text = f"{header}\n\n"
-                        for i, name in enumerate(expert_names, 1):
-                            formatted_text += f"{i}. **{name}**\n\n"
-                        
-                        # Try to match expertise for each expert
-                        expertise_matches = re.findall(r'([A-Z][a-z]+\s+[A-Z][a-z]+)[^A-Z]*?specializes in ([^\n.]+)', text)
-                        if expertise_matches:
-                            expertise_dict = {name: expertise for name, expertise in expertise_matches}
-                            
-                            # Replace the formatted text with expertise included
-                            formatted_text = f"{header}\n\n"
-                            for i, name in enumerate(expert_names, 1):
-                                formatted_text += f"{i}. **{name}**\n"
-                                if name in expertise_dict:
-                                    formatted_text += f"    - **Expertise:** {expertise_dict[name]}\n\n"
-                                else:
-                                    formatted_text += "\n"
-                            
-                        # Add the closing message
-                        closing_match = re.search(r'(Would you like more detailed.*?)$', text, re.DOTALL)
-                        if closing_match:
-                            formatted_text += closing_match.group(1)
-                        
-                        text = formatted_text
+                number_prefix = match.group(1)
+                name = match.group(2)
+                suffix = match.group(3)
+                
+                # Extract expertise if present
+                expertise_match = re.search(r'Expertise:\s*([^\n]+)', expert)
+                expertise = expertise_match.group(1) if expertise_match else ""
+                
+                # Format with proper line breaks
+                formatted_expert = f"{number_prefix}{name}{suffix}\n"
+                if expertise:
+                    formatted_expert += f"    - **Expertise:** {expertise}\n"
+                    
+                formatted_parts.append(formatted_expert)
+            
+            # Find closing text
+            closing_match = re.search(r'Would you like more detailed.*?$', text, re.DOTALL)
+            closing = closing_match.group(0) if closing_match else ""
+            
+            if closing:
+                formatted_parts.append("\n" + closing)
+                
+            return "\n\n".join(formatted_parts)
         
-        # Final trim of any leading/trailing whitespace
-        return text.strip()
-
+        # If not numbered, look for expertise patterns
+        expertise_matches = re.findall(r'([A-Z][a-z]+\s+[A-Z][a-z]+)[^A-Z]*?specializes in ([^\n.]+)', text)
+        
+        if expertise_matches:
+            # Format as a numbered list
+            formatted_parts = [introduction] if introduction else []
+            
+            for i, (name, expertise) in enumerate(expertise_matches, 1):
+                formatted_expert = f"{i}. **{name}**\n"
+                formatted_expert += f"    - **Expertise:** {expertise}\n"
+                formatted_parts.append(formatted_expert)
+            
+            # Find closing text
+            closing_match = re.search(r'Would you like more detailed.*?$', text, re.DOTALL)
+            closing = closing_match.group(0) if closing_match else ""
+            
+            if closing:
+                formatted_parts.append("\n" + closing)
+                
+            return "\n\n".join(formatted_parts)
+        
+        # Look for simple expert list formats (just names)
+        name_matches = re.findall(r'((?:Dr\.|Prof\.|Mr\.|Ms\.|Mrs\.)?\s*[A-Z][a-z]+\s+[A-Z][a-z]+)', text)
+        if name_matches and len(name_matches) >= 2:
+            # Format as a numbered list
+            formatted_parts = [introduction] if introduction else []
+            
+            # Try to extract expertise information for each name
+            expertise_dict = {}
+            for name in name_matches:
+                expertise_pattern = f"{re.escape(name)}[^A-Z]*?(specializes|focuses|expertise)[^:]*?:?([^.\n]+)"
+                expertise_match = re.search(expertise_pattern, text, re.IGNORECASE)
+                if expertise_match:
+                    expertise_dict[name] = expertise_match.group(2).strip()
+            
+            # Format each expert
+            for i, name in enumerate(name_matches, 1):
+                formatted_expert = f"{i}. **{name}**\n"
+                if name in expertise_dict:
+                    formatted_expert += f"    - **Expertise:** {expertise_dict[name]}\n"
+                formatted_parts.append(formatted_expert)
+            
+            # Find closing text
+            closing_match = re.search(r'Would you like more detailed.*?$', text, re.DOTALL)
+            closing = closing_match.group(0) if closing_match else ""
+            
+            if closing:
+                formatted_parts.append("\n" + closing)
+                
+            return "\n\n".join(formatted_parts)
+        
+        # Check for bullet point or dash-separated expert lists
+        bullet_pattern = r'[-*•]\s+((?:Dr\.|Prof\.|Mr\.|Ms\.|Mrs\.)?\s*[A-Z][a-z]+\s+[A-Z][a-z]+[^\n]*)'
+        bullet_matches = re.findall(bullet_pattern, text)
+        
+        if bullet_matches:
+            # Format as a numbered list
+            formatted_parts = [introduction] if introduction else []
+            
+            for i, expert_line in enumerate(bullet_matches, 1):
+                # Extract name and expertise if present
+                name_match = re.search(r'([A-Z][a-z]+\s+[A-Z][a-z]+)', expert_line)
+                if not name_match:
+                    continue
+                    
+                name = name_match.group(1)
+                
+                # Check if expertise is in the same line
+                expertise_match = re.search(r'specializes in ([^.\n]+)', expert_line, re.IGNORECASE)
+                expertise = expertise_match.group(1).strip() if expertise_match else ""
+                
+                # Format with proper structure
+                formatted_expert = f"{i}. **{name}**\n"
+                if expertise:
+                    formatted_expert += f"    - **Expertise:** {expertise}\n"
+                formatted_parts.append(formatted_expert)
+            
+            # Find closing text
+            closing_match = re.search(r'Would you like more detailed.*?$', text, re.DOTALL)
+            closing = closing_match.group(0) if closing_match else ""
+            
+            if closing:
+                formatted_parts.append("\n" + closing)
+                
+            return "\n\n".join(formatted_parts)
+        
+        # If no patterns match, try to identify a comma-separated list of names
+        if "," in text and re.search(r'[A-Z][a-z]+\s+[A-Z][a-z]+', text):
+            # Look for sections with names
+            name_section_match = re.search(r'((?:expert|researcher|scientist|specialist)s?[^:]*:?\s*)([^.!?]+)', text, re.IGNORECASE)
+            
+            if name_section_match:
+                names_text = name_section_match.group(2)
+                # Extract names from comma-separated text
+                name_matches = re.findall(r'([A-Z][a-z]+\s+[A-Z][a-z]+)', names_text)
+                
+                if name_matches and len(name_matches) >= 2:
+                    # Format as a numbered list
+                    formatted_parts = [introduction] if introduction else []
+                    
+                    for i, name in enumerate(name_matches, 1):
+                        # Try to find expertise for this name
+                        expertise_pattern = f"{re.escape(name)}[^A-Z]*?(specializes|focuses|expertise)[^:]*?:?([^.\n]+)"
+                        expertise_match = re.search(expertise_pattern, text, re.IGNORECASE)
+                        expertise = expertise_match.group(2).strip() if expertise_match else ""
+                        
+                        # Format with proper structure
+                        formatted_expert = f"{i}. **{name}**\n"
+                        if expertise:
+                            formatted_expert += f"    - **Expertise:** {expertise}\n"
+                        formatted_parts.append(formatted_expert)
+                    
+                    # Find closing text
+                    closing_match = re.search(r'Would you like more detailed.*?$', text, re.DOTALL)
+                    closing = closing_match.group(0) if closing_match else ""
+                    
+                    if closing:
+                        formatted_parts.append("\n" + closing)
+                        
+                    return "\n\n".join(formatted_parts)
+        
+        # If all parsing attempts fail, perform minimal cleanup
+        # At least fix line breaks and spacing for readability
+        cleaned_text = re.sub(r'([A-Z][a-z]+\s+[A-Z][a-z]+)([^.\n,]*),', r'\1\2\n', text)
+        cleaned_text = re.sub(r'([A-Z][a-z]+\s+[A-Z][a-z]+)([^.\n,]*),', r'\1\2\n', cleaned_text)
+        
+        # If we've made changes, return the cleaned version
+        if cleaned_text != text:
+            return cleaned_text
+        
+        # If no patterns match, fall back to the original text
+        return text
 
     async def process_stream_response(self, response_stream):
         """
@@ -475,7 +524,7 @@ class MessageHandler:
         # Track different content segments for better processing
         in_structured_content = False
         structured_buffer = ""
-        content_type = None  # Will be "publication_list" or "expert_list" for specific handling
+        content_type = None
         
         try:
             async for chunk in response_stream:
@@ -505,6 +554,15 @@ class MessageHandler:
 
                 if not text.strip():
                     continue
+                    
+                # CRITICAL FIX: Remove stray JSON characters at the beginning of a chunk
+                # This specifically targets the "}" issue
+                if is_first_chunk:
+                    text = re.sub(r'^[}\]]*', '', text)
+                    is_first_chunk = False
+                
+                # Also clean stray JSON characters at the start of any chunk
+                text = re.sub(r'^(\s*[}\]]+\s*)+', '', text)
 
                 # Check if this is an expert list
                 if not in_structured_content and (
@@ -524,6 +582,9 @@ class MessageHandler:
                     
                     # Check if we have a complete expert list
                     if re.search(r'Would you like more detailed', structured_buffer):
+                        # Clean stray JSON characters before formatting
+                        structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
+                        
                         # We have a complete response, format it
                         formatted_text = self._format_expert_list(structured_buffer)
                         yield formatted_text
@@ -552,6 +613,9 @@ class MessageHandler:
 
             # Process any remaining content
             if in_structured_content and structured_buffer.strip():
+                # Clean stray JSON characters before final formatting
+                structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
+                
                 if content_type == "expert_list":
                     formatted_text = self._format_expert_list(structured_buffer)
                     yield formatted_text
@@ -561,6 +625,8 @@ class MessageHandler:
                     
             elif buffer.strip():
                 # Clean any remaining content in the buffer
+                # Remove stray JSON characters first
+                buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', buffer)
                 cleaned_text = self._clean_text_for_user(buffer)
                 yield cleaned_text
 
@@ -568,6 +634,9 @@ class MessageHandler:
             logger.error(f"Error processing stream response: {e}", exc_info=True)
             # Return any remaining buffered content if there's an error
             if in_structured_content and structured_buffer.strip():
+                # Clean stray JSON characters before error handling formatting
+                structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
+                
                 if content_type == "expert_list":
                     try:
                         formatted_text = self._format_expert_list(structured_buffer)
@@ -577,7 +646,45 @@ class MessageHandler:
                 else:
                     yield self._clean_structured_content(structured_buffer, "list")
             elif buffer.strip():
+                # Clean stray JSON characters before final cleanup
+                buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', buffer)
                 yield self._clean_text_for_user(buffer)
+
+    @staticmethod
+    def _clean_text_for_user(text: str) -> str:
+        """
+        Enhanced text cleaning for user-facing responses in Markdown format.
+        Removes technical artifacts, properly formats Markdown, and improves readability.
+        """
+        if not text:
+            return ""
+
+        # CRITICAL FIX: Remove any stray JSON characters at the beginning
+        text = re.sub(r'^(\s*[}\]]+\s*)+', '', text)
+        
+        # Remove JSON metadata that might have slipped through
+        metadata_pattern = r'^\s*\{\"is_metadata\"\s*:\s*true.*?\}\s*'
+        text = re.sub(metadata_pattern, '', text, flags=re.MULTILINE)
+        
+        # Fix potential duplicate heading markers
+        text = re.sub(r'(#+)\s*(#+)\s*', r'\1 ', text)
+        
+        # Normalize heading formatting
+        text = re.sub(r'(#+)(\w)', r'\1 \2', text)  # Ensure space after heading markers
+        
+        # Preserve markdown bold formatting (ensure spaces are correct)
+        text = re.sub(r'\*\*\s*(.+?)\s*\*\*', r'**\1**', text)
+        
+        # Normalize bullet points (could be * or - in markdown)
+        text = re.sub(r'^\s*[-*]\s*', '- ', text, flags=re.MULTILINE)  # Standardize to dash style
+        
+        # ADDED: Clean up any "Alright" or similar starter phrases that might be duplicated
+        text = re.sub(r'^(Alright!?|Sure!?|Here|I can help|Let me)(\s*\1)+', r'\1', text, flags=re.IGNORECASE)
+        
+        # Rest of the method remains the same...
+        
+        # Final trim of any leading/trailing whitespace
+        return text.strip()
     
     
         
