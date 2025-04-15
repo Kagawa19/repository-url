@@ -1670,66 +1670,37 @@ class GeminiLLMManager:
     def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
         Format publication information into Markdown format with focused presentation.
-        Only includes title, summary, and DOI link with correct formatting.
-        
-        Args:
-            publications: List of publication dictionaries
-            
-        Returns:
-            Formatted Markdown string with structured publication presentations
+        Includes title, summary, and DOI link with correct 'Check it out' text.
         """
         if not publications:
             return "I couldn't find any publications matching your criteria. Would you like me to suggest some related research areas instead?"
 
-        # Create header 
-        markdown_text = "# APHRC Publications\n\n" 
+        markdown_text = "# APHRC Publications\n\n"
 
         for idx, publication in enumerate(publications):
             try:
-                # Extract title
                 title = publication.get('title', 'Untitled Publication').strip()
-                
-                # Use numbered list with clear formatting
                 markdown_text += f"{idx + 1}. **{title}**\n"
 
-                # Add summary/abstract (shortened for readability)
-                summary = ""
-                if publication.get('abstract'):
-                    summary = publication.get('abstract')
-                elif publication.get('summary'):
-                    summary = publication.get('summary')
-                    
+                # Add summary/abstract
+                summary = publication.get('abstract') or publication.get('summary') or ""
                 if summary:
-                    # Truncate long summaries
-                    if len(summary) > 200:
-                        summary = summary[:197] + "..."
+                    summary = f"{summary[:200]}..." if len(summary) > 200 else summary
                     markdown_text += f"   **Summary:** {summary}\n"
-                
-                # Add DOI as a clickable link if available
-                if publication.get('doi'):
-                    doi = publication.get('doi').strip()
-                    # Check if the DOI already has a URL format
-                    if not doi.startswith('http'):
-                        # Format as DOI URL if it doesn't already have http
-                        if doi.startswith('10.'):
-                            doi_url = f"https://doi.org/{doi}"
-                        else:
-                            doi_url = doi
-                    else:
-                        doi_url = doi
-                    
-                    # Add as a clickable link with "Check it out" text
-                    markdown_text += f"   **DOI:** [Check it out]({doi_url})\n"
 
-                # Add an extra line break between publications for clear separation
+                # Add DOI with consistent formatting
+                if publication.get('doi'):
+                    doi = publication['doi'].strip()
+                    if not doi.startswith('http'):
+                        doi = f"https://doi.org/{doi}"
+                    markdown_text += f"   **DOI:** [Check it out]({doi})\n"
+
                 if idx < len(publications) - 1:
                     markdown_text += "\n"
 
             except Exception as e:
                 logger.error(f"Error formatting publication {idx + 1}: {e}")
-                continue
 
-        # Add closing message
         markdown_text += "\nYou can ask for more details about any of these publications or request information about related research."
         return markdown_text
         
