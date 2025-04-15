@@ -1669,8 +1669,7 @@ class GeminiLLMManager:
 
     def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
-        Format publication information into Markdown format with focused presentation.
-        Includes title, summary, and DOI link with correct 'Check it out' text.
+        Format publication titles into a Markdown list.
         """
         if not publications:
             return "I couldn't find any publications matching your criteria. Would you like me to suggest some related research areas instead?"
@@ -1681,28 +1680,11 @@ class GeminiLLMManager:
             try:
                 title = publication.get('title', 'Untitled Publication').strip()
                 markdown_text += f"{idx + 1}. **{title}**\n"
-
-                # Add summary/abstract
-                summary = publication.get('abstract') or publication.get('summary') or ""
-                if summary:
-                    summary = f"{summary[:200]}..." if len(summary) > 200 else summary
-                    markdown_text += f"   **Summary:** {summary}\n"
-
-                # Add DOI with consistent formatting
-                if publication.get('doi'):
-                    doi = publication['doi'].strip()
-                    if not doi.startswith('http'):
-                        doi = f"https://doi.org/{doi}"
-                    markdown_text += f"   **DOI:** [Check it out]({doi})\n"
-
-                if idx < len(publications) - 1:
-                    markdown_text += "\n"
-
             except Exception as e:
-                logger.error(f"Error formatting publication {idx + 1}: {e}")
+                logger.error(f"Error formatting publication title {idx + 1}: {e}")
 
-        markdown_text += "\nYou can ask for more details about any of these publications or request information about related research."
         return markdown_text
+
         
     async def generate_async_response(self, message: str, user_interests: str = "") -> AsyncGenerator[str, None]:
         """
