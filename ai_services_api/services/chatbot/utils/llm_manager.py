@@ -2900,55 +2900,329 @@ class GeminiLLMManager:
             self.context_window.pop(0)
 
     
-    async def get_publications(self, query: str = None, expert_id: str = None, limit: int = 3) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    async def get_publications(self, query: str, limit: int = 3) -> Tuple[List[Dict], Optional[str]]:
         """
-        Retrieves publications (works) either by general search or for a specific expert (author) using pre-stored links.
+        Enhanced method to fetch publications by query with improved matching and rich results.
+        Uses consistent key patterns matching the storage method.
+        
+        Args:
+            query (str): The search query for publications
+            limit (int): Maximum number of results to return
+            
+        Returns:
+            Tuple[List[Dict], Optional[str]]: Publication data and optional message
         """
         try:
-            if not self.redis_manager:
-                return [], "Database unavailable"
-                
-            publications = []
+            # Check if this is a "list publications" request
+            is_list_request = bool(re.search(r'\b(list|show|all|many)\b.*?\b(publication|paper|article|research)', query.lower()))
             
-            # Expert-specific publication retrieval
-            if expert_id:
-                # Using new key pattern for author-work links
-                links_key = f"author:{expert_id}:works"
-                
-                if self.redis_manager.redis_text.exists(links_key):
-                    # Get all works for this author
-                    resource_ids = self.redis_manager.redis_text.smembers(links_key)
-                    
-                    for resource_id in resource_ids:
-                        meta_key = f"meta:work:{resource_id}"
-                        if self.redis_manager.redis_text.exists(meta_key):
-                            pub = self.redis_manager.redis_text.hgetall(meta_key)
-                            if pub:
-                                publications.append(pub)
-                                # Limit results if we have enough
-                                if len(publications) >= limit:
-                                    break
+            # Check for topic-specific queries like "publications in mental health"
+            topic_match = re.search(r'\b(?:in|on|about|related to)\s+([A-Za-z\s]+(?:\s+[A-Za-z]+){0,3})\b', query.lower())
+            search_topic = None
+            if topic_match:
+                search_topic = topic_match.group(1).strip()
+                logger.info(f"Detected specific topic search for '{search_topic}'")
             
-            # General search
+            # Adjust limit for list requests
+            if is_list_request and limit < 5:
+                limit = 5  # Increase limit for explicit list requests
+                logger.info(f"Detected list request, increased limit to {limit}")
+
+            if not self.redis_manager or not self.redis_manager.redis_text:
+                return [], "Redis manager not available"
+                
+            # Check if we need to use async or sync Redis methods
+            is_async_redis = hasattr(self.redis_manager.redis_text, 'ascan') or hasattr(self.redis_manager.redis_text, 'akeys')
+            
+            # Use consistent key pattern matching the storage method
+            pattern = "meta:resource:*"
+            keys = []
+            
+            if is_async_redis:
+                # Use async methods if available
+                if hasattr(self.redis_manager.redis_text, 'akeys'):
+                    keys = await self.redis_manager.redis_text.akeys(pattern)
+                else:
+                    # Use async scan
+                    cursor = 0
+                    while True:
+                        cursor, batch = await self.redis_manager.redis_text.ascan(
+                            cursor=cursor, 
+                            match=pattern, 
+                            count=100
+                        )
+                        keys.extend(batch)
+                        if cursor == 0:
+                            break
             else:
-                cursor = 0
-                while len(publications) < limit and (cursor != 0 or not publications):
-                    # Updated pattern to match the new key structure
-                    cursor, keys = self.redis_manager.redis_text.scan(
-                        cursor, match='meta:work:*', count=limit*3)
+                # Use synchronous methods
+                if hasattr(self.redis_manager.redis_text, 'keys'):
+                    keys = self.redis_manager.redis_text.keys(pattern)
+                else:
+                    # Use synchronous scan
+                    cursor = 0
+                    while True:
+                        cursor, batch = self.redis_manager.redis_text.scan(
+                            cursor=cursor, 
+                            match=pattern, 
+                            count=100
+                        )
+                        keys.extend(batch)
+                        if cursor == 0:
+                            break
+            
+            # Log the number of publication keys found
+            logger.info(f"Found {len(keys)} publication keys in Redis")
+            if not keys:
+                return [], "No publications found in database"
+            
+            # Initialize collections
+            publications = []
+            query_embedding = None
+            match_scores = {}  # Track multiple matching criteria
+
+            # Encode the query if an embedding model is available
+            if self.embedding_model:
+                try:
+                    query_embedding = self.embedding_model.encode(query.lower().strip())
+                except Exception as emb_err:
+                    logger.warning(f"Failed to create query embedding: {emb_err}")
+
+            # Extract meaningful terms from the query
+            query_terms = query.lower().split()
+            # Extract topic terms and other significant terms
+            topic_terms = []
+            
+            for term in query_terms:
+                # Skip very short terms and common words
+                if len(term) <= 2 or term in ['is', 'the', 'a', 'of', 'and', 
+                                            'what', 'where', 'when', 'how', 'why', 'which', 'this', 'that',
+                                            'list', 'show', 'all', 'many', 'publication', 'paper', 'article', 'research']:
+                    continue
                     
-                    for key in keys:
-                        pub = self.redis_manager.redis_text.hgetall(key)
-                        if not query or self._publication_matches_query(pub, query):
-                            publications.append(pub)
-                            
-                    if cursor == 0 or len(publications) >= limit:
+                # Consider all remaining terms as potential topic terms
+                topic_terms.append(term)
+            
+            # If we have a specific search topic from the query, add it to topic terms
+            if search_topic and search_topic not in topic_terms:
+                topic_terms.extend(search_topic.split())
+            
+            logger.info(f"Query analysis - Topic terms: {topic_terms}")
+
+            # Process each publication key
+            for key in keys:
+                try:
+                    # Get publication data using appropriate method
+                    publication = {}
+                    if is_async_redis:
+                        if hasattr(self.redis_manager.redis_text, 'ahgetall'):
+                            publication = await self.redis_manager.redis_text.ahgetall(key)
+                        else:
+                            publication = await self.redis_manager.redis_text.hgetall(key)
+                    else:
+                        publication = self.redis_manager.redis_text.hgetall(key)
+                    
+                    if not publication:
+                        continue
+                        
+                    resource_id = publication.get('id') or key.split(':')[-1]
+                    match_score = 0.0
+                    matched_criteria = []
+                    
+                    # For list requests, give all publications a base score
+                    if is_list_request:
+                        match_score = 0.3  # Base score for list requests
+                        matched_criteria.append("Included in publication list")
+                    
+                    # TITLE MATCHING - high importance
+                    title = publication.get('title', '').lower()
+                    if title:
+                        for term in topic_terms:
+                            if term in title:
+                                match_score += 0.8
+                                matched_criteria.append(f"Title contains '{term}'")
+                    
+                    # ABSTRACT/SUMMARY MATCHING
+                    abstract = publication.get('abstract', '').lower()
+                    summary = publication.get('summary', '').lower()
+                    
+                    # Use abstract if available, otherwise summary
+                    content_text = abstract if abstract else summary
+                    if content_text:
+                        for term in topic_terms:
+                            if term in content_text:
+                                match_score += 0.7
+                                matched_criteria.append(f"Abstract/Summary contains '{term}'")
+                    
+                    # DOI MATCHING (for specific publication search)
+                    doi = publication.get('doi', '').lower()
+                    if doi and any(term in doi for term in topic_terms):
+                        match_score += 0.9
+                        matched_criteria.append(f"DOI matches search term")
+                    
+                    # TOPIC/THEME MATCHING
+                    # Parse topics JSON
+                    topics = {}
+                    try:
+                        topics_json = publication.get('topics', '{}')
+                        topics = json.loads(topics_json) if isinstance(topics_json, str) else topics_json
+                    except (json.JSONDecodeError, TypeError):
+                        # If parse fails, try to use as is
+                        topics = {}
+                    
+                    # Check if topics contains search terms
+                    if isinstance(topics, dict):
+                        for topic_key, topic_value in topics.items():
+                            topic_str = f"{topic_key} {topic_value}".lower()
+                            for term in topic_terms:
+                                if term in topic_str:
+                                    match_score += 0.6
+                                    matched_criteria.append(f"Topic contains '{term}'")
+                                    break
+                    
+                    # DOMAINS MATCHING
+                    try:
+                        domains_json = publication.get('domains', '[]')
+                        domains = json.loads(domains_json) if isinstance(domains_json, str) else domains_json
+                        if isinstance(domains, list):
+                            for domain in domains:
+                                domain_str = str(domain).lower()
+                                for term in topic_terms:
+                                    if term in domain_str:
+                                        match_score += 0.6
+                                        matched_criteria.append(f"Domain contains '{term}'")
+                                        break
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    
+                    # DESCRIPTION MATCHING
+                    description = publication.get('description', '').lower()
+                    if description:
+                        for term in topic_terms:
+                            if term in description:
+                                match_score += 0.5
+                                matched_criteria.append(f"Description contains '{term}'")
+                    
+                    # SPECIFIC TOPIC MATCHING (e.g., "mental health")
+                    if search_topic:
+                        if search_topic in title:
+                            match_score += 1.0  # Strong boost for title match with specific topic
+                            matched_criteria.append(f"Title contains full topic '{search_topic}'")
+                        elif search_topic in content_text:
+                            match_score += 0.8  # Good boost for content match with specific topic
+                            matched_criteria.append(f"Content contains full topic '{search_topic}'")
+                    
+                    # AUTHORS MATCHING
+                    try:
+                        authors_json = publication.get('authors', '[]')
+                        authors = json.loads(authors_json) if isinstance(authors_json, str) else authors_json
+                        
+                        if isinstance(authors, list):
+                            for author in authors:
+                                author_str = str(author).lower()
+                                for term in topic_terms:
+                                    if term in author_str:
+                                        match_score += 0.5
+                                        matched_criteria.append(f"Author contains '{term}'")
+                                        break
+                    except (json.JSONDecodeError, TypeError):
+                        # If parsing fails, try as a string
+                        if isinstance(publication.get('authors'), str):
+                            authors_str = publication.get('authors').lower()
+                            for term in topic_terms:
+                                if term in authors_str:
+                                    match_score += 0.5
+                                    matched_criteria.append(f"Author contains '{term}'")
+                    
+                    # Adjust threshold based on request type
+                    match_threshold = 0.1 if is_list_request else 0.3  # Lower threshold for list requests
+                    # Further lower threshold for specific topic searches
+                    if search_topic:
+                        match_threshold = 0.05
+                    
+                    if match_score > match_threshold:
+                        logger.info(f"Publication {resource_id} matched with score {match_score:.2f}: {', '.join(matched_criteria[:3])}")
+                        
+                        # Process fields that might be stored as JSON strings
+                        for field in ['authors', 'topics', 'domains', 'subtitles', 'publishers', 'identifiers']:
+                            if field in publication and isinstance(publication[field], str):
+                                try:
+                                    publication[field] = json.loads(publication[field])
+                                except (json.JSONDecodeError, TypeError):
+                                    # Keep as string if parsing fails
+                                    pass
+                        
+                        # Store match score for ranking
+                        publication['match_score'] = match_score
+                        publication['matched_criteria'] = matched_criteria
+                        
+                        # Add to results
+                        publications.append(publication)
+                
+                except Exception as pub_err:
+                    logger.warning(f"Error processing publication from key {key}: {pub_err}")
+                    continue
+
+            logger.info(f"Found {len(publications)} matching publications for query: {query}")
+            
+            # For list requests with no results, return top publications instead of empty list
+            if is_list_request and len(publications) == 0:
+                logger.info("No matches for list request - returning top publications instead")
+                # Process first 5-10 publications without filtering
+                count = 0
+                for key in keys[:10]:  # Try first 10 keys
+                    if count >= limit:
                         break
+                    
+                    try:
+                        publication = {}
+                        if is_async_redis:
+                            if hasattr(self.redis_manager.redis_text, 'ahgetall'):
+                                publication = await self.redis_manager.redis_text.ahgetall(key)
+                            else:
+                                publication = await self.redis_manager.redis_text.hgetall(key)
+                        else:
+                            publication = self.redis_manager.redis_text.hgetall(key)
+                        
+                        if publication and publication.get('title'):
+                            # Process fields that might be stored as JSON strings
+                            for field in ['authors', 'topics', 'domains', 'subtitles', 'publishers', 'identifiers']:
+                                if field in publication and isinstance(publication[field], str):
+                                    try:
+                                        publication[field] = json.loads(publication[field])
+                                    except (json.JSONDecodeError, TypeError):
+                                        # Keep as string if parsing fails
+                                        pass
+                            
+                            publication['match_score'] = 0.5  # Default score
+                            publication['matched_criteria'] = ["Top publication"]
+                            publications.append(publication)
+                            count += 1
+                    except Exception as e:
+                        logger.warning(f"Error processing fallback publication: {e}")
+                        continue
+                    
+                # Add a note that these are fallback publications if we had to use fallbacks
+                if publications:
+                    if search_topic:
+                        return publications[:limit], f"No publications found specifically on '{search_topic}'. Showing top publications instead."
+                    else:
+                        return publications[:limit], "No publications matched your query exactly. Showing top publications instead."
+            
+            # If we have too many matches, filter and rank them
+            if len(publications) > limit:
+                # Sort by match score (highest first)
+                ranked_publications = sorted(
+                    publications,
+                    key=lambda p: p.get('match_score', 0),
+                    reverse=True
+                )
+                return ranked_publications[:limit], None
             
             return publications[:limit], None
             
         except Exception as e:
-            logger.error(f"Error in get_publications: {e}")
+            logger.error(f"Error fetching publications: {e}")
             return [], str(e)
     def _publication_matches_query(self, publication: Dict, query: str) -> bool:
         """

@@ -1046,50 +1046,81 @@ class ExpertRedisIndexManager:
         return normalized
 
     def _store_resource_data(self, resource: Dict[str, Any], text_content: str, embedding: np.ndarray) -> None:
-        """Stores resources in Redis using work-based key patterns."""
+        """
+        Stores resources in Redis using consistent key patterns with all available fields.
+        
+        Args:
+            resource: The resource data dictionary
+            text_content: Text representation for embedding
+            embedding: The embedding vector
+        """
         pipeline = None
         
         try:
-            # Get expert_id directly from the resource
-            expert_id = resource.get('expert_id')
-            
-            # Use new work-based key pattern
+            # Get resource ID
             resource_id = resource['id']
+            
+            # Use consistent key pattern for all resource data
+            base_key = f"resource:{resource_id}"
             pipeline = self.redis_text.pipeline()
             
             # Store text content
-            pipeline.set(f"text:work:{resource_id}", text_content)
+            pipeline.set(f"text:{base_key}", text_content)
             
             # Store embedding
-            self.redis_binary.set(f"emb:work:{resource_id}", embedding.astype(np.float32).tobytes())
+            self.redis_binary.set(
+                f"emb:{base_key}",
+                embedding.astype(np.float32).tobytes()
+            )
             
-            # Store metadata
+            # Store all available metadata fields from the database table
             metadata = {
                 'id': str(resource_id),
+                'doi': str(resource.get('doi', '')),
                 'title': str(resource.get('title', '')),
                 'abstract': str(resource.get('abstract', '')),
+                'summary': str(resource.get('summary', '')),
+                'domains': json.dumps(resource.get('domains', [])),
+                'topics': json.dumps(resource.get('topics', {})),
+                'description': str(resource.get('description', '')),
+                'expert_id': str(resource.get('expert_id', '')),
+                'type': str(resource.get('type', 'publication')),
+                'subtitles': json.dumps(resource.get('subtitles', {})),
+                'publishers': json.dumps(resource.get('publishers', {})),
+                'collection': str(resource.get('collection', '')),
+                'date_issue': str(resource.get('date_issue', '')),
+                'citation': str(resource.get('citation', '')),
+                'language': str(resource.get('language', '')),
+                'identifiers': json.dumps(resource.get('identifiers', {})),
+                'created_at': str(resource.get('created_at', '')),
+                'updated_at': str(resource.get('updated_at', '')),
+                'source': str(resource.get('source', 'unknown')),
                 'authors': json.dumps(resource.get('authors', [])),
-                'publication_year': str(resource.get('publication_year', '')),
-                'expert_id': str(expert_id) if expert_id else '',
-                'doi': str(resource.get('doi', ''))
+                'publication_year': str(resource.get('publication_year', ''))
             }
-            pipeline.hset(f"meta:work:{resource_id}", mapping=metadata)
             
-            # If there's an expert_id, create a link from author to work
+            # Store metadata with HSET
+            pipeline.hset(f"meta:{base_key}", mapping=metadata)
+            
+            # Store expert links if applicable
+            expert_id = resource.get('expert_id')
             if expert_id and str(expert_id).strip().lower() != 'none':
-                author_works_key = f"author:{expert_id}:works"
-                pipeline.sadd(author_works_key, str(resource_id))
+                # Resource to Expert link
+                pipeline.sadd(f"links:{base_key}:experts", str(expert_id))
+                
+                # Expert to Resource link
+                pipeline.sadd(f"links:expert:{expert_id}:resources", str(resource_id))
             
+            # Execute all commands
             pipeline.execute()
-            logger.info(f"Successfully stored work {resource_id}")
+            logger.info(f"Successfully stored resource {resource_id} with all fields")
             
         except Exception as e:
             if pipeline:
                 pipeline.reset()
                 logger.debug("Reset Redis pipeline due to error")
-            logger.error(f"Error storing work {resource.get('id')}: {e}")
+            logger.error(f"Error storing resource {resource.get('id')}: {e}")
             raise
-            
 
     
 

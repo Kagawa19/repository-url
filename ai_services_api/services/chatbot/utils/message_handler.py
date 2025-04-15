@@ -416,9 +416,10 @@ class MessageHandler:
     def format_publication_list_clean(self, publications: List[Dict[str, Any]]) -> str:
         """
         Format publication information into clean, consistent numbered list format.
+        Handles all fields from the resources_resource table.
         
         Args:
-            publications: List of publication dictionaries
+            publications: List of publication dictionaries with rich fields
             
         Returns:
             Formatted string with properly structured publication presentations
@@ -443,8 +444,10 @@ class MessageHandler:
             # Add authors
             authors = []
             if pub.get('authors'):
-                # Parse authors from various formats
-                if isinstance(pub['authors'], str):
+                # Handle various author formats
+                if isinstance(pub['authors'], list):
+                    authors = pub['authors']
+                elif isinstance(pub['authors'], str):
                     try:
                         # Try to parse JSON string
                         authors_data = json.loads(pub['authors'])
@@ -452,11 +455,9 @@ class MessageHandler:
                             authors = authors_data
                         else:
                             authors = [pub['authors']]
-                    except:
+                    except (json.JSONDecodeError, TypeError):
                         # If not JSON, use as is
                         authors = [pub['authors']]
-                elif isinstance(pub['authors'], list):
-                    authors = pub['authors']
             
             # Format authors string
             if authors:
@@ -475,16 +476,28 @@ class MessageHandler:
             if pub.get('publication_year'):
                 lines.append(f"   **Year:** {pub['publication_year']}")
             
-            # Add theme if available
-            if pub.get('theme'):
-                lines.append(f"   **Theme:** {pub['theme']}")
+            # Add domains if available
+            domains = []
+            if pub.get('domains'):
+                if isinstance(pub['domains'], list):
+                    domains = pub['domains']
+                elif isinstance(pub['domains'], str):
+                    try:
+                        domains_data = json.loads(pub['domains'])
+                        if isinstance(domains_data, list):
+                            domains = domains_data
+                    except (json.JSONDecodeError, TypeError):
+                        domains = [pub['domains']]
+                        
+                if domains:
+                    lines.append(f"   **Domains:** {', '.join(str(d) for d in domains[:3])}")
             
             # Add summary/abstract (shortened if needed)
             summary = ""
             if pub.get('abstract'):
-                summary = pub['abstract']
+                summary = pub.get('abstract')
             elif pub.get('summary'):
-                summary = pub['summary']
+                summary = pub.get('summary')
                 
             if summary:
                 # Truncate long summaries
@@ -496,11 +509,11 @@ class MessageHandler:
             if pub.get('doi'):
                 lines.append(f"   **DOI:** {pub['doi']}")
             
-            # Add empty line between publications for clear separation
+            # Add space between publications
             if idx < len(publications) - 1:
                 lines.append("")
         
-        # Add closing line
+        # Add closing
         lines.append("\nYou can ask for more details about any of these publications or request information about related research.")
         
         # Join all lines with newlines
