@@ -1669,7 +1669,8 @@ class GeminiLLMManager:
 
     def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
-        Format publication information into Markdown format for rendering in the frontend.
+        Format publication information into Markdown format with focused presentation.
+        Only includes title, summary, and DOI link.
         
         Args:
             publications: List of publication dictionaries
@@ -1691,50 +1692,6 @@ class GeminiLLMManager:
                 # Use numbered list with clear formatting
                 markdown_text += f"{idx + 1}. **{title}**\n"
 
-                # Add authors with consistent formatting
-                if publication.get('authors'):
-                    authors = publication.get('authors')
-                    # Handle different formats of authors data
-                    if isinstance(authors, str):
-                        try:
-                            authors_data = json.loads(authors)
-                            if isinstance(authors_data, list):
-                                authors = authors_data
-                            else:
-                                authors = [authors]
-                        except json.JSONDecodeError:
-                            authors = [authors]
-                    
-                    if isinstance(authors, list):
-                        # Format author list (limit to 3 with et al.)
-                        if len(authors) > 3:
-                            authors_text = f"{', '.join(str(a) for a in authors[:3])} et al."
-                        else:
-                            authors_text = ', '.join(str(a) for a in authors)
-                        markdown_text += f"   **Authors:** {authors_text}\n"
-                
-                # Add source/journal if available
-                if publication.get('source'):
-                    markdown_text += f"   **Published in:** {publication.get('source')}\n"
-                
-                # Add year if available
-                if publication.get('publication_year'):
-                    markdown_text += f"   **Year:** {publication.get('publication_year')}\n"
-                
-                # Add topic/theme if available
-                if publication.get('topics'):
-                    topics = publication.get('topics')
-                    if isinstance(topics, str):
-                        try:
-                            topics = json.loads(topics)
-                        except json.JSONDecodeError:
-                            pass
-                    
-                    if isinstance(topics, dict) and topics:
-                        # Use the first few topics
-                        topics_text = ', '.join(list(topics.keys())[:3])
-                        markdown_text += f"   **Topics:** {topics_text}\n"
-                
                 # Add summary/abstract (shortened for readability)
                 summary = ""
                 if publication.get('abstract'):
@@ -1748,9 +1705,21 @@ class GeminiLLMManager:
                         summary = summary[:197] + "..."
                     markdown_text += f"   **Summary:** {summary}\n"
                 
-                # Add DOI if available
+                # Add DOI as a clickable link if available
                 if publication.get('doi'):
-                    markdown_text += f"   **DOI:** {publication.get('doi')}\n"
+                    doi = publication.get('doi').strip()
+                    # Check if the DOI already has a URL format
+                    if not doi.startswith('http'):
+                        # Format as DOI URL if it doesn't already have http
+                        if doi.startswith('10.'):
+                            doi_url = f"https://doi.org/{doi}"
+                        else:
+                            doi_url = doi
+                    else:
+                        doi_url = doi
+                    
+                    # Add as a clickable link with "Check it out" text
+                    markdown_text += f"   [Check it out]({doi_url})\n"
 
                 # Add an extra line break between publications for clear separation
                 if idx < len(publications) - 1:
