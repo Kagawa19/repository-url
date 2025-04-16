@@ -779,6 +779,100 @@ class MessageHandler:
             logger.error(f"Error saving chat interaction: {e}")
             # This is non-critical, so don't raise the exception
 
+    def _analyze_followup(self, message: str, conversation_history: List[Dict]) -> Tuple[bool, Optional[str]]:
+        """
+        Determine if the current message is a follow-up to previous conversation.
+        
+        Args:
+            message (str): Current user message
+            conversation_history (List[Dict]): Previous interactions
+            
+        Returns:
+            Tuple[bool, Optional[str]]: Whether this is a follow-up and the previous topic
+        """
+        if not conversation_history:
+            return False, None
+        
+        # Convert message to lowercase for analysis
+        message_lower = message.lower().strip()
+        
+        # Check for explicit follow-up indicators
+        followup_indicators = [
+            'more about', 'tell me more', 'elaborate', 'expand', 'additional',
+            'another', 'also', 'what about', 'and', 'further', 'furthermore',
+            'additionally', 'besides', 'next', 'then', 'other', 'related',
+            'similarly', 'likewise', 'too', 'as well', 'them', 'they', 'those',
+            'these', 'that', 'this', 'it', 'he', 'she', 'their', 'this one'
+        ]
+        
+        has_indicator = any(indicator in message_lower for indicator in followup_indicators)
+        
+        # Check for very short queries that likely rely on context
+        is_short_query = len(message.split()) < 5
+        
+        # Check for questions without clear subjects
+        has_dangling_reference = re.search(r'\b(it|they|them|those|these|this|that)\b', message_lower) is not None
+        
+        # Get the most recent conversation turn
+        last_turn = conversation_history[-1] if conversation_history else None
+        if not last_turn:
+            return False, None
+        
+        previous_query = last_turn.get('query', '')
+        previous_intent = last_turn.get('intent', '')
+        
+        # Extract key terms from previous query using simple NLP
+        previous_terms = set(re.findall(r'\b\w{4,}\b', previous_query.lower()))
+        current_terms = set(re.findall(r'\b\w{4,}\b', message_lower))
+        
+        # Check term overlap for topical continuity
+        common_terms = previous_terms.intersection(current_terms)
+        has_term_overlap = len(common_terms) > 0
+        
+        # Navigation-specific: Check for section references in current message
+        # that may relate to previous navigation content
+        nav_references = ['page', 'section', 'link', 'website', 'site', 'content']
+        has_nav_reference = any(ref in message_lower for ref in nav_references)
+        
+        # Navigation-specific: If previous intent was navigation, consider this more likely a follow-up
+        if previous_intent and (
+            (hasattr(previous_intent, 'value') and previous_intent.value == 'navigation') or
+            str(previous_intent).lower() == 'navigation'
+        ):
+            # If asking about any page/section with minimal new context, likely a follow-up
+            if has_nav_reference and not has_term_overlap:
+                has_term_overlap = True  # Force this to be considered for navigation
+        
+        # Determine if this is likely a follow-up
+        is_followup = (has_indicator or is_short_query or has_dangling_reference) and (has_term_overlap or len(common_terms) > 0)
+        
+        # Extract the probable topic of conversation
+        if is_followup:
+            # Try to extract topic from previous query
+            key_terms = [term for term in previous_terms if len(term) > 5]
+            if key_terms:
+                topic = " and ".join(key_terms[:2])  # Use top 2 key terms
+            else:
+                # Fall back to intent type
+                intent_topics = {
+                    'publication': 'publications',
+                    'expert': 'experts',
+                    'navigation': 'website navigation',
+                    'general': 'general information'
+                }
+                
+                # Handle different intent type formats
+                if hasattr(previous_intent, 'value'):
+                    intent_key = previous_intent.value
+                else:
+                    intent_key = str(previous_intent).lower()
+                    
+                topic = intent_topics.get(intent_key, 'your previous question')
+            
+            return True, topic
+        
+        return False, None
+
     async def _get_conversation_history(self, user_id: str, session_id: str) -> List[Dict]:
         """
         Retrieve conversation history for the current session.
