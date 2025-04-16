@@ -3,7 +3,7 @@ from transformers import AutoTokenizer, AutoModel
 import numpy as np
 from typing import List, Union
 import logging
-from ..config.settings import MODEL_NAME, MAX_TOKENS
+from ..config.settings import MODEL_NAME, MAX_TOKENSpme
 
 class EmbeddingModel:
     def __init__(self):

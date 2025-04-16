@@ -354,13 +354,12 @@ class GeminiLLMManager:
     
     async def detect_intent(self, message: str) -> Dict[str, Any]:
         """
-        Enhanced intent detection using multiple fallback strategies.
-        Now includes improved list detection and better handling of expert requests.
+        Enhanced intent detection with fallbacks and improved navigation detection.
         """
         logger.info(f"Detecting intent for message: {message}")
         
         # ADDED: Check for explicit list queries with improved detection
-        is_list_request = bool(re.search(r'\b(list|show|all|many)\b.*?\b(expert|researcher|scientist|publication|paper|article|resource)', message.lower()))
+        is_list_request = bool(re.search(r'\b(list|show|all|many)\b.*?\b(expert|researcher|scientist|publication|paper|article|resource|section|page|navigation)', message.lower()))
         
         # ADDED: Extract the entity type being listed
         list_entity = None
@@ -371,6 +370,10 @@ class GeminiLLMManager:
             elif re.search(r'\b(publication|paper|article|research)\b', message.lower()):
                 list_entity = "publication"
                 logger.info("Detected publication list request")
+            # ADDED: Detect navigation list requests 
+            elif re.search(r'\b(section|page|resource|navigation)\b', message.lower()):
+                list_entity = "navigation"
+                logger.info("Detected navigation list request")
         
         try:
             # First try with embeddings if available
@@ -379,7 +382,7 @@ class GeminiLLMManager:
                     intent_result = await self._detect_intent_with_embeddings(message)
                     logger.info(f"Embedding intent detection result: {intent_result['intent']} with confidence {intent_result['confidence']}")
                     
-                    # ADDED: Adjust confidence for list requests
+                    # ADDED: Adjust confidence for list requests including navigation
                     if is_list_request and list_entity:
                         if list_entity == "expert" and intent_result['intent'] != QueryIntent.EXPERT:
                             # Override with EXPERT intent for expert lists
@@ -391,7 +394,12 @@ class GeminiLLMManager:
                             logger.info(f"Overriding detected intent for publication list request")
                             intent_result['intent'] = QueryIntent.PUBLICATION
                             intent_result['confidence'] = max(intent_result['confidence'], 0.8)
-                        
+                        elif list_entity == "navigation" and intent_result['intent'] != QueryIntent.NAVIGATION:
+                            # Override with NAVIGATION intent for navigation lists
+                            logger.info(f"Overriding detected intent for navigation list request")
+                            intent_result['intent'] = QueryIntent.NAVIGATION
+                            intent_result['confidence'] = max(intent_result['confidence'], 0.8)
+                            
                         # Add list_request flag
                         intent_result['is_list_request'] = True
                         
@@ -412,6 +420,12 @@ class GeminiLLMManager:
                 elif list_entity == "publication":
                     # Override with PUBLICATION intent for publication lists
                     keyword_result['intent'] = QueryIntent.PUBLICATION
+                    keyword_result['confidence'] = max(keyword_result['confidence'], 0.8)
+                    keyword_result['is_list_request'] = True
+                # ADDED: Handle navigation list requests specifically
+                elif list_entity == "navigation":
+                    # Override with NAVIGATION intent for navigation lists
+                    keyword_result['intent'] = QueryIntent.NAVIGATION
                     keyword_result['confidence'] = max(keyword_result['confidence'], 0.8)
                     keyword_result['is_list_request'] = True
             
@@ -436,6 +450,14 @@ class GeminiLLMManager:
                         elif list_entity == "publication":
                             return {
                                 'intent': QueryIntent.PUBLICATION,
+                                'confidence': 0.8,
+                                'clarification': None,
+                                'is_list_request': True
+                            }
+                        # ADDED: Handle navigation list request
+                        elif list_entity == "navigation":
+                            return {
+                                'intent': QueryIntent.NAVIGATION,
                                 'confidence': 0.8,
                                 'clarification': None,
                                 'is_list_request': True
@@ -502,6 +524,10 @@ class GeminiLLMManager:
                         elif list_entity == "publication":
                             intent_result['intent'] = QueryIntent.PUBLICATION
                             intent_result['confidence'] = max(intent_result['confidence'], 0.8)
+                        # ADDED: Handle navigation list intent
+                        elif list_entity == "navigation":
+                            intent_result['intent'] = QueryIntent.NAVIGATION
+                            intent_result['confidence'] = max(intent_result['confidence'], 0.8)
                         intent_result['is_list_request'] = True
                     
                     logger.info(f"Gemini intent detection result: {intent_result['intent']} with confidence {intent_result['confidence']}")
@@ -522,6 +548,14 @@ class GeminiLLMManager:
                         elif list_entity == "publication":
                             return {
                                 'intent': QueryIntent.PUBLICATION,
+                                'confidence': 0.8,
+                                'clarification': None,
+                                'is_list_request': True
+                            }
+                        # ADDED: Handle navigation list intent when JSON parsing fails
+                        elif list_entity == "navigation":
+                            return {
+                                'intent': QueryIntent.NAVIGATION,
                                 'confidence': 0.8,
                                 'clarification': None,
                                 'is_list_request': True
@@ -554,6 +588,14 @@ class GeminiLLMManager:
                             'clarification': None,
                             'is_list_request': True
                         }
+                    # ADDED: Handle navigation list intent during API errors
+                    elif list_entity == "navigation":
+                        return {
+                            'intent': QueryIntent.NAVIGATION,
+                            'confidence': 0.8,
+                            'clarification': None,
+                            'is_list_request': True
+                        }
                 
                 # Ensure we have a return in this except block
                 return {
@@ -570,7 +612,6 @@ class GeminiLLMManager:
                 'confidence': 0.0,
                 'clarification': None
             }
-        
     def _init_embeddings(self):
         """Initialize embedding model with verification and fallback."""
         try:
@@ -2037,6 +2078,10 @@ class GeminiLLMManager:
                 return ranked_sections[:limit], None
             
             return sections[:limit], None
+            
+        except Exception as e:
+            logger.error(f"Error fetching navigation sections: {e}")
+            return [], str(e)
 
     
 
@@ -2088,6 +2133,24 @@ class GeminiLLMManager:
                         keywords_str = ', '.join(str(k).strip() for k in keywords[:5])
                         markdown_text += f"    - Keywords: {keywords_str}\n\n"
                 
+                # Parent section or category if available
+                parent = section.get('parent_section', '') or section.get('category', '')
+                if parent:
+                    markdown_text += f"    - Section: {parent}\n\n"
+                    
+                # Related sections if available
+                related = section.get('related_sections', [])
+                if related:
+                    if isinstance(related, str):
+                        try:
+                            related = json.loads(related)
+                        except json.JSONDecodeError:
+                            related = [r.strip() for r in related.split(',') if r.strip()]
+                    
+                    if isinstance(related, list) and related:
+                        related_str = ', '.join(str(r).strip() for r in related[:3])
+                        markdown_text += f"    - Related sections: {related_str}\n\n"
+                
                 # Extra space between sections
                 if idx < len(sections) - 1:
                     markdown_text += "\n"
@@ -2099,12 +2162,153 @@ class GeminiLLMManager:
         markdown_text += "\nWould you like more details about any of these sections or help navigating to a specific resource?"
         return markdown_text
 
-
+    def _create_tailored_prompt(self, intent, context_type: str, message_style: str, user_interests: str = "") -> str:
+        """
+        Create a tailored system prompt based on detected intent, context type, message style,
+        and user interests when available. Enhanced for navigation context.
+        
+        Args:
+            intent: The detected intent from QueryIntent enum
+            context_type (str): The type of context being provided
+            message_style (str): The communication style detected in the user's message
+            user_interests (str): Optional string describing user's previous interests
+                
+        Returns:
+            str: A specialized system prompt for the LLM
+        """
+        # Base instructions for all responses
+        base_instructions = """
+        You are an assistant for the African Population and Health Research Center (APHRC).
+        Your role is to provide helpful, accurate information about APHRC research, 
+        publications, experts, and resources. Maintain a professional, supportive tone
+        while being conversational and engaging.
+        """
+        
+        # Style-specific tone guidance
+        tone_guidance = {
+            "technical": """
+            Use precise language and academic terminology appropriate for researchers and professionals.
+            Provide detailed information with proper citations when possible.
+            Maintain clarity and accuracy while demonstrating deep subject matter expertise.
+            """,
+            
+            "formal": """
+            Use professional language with moderate formality.
+            Be thorough and precise while remaining accessible to non-specialists.
+            Maintain a respectful, informed tone appropriate for official communication.
+            """,
+            
+            "conversational": """
+            Use natural, engaging language that balances professionalism with approachability.
+            Create a dialogue-like experience using conversational transitions.
+            Be friendly and helpful while maintaining APHRC's professional authority.
+            """
+        }
+        
+        # Intent-specific response structures
+        intent_guidance = {
+            QueryIntent.PUBLICATION: """
+            When discussing publications:
+            - Highlight key findings and their significance
+            - Explain the research context and relevance
+            - Connect publications to broader themes in APHRC's work
+            - Use natural transitions between publications
+            - Suggest related publications when appropriate
+            """,
+            
+            QueryIntent.EXPERT: """
+            When discussing experts:
+            - Emphasize their specific areas of expertise and contributions
+            - Make connections between their work and the user's query
+            - Provide context about their role at APHRC
+            - Highlight notable publications or projects
+            - Suggest how their expertise might be relevant to the user's interests
+            """,
+            
+            # ENHANCED: Improved navigation guidance
+            QueryIntent.NAVIGATION: """
+            When providing navigation assistance:
+            - Give clear, step-by-step guidance to find resources
+            - Explain what the user will find in each section
+            - Provide context about why certain resources might be useful
+            - Describe the structure of the sections and how they relate to each other
+            - Include both direct links and instructions for accessing resources
+            - Mention related sections that might be helpful for their broader inquiry
+            - Use specific section names and paths exactly as they appear on the website
+            - For lists of sections, organize them in a logical order (importance/relevance)
+            """,
+            
+            QueryIntent.GENERAL: """
+            For general information about APHRC:
+            - Provide balanced, comprehensive overviews
+            - Highlight APHRC's mission and impact when relevant
+            - Connect information to broader themes in public health and population research
+            - Anticipate follow-up questions
+            - Provide examples and context to make information accessible
+            """
+        }
+        
+        # Context-specific guidance for empty results
+        context_specific = ""
+        if context_type == "no_experts":
+            context_specific = """
+            Although no specific experts were found, provide helpful general information
+            about APHRC's work in the relevant domain. Suggest broader research areas
+            the user might explore and mention that you can help find information about
+            specific experts if they provide more details.
+            """
+        elif context_type == "no_publications":
+            context_specific = """
+            Although no specific publications were found, provide helpful general information
+            about APHRC's research in the relevant domain. Suggest broader topics
+            the user might explore and mention that you can help find specific publications
+            if they provide more details about their interests.
+            """
+        # ADDED: Navigation-specific empty results guidance
+        elif context_type == "no_navigation":
+            context_specific = """
+            Although no specific navigation sections were found, provide helpful guidance
+            about navigating the APHRC website. Suggest main sections they might want to
+            explore based on their interests and offer to help them find specific resources
+            if they provide more details about what they're looking for.
+            """
+        
+        # Add user interest guidance if provided
+        user_interest_guidance = ""
+        if user_interests:
+            user_interest_guidance = f"""
+            This user has previously shown interest in:
+            {user_interests}
+            
+            When appropriate, consider connecting your response to these interests.
+            If you find related publications, experts, or website sections that align with these interests,
+            highlight those connections. However, always prioritize directly answering
+            their current question.
+            """
+        
+        # Combine appropriate guidance elements
+        selected_tone = tone_guidance.get(message_style, tone_guidance["conversational"])
+        selected_intent = intent_guidance.get(intent, intent_guidance[QueryIntent.GENERAL])
+        
+        full_prompt = f"{base_instructions}\n\n{selected_tone}\n\n{selected_intent}\n\n{context_specific}\n\n{user_interest_guidance}"
+        
+        # Add guidance on structuring the response
+        full_prompt += """
+        Structure your response for clarity:
+        - Begin with a direct, helpful answer to the query
+        - Provide context and details in a logical flow
+        - Use natural transitions between topics
+        - Include specific examples when helpful
+        - End with a courteous closing that invites further engagement
+        """
+        
+        return full_prompt.strip()
   
         
     async def generate_async_response(self, message: str, user_interests: str = "") -> AsyncGenerator[str, None]:
         """
         Generates a response with enhanced prompting strategies tailored to detected intent.
+        Now includes navigation context handling.
         """
         try:
             # Step 1: Intent Detection 
@@ -2164,11 +2368,13 @@ class GeminiLLMManager:
                     context = "No matching publications found, but I can still provide general information."
                     context_type = "no_publications"
             
-            # Handle NAVIGATION Intent
+            # ENHANCED: Handle NAVIGATION Intent
             elif intent == QueryIntent.NAVIGATION:
                 nav_limit = 5 if is_list_request else 3
+                # Use the new get_navigation method
                 sections, error = await self.get_navigation(message, limit=nav_limit)
                 if sections:
+                    # Use the format_navigation_context method to structure the data
                     context = self.format_navigation_context(sections)
                     context_type = "navigation"
                 else:
@@ -2212,138 +2418,6 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error generating response: {e}")
             yield "I apologize, but I encountered an issue while processing your request. Could you please rephrase your question or try again later?"
-
-
-    def _create_tailored_prompt(self, intent, context_type: str, message_style: str, user_interests: str = "") -> str:
-        """
-        Create a tailored system prompt based on detected intent, context type, message style,
-        and user interests when available.
-        
-        Args:
-            intent: The detected intent from QueryIntent enum
-            context_type (str): The type of context being provided
-            message_style (str): The communication style detected in the user's message
-            user_interests (str): Optional string describing user's previous interests
-                
-        Returns:
-            str: A specialized system prompt for the LLM
-        """
-        # Base instructions for all responses (unchanged)
-        base_instructions = """
-        You are an assistant for the African Population and Health Research Center (APHRC).
-        Your role is to provide helpful, accurate information about APHRC research, 
-        publications, experts, and resources. Maintain a professional, supportive tone
-        while being conversational and engaging.
-        """
-        
-        # Style-specific tone guidance (unchanged)
-        tone_guidance = {
-            "technical": """
-            Use precise language and academic terminology appropriate for researchers and professionals.
-            Provide detailed information with proper citations when possible.
-            Maintain clarity and accuracy while demonstrating deep subject matter expertise.
-            """,
-            
-            "formal": """
-            Use professional language with moderate formality.
-            Be thorough and precise while remaining accessible to non-specialists.
-            Maintain a respectful, informed tone appropriate for official communication.
-            """,
-            
-            "conversational": """
-            Use natural, engaging language that balances professionalism with approachability.
-            Create a dialogue-like experience using conversational transitions.
-            Be friendly and helpful while maintaining APHRC's professional authority.
-            """
-        }
-        
-        # Intent-specific response structures (unchanged)
-        intent_guidance = {
-            QueryIntent.PUBLICATION: """
-            When discussing publications:
-            - Highlight key findings and their significance
-            - Explain the research context and relevance
-            - Connect publications to broader themes in APHRC's work
-            - Use natural transitions between publications
-            - Suggest related publications when appropriate
-            """,
-            
-            QueryIntent.EXPERT: """
-            When discussing experts:
-            - Emphasize their specific areas of expertise and contributions
-            - Make connections between their work and the user's query
-            - Provide context about their role at APHRC
-            - Highlight notable publications or projects
-            - Suggest how their expertise might be relevant to the user's interests
-            """,
-            
-            QueryIntent.NAVIGATION: """
-            When providing navigation assistance:
-            - Give clear, step-by-step guidance
-            - Explain what the user will find in each section
-            - Provide context about why certain resources might be useful
-            - Anticipate related information needs
-            - Offer suggestions for exploring related content
-            """,
-            
-            QueryIntent.GENERAL: """
-            For general information about APHRC:
-            - Provide balanced, comprehensive overviews
-            - Highlight APHRC's mission and impact when relevant
-            - Connect information to broader themes in public health and population research
-            - Anticipate follow-up questions
-            - Provide examples and context to make information accessible
-            """
-        }
-        
-        # Context-specific guidance for empty results (unchanged)
-        context_specific = ""
-        if context_type == "no_experts":
-            context_specific = """
-            Although no specific experts were found, provide helpful general information
-            about APHRC's work in the relevant domain. Suggest broader research areas
-            the user might explore and mention that you can help find information about
-            specific experts if they provide more details.
-            """
-        elif context_type == "no_publications":
-            context_specific = """
-            Although no specific publications were found, provide helpful general information
-            about APHRC's research in the relevant domain. Suggest broader topics
-            the user might explore and mention that you can help find specific publications
-            if they provide more details about their interests.
-            """
-        
-        # NEW: Add user interest guidance if provided
-        user_interest_guidance = ""
-        if user_interests:
-            user_interest_guidance = f"""
-            This user has previously shown interest in:
-            {user_interests}
-            
-            When appropriate, consider connecting your response to these interests.
-            If you find related publications or experts that align with these interests,
-            highlight those connections. However, always prioritize directly answering
-            their current question.
-            """
-        
-        # Combine appropriate guidance elements (modified to include user interests)
-        selected_tone = tone_guidance.get(message_style, tone_guidance["conversational"])
-        selected_intent = intent_guidance.get(intent, intent_guidance[QueryIntent.GENERAL])
-        
-        full_prompt = f"{base_instructions}\n\n{selected_tone}\n\n{selected_intent}\n\n{context_specific}\n\n{user_interest_guidance}"
-        
-        # Add guidance on structuring the response (unchanged)
-        full_prompt += """
-        Structure your response for clarity:
-        - Begin with a direct, helpful answer to the query
-        - Provide context and details in a logical flow
-        - Use natural transitions between topics
-        - Include specific examples when helpful
-        - End with a courteous closing that invites further engagement
-        """
-        
-        return full_prompt.strip()
-
     def _load_embedding_model(self):
         """Try loading embedding model from various locations."""
         model_paths = [
@@ -2427,120 +2501,10 @@ class GeminiLLMManager:
             raise
 
 
-    async def _detect_intent_with_embeddings(self, message: str) -> Dict[str, Any]:
-        try:
-            if not self.embedding_model:
-                raise ValueError("No embedding model available")
-            
-            # Clean and normalize the query
-            cleaned_message = re.sub(r'[^\w\s]', ' ', message.lower()).strip()
-            query_embedding = self.embedding_model.encode(cleaned_message)
-            
-            # Define example queries for each intent type
-            intent_examples = {
-                QueryIntent.PUBLICATION: [
-                    "Show me publications about maternal health",
-                    "What papers have been published on climate change",
-                    "Research articles on education in Africa"
-                ],
-                QueryIntent.EXPERT: [
-                    "Who are the experts in health policy",
-                    "Find researchers working on climate change",
-                    "Information about Dr. Johnson"
-                ],
-                QueryIntent.NAVIGATION: [
-                    "How do I find the contact page",
-                    "Where can I access research tools",
-                    "Show me the about section"
-                ]
-            }
-            
-            # Compute similarity scores for each intent
-            intent_scores = {}
-            for intent, examples in intent_examples.items():
-                example_embeddings = self.embedding_model.encode(examples)
-                similarities = cos_sim(query_embedding, example_embeddings).numpy().flatten()
-                max_similarity = max(similarities)
-                intent_scores[intent] = float(max_similarity)
-            
-            # Determine the intent with the highest score
-            max_intent = max(intent_scores, key=intent_scores.get)
-            confidence = intent_scores[max_intent]
-            
-            # Apply threshold to determine final intent
-            if confidence < 0.6:
-                max_intent = QueryIntent.GENERAL
-            
-            return {
-                'intent': max_intent,
-                'confidence': confidence,
-                'clarification': None
-            }
-        except Exception as e:
-            logger.error(f"Error in embedding intent detection: {e}")
-            raise
-
-    async def _detect_intent_with_gemini(self, message: str) -> Dict[str, Any]:
-        """Detect intent using the Gemini model."""
-        try:
-            # Set up the Gemini model
-            model = self._setup_gemini()
-            
-            # Create a structured prompt for intent detection
-            prompt = f"""
-            Analyze this query and classify its intent:
-            Query: "{message}"
-            Options:
-            - PUBLICATION (research papers, studies)
-            - EXPERT (researchers, specialists)
-            - NAVIGATION (website sections, resources)
-            - GENERAL (other queries)
-            If asking about publications BY someone, extract the name.
-            Return ONLY JSON in this format:
-            {{
-                "intent": "PUBLICATION|EXPERT|NAVIGATION|GENERAL",
-                "confidence": 0.0-1.0,
-                "clarification": "optional question",
-                "expert_name": "name if detected"
-            }}
-            """
-            
-            # Generate content using Gemini
-            response = await model.generate_content(prompt)  # Use generateContent for async
-            content = response.text.replace("```json", "").replace("```", "").strip()
-            
-            # Extract JSON from the response
-            json_start = content.find('{')
-            json_end = content.rfind('}') + 1
-            if json_start >= 0 and json_end > json_start:
-                result = json.loads(content[json_start:json_end])
-                
-                # Map intent strings to QueryIntent enum
-                intent_mapping = {
-                    'PUBLICATION': QueryIntent.PUBLICATION,
-                    'EXPERT': QueryIntent.EXPERT,
-                    'NAVIGATION': QueryIntent.NAVIGATION,
-                    'GENERAL': QueryIntent.GENERAL
-                }
-                intent_result = {
-                    'intent': intent_mapping.get(result.get('intent', 'GENERAL'), QueryIntent.GENERAL),
-                    'confidence': result.get('confidence', 0.0),
-                    'clarification': result.get('clarification', None)
-                }
-                logger.info(f"Gemini intent detection result: {intent_result['intent']} with confidence {intent_result['confidence']}")
-                return intent_result
-            else:
-                logger.warning(f"Could not extract valid JSON from response: {content}")
-                return {'intent': QueryIntent.GENERAL, 'confidence': 0.0, 'clarification': None}
-        except Exception as e:
-            logger.error(f"Gemini intent detection failed: {e}")
-            if "429" in str(e):  # Handle rate-limiting errors
-                await self._handle_rate_limit()
-            return {'intent': QueryIntent.GENERAL, 'confidence': 0.0, 'clarification': None}
-
     def _detect_intent_with_keywords(self, message: str) -> Dict[str, Any]:
         """
         Detect intent using keyword pattern matching instead of embedding models.
+        Enhanced with better navigation intent detection.
         
         Args:
             message: The user's query message
@@ -2574,14 +2538,19 @@ class GeminiLLMManager:
                         r'department', r'faculty', r'staff', r'work(s|ed|ing) on'
                     ]
                 },
+                # ENHANCED: More detailed navigation patterns
                 QueryIntent.NAVIGATION: {
                     'high_confidence': [
                         r'website', r'page', r'section', r'find', r'where (is|are|can)', 
-                        r'how (do|can) i (find|get to|access)', r'link', r'url', r'navigate'
+                        r'how (do|can) i (find|get to|access)', r'link', r'url', r'navigate',
+                        r'show me the', r'take me to', r'go to', r'direct me to', r'site map',
+                        r'website structure', r'menu', r'homepage', r'main page'
                     ],
                     'medium_confidence': [
                         r'resources', r'tools', r'services', r'information', r'contact', 
-                        r'about', r'help', r'support', r'faq'
+                        r'about', r'help', r'support', r'faq', r'documents', r'forms',
+                        r'download', r'upload', r'browse', r'search', r'locate', r'directory',
+                        r'sitemap', r'navigation', r'menu', r'sections'
                     ]
                 }
             }
@@ -2737,9 +2706,129 @@ class GeminiLLMManager:
             return []
 
     # 3. Update get_relevant_experts method to better handle empty results
-
-
-   
+    async def _detect_intent_with_gemini(self, message: str) -> Dict[str, Any]:
+        """Detect intent using the Gemini model with enhanced navigation detection."""
+        try:
+            # Set up the Gemini model
+            model = self._setup_gemini()
+            
+            # Create a structured prompt for intent detection
+            prompt = f"""
+            Analyze this query and classify its intent:
+            Query: "{message}"
+            Options:
+            - PUBLICATION (research papers, studies)
+            - EXPERT (researchers, specialists)
+            - NAVIGATION (website sections, resources, pages, help finding content)
+            - GENERAL (other queries)
+            
+            For NAVIGATION, look for terms related to finding information on the website, 
+            accessing specific sections, looking for pages, or questions about how to locate resources.
+            
+            If asking about publications BY someone, extract the name.
+            Return ONLY JSON in this format:
+            {{
+                "intent": "PUBLICATION|EXPERT|NAVIGATION|GENERAL",
+                "confidence": 0.0-1.0,
+                "clarification": "optional question",
+                "expert_name": "name if detected"
+            }}
+            """
+            
+            # Generate content using Gemini
+            response = await model.generate_content(prompt)  # Use generateContent for async
+            content = response.text.replace("```json", "").replace("```", "").strip()
+            
+            # Extract JSON from the response
+            json_start = content.find('{')
+            json_end = content.rfind('}') + 1
+            if json_start >= 0 and json_end > json_start:
+                result = json.loads(content[json_start:json_end])
+                
+                # Map intent strings to QueryIntent enum
+                intent_mapping = {
+                    'PUBLICATION': QueryIntent.PUBLICATION,
+                    'EXPERT': QueryIntent.EXPERT,
+                    'NAVIGATION': QueryIntent.NAVIGATION,
+                    'GENERAL': QueryIntent.GENERAL
+                }
+                intent_result = {
+                    'intent': intent_mapping.get(result.get('intent', 'GENERAL'), QueryIntent.GENERAL),
+                    'confidence': result.get('confidence', 0.0),
+                    'clarification': result.get('clarification', None)
+                }
+                logger.info(f"Gemini intent detection result: {intent_result['intent']} with confidence {intent_result['confidence']}")
+                return intent_result
+            else:
+                logger.warning(f"Could not extract valid JSON from response: {content}")
+                return {'intent': QueryIntent.GENERAL, 'confidence': 0.0, 'clarification': None}
+        except Exception as e:
+            logger.error(f"Gemini intent detection failed: {e}")
+            if "429" in str(e):  # Handle rate-limiting errors
+                await self._handle_rate_limit()
+            return {'intent': QueryIntent.GENERAL, 'confidence': 0.0, 'clarification': None}
+    
+    async def _detect_intent_with_embeddings(self, message: str) -> Dict[str, Any]:
+        try:
+            if not self.embedding_model:
+                raise ValueError("No embedding model available")
+            
+            # Clean and normalize the query
+            cleaned_message = re.sub(r'[^\w\s]', ' ', message.lower()).strip()
+            query_embedding = self.embedding_model.encode(cleaned_message)
+            
+            # Define example queries for each intent type
+            intent_examples = {
+                QueryIntent.PUBLICATION: [
+                    "Show me publications about maternal health",
+                    "What papers have been published on climate change",
+                    "Research articles on education in Africa"
+                ],
+                QueryIntent.EXPERT: [
+                    "Who are the experts in health policy",
+                    "Find researchers working on climate change",
+                    "Information about Dr. Johnson"
+                ],
+                # UPDATED: Enhanced navigation examples for better detection
+                QueryIntent.NAVIGATION: [
+                    "How do I find the contact page",
+                    "Where can I access research tools",
+                    "Show me the about section",
+                    "How to navigate to publications page",
+                    "Where is the researchers directory",
+                    "Take me to the home page",
+                    "Is there a page about funding opportunities",
+                    "I want to find the news section",
+                    "Show me website resources",
+                    "How to find contact information on your site"
+                ]
+            }
+            
+            # Compute similarity scores for each intent
+            intent_scores = {}
+            for intent, examples in intent_examples.items():
+                example_embeddings = self.embedding_model.encode(examples)
+                similarities = cos_sim(query_embedding, example_embeddings).numpy().flatten()
+                max_similarity = max(similarities)
+                intent_scores[intent] = float(max_similarity)
+            
+            # Determine the intent with the highest score
+            max_intent = max(intent_scores, key=intent_scores.get)
+            confidence = intent_scores[max_intent]
+            
+            # Apply threshold to determine final intent
+            if confidence < 0.6:
+                max_intent = QueryIntent.GENERAL
+            
+            return {
+                'intent': max_intent,
+                'confidence': confidence,
+                'clarification': None
+            }
+        except Exception as e:
+            logger.error(f"Error in embedding intent detection: {e}")
+            raise
+    
     
     def _setup_gemini(self):
         """Set up and configure the Gemini model."""

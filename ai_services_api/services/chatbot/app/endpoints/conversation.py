@@ -260,21 +260,6 @@ async def process_chat_request(query: str, user_id: str, redis_client) -> ChatRe
         except Exception as save_error:
             logger.error(f"Error in cache/DB save: {save_error}", exc_info=True)
 
-        # Final logging
-        total_processing_time = (datetime.utcnow() - overall_start_time).total_seconds()
-        logger.info(f"Chat request processing completed. Total time: {total_processing_time:.2f} seconds")
-
-        return ChatResponse(**chat_data)
-
-    except Exception as critical_error:
-        # Critical error handling
-        logger.critical(f"Unhandled error in chat endpoint: {critical_error}", exc_info=True)
-        logger.error(f"Error details - User ID: {user_id}, Query: {query}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Internal server error: {str(critical_error)}"
-        )
-
 # Updated POST endpoint for chat
 @router.post("/chat", response_model=ChatResponse, responses={
     400: {"model": ErrorResponse, "description": "Missing user ID or invalid request"},

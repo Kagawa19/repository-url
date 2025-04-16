@@ -220,6 +220,88 @@ class UserInterestTracker:
         
         return topics, domains
     
+    async def build_user_interest_context(self, user_id: str) -> str:
+        """
+        Build a context string based on user interests for enhancing responses.
+        Now includes navigation interests.
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            str: A formatted context string with user interests
+        """
+        interests = await self.get_user_interests(user_id)
+        if not interests or not any(interests.values()):
+            return ""
+        
+        context_parts = []
+        context_parts.append("Based on your interests, I'll highlight relevant information about:")
+        
+        # Format publication topics
+        if interests.get('publication_topic', []):
+            topics = interests['publication_topic'][:3]  # Top 3 topics
+            context_parts.append(f"- Research topics: {', '.join(topics)}")
+        
+        # Format publication domains
+        if interests.get('publication_domain', []):
+            domains = interests['publication_domain'][:3]  # Top 3 domains
+            context_parts.append(f"- Research domains: {', '.join(domains)}")
+        
+        # Format expert expertise
+        if interests.get('expert_expertise', []):
+            expertise = interests['expert_expertise'][:3]  # Top 3 expertise areas
+            context_parts.append(f"- Expertise areas: {', '.join(expertise)}")
+        
+        # ADDED: Format navigation interests
+        if interests.get('navigation_section', []):
+            sections = interests['navigation_section'][:3]  # Top 3 sections
+            context_parts.append(f"- Website sections: {', '.join(sections)}")
+        
+        if interests.get('navigation_topic', []):
+            nav_topics = interests['navigation_topic'][:3]  # Top 3 navigation topics
+            context_parts.append(f"- Website resources: {', '.join(nav_topics)}")
+        
+        return "\n".join(context_parts)
+    
+    async def extract_navigation_from_sections(self, sections: List[Dict]) -> Tuple[List[str], List[str]]:
+        """
+        Extract navigation sections and related keywords from navigation data.
+        
+        Args:
+            sections: List of navigation section dictionaries
+            
+        Returns:
+            Tuple[List[str], List[str]]: Extracted section names and keywords
+        """
+        section_names = []
+        keywords = []
+        
+        for section in sections:
+            # Extract section title
+            if 'title' in section and section['title']:
+                section_names.append(section['title'])
+            
+            # Extract section keywords
+            if 'keywords' in section:
+                if isinstance(section['keywords'], list):
+                    keywords.extend([k for k in section['keywords'] if k])
+                elif isinstance(section['keywords'], str):
+                    try:
+                        # Try to parse JSON
+                        parsed_keywords = json.loads(section['keywords'])
+                        if isinstance(parsed_keywords, list):
+                            keywords.extend([k for k in parsed_keywords if k])
+                    except json.JSONDecodeError:
+                        # Handle as comma-separated string
+                        keywords.extend([k.strip() for k in section['keywords'].split(',') if k.strip()])
+        
+        # Clean and deduplicate
+        clean_sections = list(set([s.strip() for s in section_names if s.strip()]))
+        clean_keywords = list(set([k.strip() for k in keywords if k.strip()]))
+        
+        return clean_sections, clean_keywords
+    
     async def extract_expertise_from_experts(self, experts: List[Dict]) -> List[str]:
         """
         Extract expertise areas from expert data.
