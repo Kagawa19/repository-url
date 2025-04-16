@@ -1,68 +1,55 @@
-# services/embeddings/model_handler.py
-
-import torch
-from transformers import AutoTokenizer, AutoModel
-import numpy as np
-from typing import List, Union, Optional, Dict
 import logging
-from datetime import datetime
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from typing import List, Optional, Dict
 import os
-from tqdm import tqdm
-import hashlib
+import json
 
 logger = logging.getLogger(__name__)
 
 class EmbeddingModel:
     """
-    Handles text embedding generation using transformer models.
-    Supports batching and model caching.
+    Handles text embedding generation using SentenceTransformer models.
+    Supports batching and model caching, aligned with ExpertRedisIndexManager.
     """
     
-    def __init__(self, model_name: Optional[str] = None, device: Optional[str] = None):
+    def __init__(self, model_name: Optional[str] = None):
         """
         Initialize the embedding model.
         
         Args:
-            model_name: Name of the transformer model to use
-            device: Device to run model on ('cuda', 'cpu', or None for auto)
+            model_name: Name or path of the SentenceTransformer model to use
         """
-        self.model_name = model_name or os.getenv('MODEL_NAME', 'sentence-transformers/all-MiniLM-L6-v2')
+        self.model_name = model_name or os.getenv('MODEL_NAME', '/app/models/sentence-transformers/all-MiniLM-L6-v2')
         self.max_tokens = int(os.getenv('MAX_TOKENS', '512'))
-        self.batch_size = int(os.getenv('EMBEDDING_BATCH_SIZE', '32'))
+        self.batch_size = int(os.getenv('EMBEDDING_BATCH_SIZE', '50'))  # Align with WebContentProcessor
         self.cache_dir = os.getenv('MODEL_CACHE_DIR', '.model_cache')
         
-        # Set up device
-        if device:
-            self.device = torch.device(device)
-        else:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            
+        # Device is always CPU, matching ExpertRedisIndexManager
+        self.device = 'cpu'
+        
         self.setup_model()
         logger.info(f"EmbeddingModel initialized on {self.device} using {self.model_name}")
 
     def setup_model(self):
-        """Set up the model and tokenizer"""
+        """Set up the SentenceTransformer model."""
         try:
             # Create cache directory if needed
             os.makedirs(self.cache_dir, exist_ok=True)
             
-            # Initialize tokenizer and model
-            self.tokenizer = AutoTokenizer.from_pretrained(
+            # Initialize model
+            logger.info(f"Loading SentenceTransformer model from: {self.model_name}")
+            self.model = SentenceTransformer(
                 self.model_name,
-                cache_dir=self.cache_dir
+                local_files_only=True,  # Match ExpertRedisIndexManager
+                cache_folder=self.cache_dir
             )
-            
-            self.model = AutoModel.from_pretrained(
-                self.model_name,
-                cache_dir=self.cache_dir
-            ).to(self.device)
-            
-            # Set model to evaluation mode
-            self.model.eval()
+            self.model.to(self.device)
             
         except Exception as e:
-            logger.error(f"Error setting up model: {str(e)}")
-            raise
+            logger.error(f"Failed to load model from {self.model_name}: {e}")
+            logger.warning("Falling back to None; manual embedding will be used.")
+            self.model = None
 
     def preprocess_text(self, text: str) -> str:
         """
@@ -74,7 +61,7 @@ class EmbeddingModel:
         Returns:
             str: Preprocessed text
         """
-        # Basic preprocessing
+        # Basic preprocessing, matching ExpertRedisIndexManager
         text = text.strip()
         text = ' '.join(text.split())  # Normalize whitespace
         
@@ -85,7 +72,19 @@ class EmbeddingModel:
             
         return text
 
-    @torch.no_grad()
+    def _create_fallback_embedding(self, text: str) -> np.ndarray:
+        """Create a simple fallback embedding when model is not available."""
+        logger.info("Creating fallback embedding")
+        # Create a deterministic embedding based on character values, matching ExpertRedisIndexManager
+        embedding = np.zeros(384)  # Standard dimension for all-MiniLM-L6-v2
+        for i, char in enumerate(text):
+            embedding[i % len(embedding)] += ord(char) / 1000
+        # Normalize the embedding
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+        return embedding
+
     def create_embedding(self, text: str) -> np.ndarray:
         """
         Create embedding for a single text.
@@ -100,39 +99,24 @@ class EmbeddingModel:
             # Preprocess text
             text = self.preprocess_text(text)
             
-            # Tokenize
-            inputs = self.tokenizer(
+            if self.model is None:
+                logger.warning("No model available, using fallback embedding")
+                return self._create_fallback_embedding(text)
+            
+            # Generate embedding
+            embedding = self.model.encode(
                 text,
-                max_length=self.max_tokens,
-                padding=True,
-                truncation=True,
-                return_tensors="pt"
-            ).to(self.device)
+                convert_to_numpy=True,
+                show_progress_bar=False,
+                device=self.device
+            )
             
-            # Get model outputs
-            outputs = self.model(**inputs)
-            
-            # Use mean pooling
-            attention_mask = inputs['attention_mask']
-            token_embeddings = outputs.last_hidden_state
-            
-            # Create attention mask
-            input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-            
-            # Calculate mean
-            sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
-            sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-            
-            # Get final embedding
-            embedding = sum_embeddings / sum_mask
-            
-            return embedding.cpu().numpy()[0]
+            return embedding
             
         except Exception as e:
             logger.error(f"Error creating embedding: {str(e)}")
-            raise
+            return self._create_fallback_embedding(text)
 
-    @torch.no_grad()
     def create_embeddings_batch(self, texts: List[str]) -> List[np.ndarray]:
         """
         Create embeddings for multiple texts in batches.
@@ -146,6 +130,10 @@ class EmbeddingModel:
         embeddings = []
         
         try:
+            if self.model is None:
+                logger.warning("No model available, using fallback embeddings")
+                return [self._create_fallback_embedding(text) for text in texts]
+            
             # Process in batches
             for i in range(0, len(texts), self.batch_size):
                 batch_texts = texts[i:i + self.batch_size]
@@ -153,38 +141,22 @@ class EmbeddingModel:
                 # Preprocess batch
                 batch_texts = [self.preprocess_text(text) for text in batch_texts]
                 
-                # Tokenize
-                inputs = self.tokenizer(
+                # Generate embeddings
+                batch_embeddings = self.model.encode(
                     batch_texts,
-                    max_length=self.max_tokens,
-                    padding=True,
-                    truncation=True,
-                    return_tensors="pt"
-                ).to(self.device)
+                    convert_to_numpy=True,
+                    batch_size=self.batch_size,
+                    show_progress_bar=False,
+                    device=self.device
+                )
                 
-                # Get model outputs
-                outputs = self.model(**inputs)
-                
-                # Use mean pooling
-                attention_mask = inputs['attention_mask']
-                token_embeddings = outputs.last_hidden_state
-                
-                # Create attention mask
-                input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-                
-                # Calculate mean
-                sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
-                sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-                
-                # Get batch embeddings
-                batch_embeddings = (sum_embeddings / sum_mask).cpu().numpy()
                 embeddings.extend(batch_embeddings)
                 
             return embeddings
             
         except Exception as e:
             logger.error(f"Error creating batch embeddings: {str(e)}")
-            raise
+            return [self._create_fallback_embedding(text) for text in texts]
 
     def calculate_similarity(self, embedding1: np.ndarray, embedding2: np.ndarray) -> float:
         """
@@ -224,18 +196,13 @@ class EmbeddingModel:
             'device': str(self.device),
             'max_tokens': self.max_tokens,
             'batch_size': self.batch_size,
-            'embedding_dim': self.model.config.hidden_size,
-            'model_parameters': sum(p.numel() for p in self.model.parameters()),
+            'embedding_dim': 384,  # Fixed for all-MiniLM-L6-v2
             'cache_dir': self.cache_dir
         }
 
     def cleanup(self):
-        """Clean up model resources"""
+        """Clean up model resources."""
         try:
-            # Clear CUDA cache if using GPU
-            if self.device.type == 'cuda':
-                torch.cuda.empty_cache()
-                
             logger.info("Model resources cleaned up")
         except Exception as e:
             logger.error(f"Error during cleanup: {str(e)}")

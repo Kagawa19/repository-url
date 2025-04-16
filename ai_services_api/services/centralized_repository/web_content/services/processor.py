@@ -1,5 +1,3 @@
-
-
 from ai_services_api.services.centralized_repository.web_content.services.content_pipeline import ContentPipeline
 from ai_services_api.services.centralized_repository.web_content.services.redis_handler import ContentRedisHandler
 from ai_services_api.services.centralized_repository.web_content.services.web_scraper import WebsiteScraper
@@ -24,13 +22,6 @@ import redis
 
 # Import the DATABASE_CONFIG 
 from ..config.settings import DATABASE_CONFIG
-
-from ai_services_api.services.centralized_repository.web_content.services.content_pipeline import ContentPipeline
-from ai_services_api.services.centralized_repository.web_content.services.redis_handler import ContentRedisHandler
-from ai_services_api.services.centralized_repository.web_content.services.web_scraper import WebsiteScraper
-from ai_services_api.services.centralized_repository.web_content.services.pdf_processor import PDFProcessor
-from ai_services_api.services.centralized_repository.web_content.embeddings.model_handler import EmbeddingModel
-from ai_services_api.services.centralized_repository.web_content.database.database_setup import ContentTracker, get_db_cursor, DatabaseInitializer
 
 logger = logging.getLogger(__name__)
 
@@ -279,9 +270,6 @@ class WebContentProcessor:
                     
         return keys
 
-    
-
-
     async def process_content(self) -> Dict:
         """Enhanced processing method with more detailed tracking"""
         try:
@@ -352,12 +340,13 @@ class WebContentProcessor:
             """)
 
             return results
-                
+                    
         except Exception as e:
             logger.error(f"Error in content processing: {str(e)}")
             raise
         finally:
-            self.cleanup()
+            self.cleanup()  # Fixed syntax here
+
 
     def cleanup(self):
         """Enhanced cleanup with more comprehensive resource management"""
@@ -377,12 +366,9 @@ class WebContentProcessor:
             # Optional: Add any additional cleanup for other resources
             logger.info("Resources cleaned up successfully")
         except Exception as e:
+            logger.error 
             logger.error(f"Error during cleanup: {str(e)}")
 
-    
     def close(self):
         """Cleanup method compatible with various usage patterns"""
         self.cleanup()
-
-
-
