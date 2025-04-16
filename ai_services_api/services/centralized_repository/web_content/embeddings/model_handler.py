@@ -22,10 +22,9 @@ class EmbeddingModel:
         """
         self.model_name = model_name or os.getenv('MODEL_NAME', '/app/models/sentence-transformers/all-MiniLM-L6-v2')
         self.max_tokens = int(os.getenv('MAX_TOKENS', '512'))
-        self.batch_size = int(os.getenv('EMBEDDING_BATCH_SIZE', '50'))  # Align with WebContentProcessor
+        self.batch_size = int(os.getenv('EMBEDDING_BATCH_SIZE', '50'))
         self.cache_dir = os.getenv('MODEL_CACHE_DIR', '.model_cache')
         
-        # Device is always CPU, matching ExpertRedisIndexManager
         self.device = 'cpu'
         
         self.setup_model()
@@ -34,18 +33,14 @@ class EmbeddingModel:
     def setup_model(self):
         """Set up the SentenceTransformer model."""
         try:
-            # Create cache directory if needed
             os.makedirs(self.cache_dir, exist_ok=True)
-            
-            # Initialize model
             logger.info(f"Loading SentenceTransformer model from: {self.model_name}")
             self.model = SentenceTransformer(
                 self.model_name,
-                local_files_only=True,  # Match ExpertRedisIndexManager
+                local_files_only=True,
                 cache_folder=self.cache_dir
             )
             self.model.to(self.device)
-            
         except Exception as e:
             logger.error(f"Failed to load model from {self.model_name}: {e}")
             logger.warning("Falling back to None; manual embedding will be used.")
@@ -61,25 +56,19 @@ class EmbeddingModel:
         Returns:
             str: Preprocessed text
         """
-        # Basic preprocessing, matching ExpertRedisIndexManager
         text = text.strip()
-        text = ' '.join(text.split())  # Normalize whitespace
-        
-        # Truncate if too long (rough character estimate)
-        max_chars = self.max_tokens * 4  # Approximate chars per token
+        text = ' '.join(text.split())
+        max_chars = self.max_tokens * 4
         if len(text) > max_chars:
             text = text[:max_chars]
-            
         return text
 
     def _create_fallback_embedding(self, text: str) -> np.ndarray:
         """Create a simple fallback embedding when model is not available."""
         logger.info("Creating fallback embedding")
-        # Create a deterministic embedding based on character values, matching ExpertRedisIndexManager
-        embedding = np.zeros(384)  # Standard dimension for all-MiniLM-L6-v2
+        embedding = np.zeros(384)
         for i, char in enumerate(text):
             embedding[i % len(embedding)] += ord(char) / 1000
-        # Normalize the embedding
         norm = np.linalg.norm(embedding)
         if norm > 0:
             embedding = embedding / norm
@@ -96,23 +85,17 @@ class EmbeddingModel:
             np.ndarray: Embedding vector
         """
         try:
-            # Preprocess text
             text = self.preprocess_text(text)
-            
             if self.model is None:
                 logger.warning("No model available, using fallback embedding")
                 return self._create_fallback_embedding(text)
-            
-            # Generate embedding
             embedding = self.model.encode(
                 text,
                 convert_to_numpy=True,
                 show_progress_bar=False,
                 device=self.device
             )
-            
             return embedding
-            
         except Exception as e:
             logger.error(f"Error creating embedding: {str(e)}")
             return self._create_fallback_embedding(text)
@@ -128,20 +111,13 @@ class EmbeddingModel:
             List[np.ndarray]: List of embedding vectors
         """
         embeddings = []
-        
         try:
             if self.model is None:
                 logger.warning("No model available, using fallback embeddings")
                 return [self._create_fallback_embedding(text) for text in texts]
-            
-            # Process in batches
             for i in range(0, len(texts), self.batch_size):
                 batch_texts = texts[i:i + self.batch_size]
-                
-                # Preprocess batch
                 batch_texts = [self.preprocess_text(text) for text in batch_texts]
-                
-                # Generate embeddings
                 batch_embeddings = self.model.encode(
                     batch_texts,
                     convert_to_numpy=True,
@@ -149,11 +125,8 @@ class EmbeddingModel:
                     show_progress_bar=False,
                     device=self.device
                 )
-                
                 embeddings.extend(batch_embeddings)
-                
             return embeddings
-            
         except Exception as e:
             logger.error(f"Error creating batch embeddings: {str(e)}")
             return [self._create_fallback_embedding(text) for text in texts]
@@ -170,16 +143,11 @@ class EmbeddingModel:
             float: Cosine similarity score
         """
         try:
-            # Normalize vectors
             norm1 = np.linalg.norm(embedding1)
             norm2 = np.linalg.norm(embedding2)
-            
             if norm1 == 0 or norm2 == 0:
                 return 0.0
-                
-            # Calculate cosine similarity
             return float(np.dot(embedding1, embedding2) / (norm1 * norm2))
-            
         except Exception as e:
             logger.error(f"Error calculating similarity: {str(e)}")
             return 0.0
@@ -196,7 +164,7 @@ class EmbeddingModel:
             'device': str(self.device),
             'max_tokens': self.max_tokens,
             'batch_size': self.batch_size,
-            'embedding_dim': 384,  # Fixed for all-MiniLM-L6-v2
+            'embedding_dim': 384,
             'cache_dir': self.cache_dir
         }
 
