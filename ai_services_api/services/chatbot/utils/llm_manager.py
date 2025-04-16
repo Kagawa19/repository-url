@@ -1673,7 +1673,7 @@ class GeminiLLMManager:
         for idx, publication in enumerate(publications):
             try:
                 title = publication.get('title', 'Untitled Publication').strip()
-                markdown_text += f"{idx + 1}. **{title}**\n"
+                markdown_text += f"{idx + 1}. <strong>{title}</strong>\n"
 
                 # Add summary/abstract (trimmed to 200 characters max, ending at word boundary)
                 summary = publication.get('abstract') or publication.get('summary') or ""
