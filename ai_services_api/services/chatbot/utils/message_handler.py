@@ -542,7 +542,7 @@ class MessageHandler:
         detected_intent = None
         is_first_chunk = True
         transition_inserted = False
-        
+
         in_structured_content = False
         structured_buffer = ""
         content_type = None
