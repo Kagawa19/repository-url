@@ -1544,15 +1544,14 @@ class GeminiLLMManager:
                 # Use numbered list with clear formatting
                 markdown_text += f"{idx + 1}. **{full_name}**\n\n"
 
-                # ADDED: Format and include designation (position/title)
+                # Designation (not bold)
                 designation = expert.get('designation', '')
                 if designation:
-                    markdown_text += f"    - **Designation:** {designation}\n\n"
+                    markdown_text += f"    - Designation: {designation}\n\n"
                 
-                # ADDED: Format and include theme with expansion
+                # Theme
                 theme = expert.get('theme', '')
                 if theme:
-                    # Expand common theme abbreviations
                     theme_expansion = {
                         'HAW': 'Health and Wellbeing',
                         'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
@@ -1560,69 +1559,63 @@ class GeminiLLMManager:
                         'ECD': 'Early Childhood Development',
                         'PEC': 'Population, Environment, and Climate'
                     }
-                    
                     theme_full = f"{theme} ({theme_expansion.get(theme, '')})" if theme in theme_expansion else theme
-                    markdown_text += f"    - **Theme:** {theme_full}\n\n"
+                    markdown_text += f"    - Theme: {theme_full}\n\n"
                 
-                # ADDED: Format and include unit with expansion
+                # Unit
                 unit = expert.get('unit', '')
                 if unit:
-                    # Expand common unit abbreviations
                     unit_expansion = {
                         'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
                         'RSD': 'Research Systems Development',
                         'IDSSS': 'Innovations and Data Systems Support Services',
                         'KDHS': 'Kenya Demographic Health Survey'
                     }
-                    
                     unit_full = f"{unit} ({unit_expansion.get(unit, '')})" if unit in unit_expansion else unit
-                    markdown_text += f"    - **Unit:** {unit_full}\n\n"
+                    markdown_text += f"    - Unit: {unit_full}\n\n"
 
-                # Display expertise with consistent formatting
+                # Knowledge & Expertise
                 knowledge_expertise = expert.get('knowledge_expertise', '')
                 if knowledge_expertise:
-                    # Format knowledge expertise as a list if possible
                     if isinstance(knowledge_expertise, str) and ',' in knowledge_expertise:
-                        expertise_items = [item.strip() for item in knowledge_expertise.split(',')][:3]  # Limit to top 3
-                        markdown_text += f"    - **Knowledge & Expertise:** {' | '.join(expertise_items)}\n\n"
+                        expertise_items = [item.strip() for item in knowledge_expertise.split(',')][:3]
+                        markdown_text += f"    - Knowledge & Expertise: {' | '.join(expertise_items)}\n\n"
                     elif isinstance(knowledge_expertise, list):
-                        expertise_items = [str(item).strip() for item in knowledge_expertise][:3]  # Limit to top 3
-                        markdown_text += f"    - **Knowledge & Expertise:** {' | '.join(expertise_items)}\n\n"
+                        expertise_items = [str(item).strip() for item in knowledge_expertise][:3]
+                        markdown_text += f"    - Knowledge & Expertise: {' | '.join(expertise_items)}\n\n"
                     else:
-                        markdown_text += f"    - **Knowledge & Expertise:** {knowledge_expertise}\n\n"
+                        markdown_text += f"    - Knowledge & Expertise: {knowledge_expertise}\n\n"
                 else:
-                    # Try to get expertise from other fields if knowledge_expertise is not available
                     expertise_fields = expert.get('expertise', [])
                     if expertise_fields:
                         if isinstance(expertise_fields, list):
-                            expertise_str = " | ".join(str(item) for item in expertise_fields[:3])  # Limit to top 3
+                            expertise_str = " | ".join(str(item) for item in expertise_fields[:3])
                         elif isinstance(expertise_fields, dict):
-                            expertise_str = " | ".join(str(v) for v in list(expertise_fields.values())[:3])  # Limit to top 3
+                            expertise_str = " | ".join(str(v) for v in list(expertise_fields.values())[:3])
                         else:
                             expertise_str = str(expertise_fields)
-                        markdown_text += f"    - **Knowledge & Expertise:** {expertise_str}\n\n"
+                        markdown_text += f"    - Knowledge & Expertise: {expertise_str}\n\n"
 
-                # ADDED: Include bio if available (but truncated for readability)
+                # Bio
                 bio = expert.get('bio', '')
                 if bio:
-                    # Truncate long bio to about 100-150 words for readability
                     if len(bio) > 300:
                         bio_words = bio.split()
                         if len(bio_words) > 50:
                             bio = ' '.join(bio_words[:50]) + '...'
-                    markdown_text += f"    - **Bio:** {bio}\n\n"
+                    markdown_text += f"    - Bio: {bio}\n\n"
 
-                # ADDED: Add notable publications with consistent indentation if available
+                # Publications
                 publications = expert.get('publications', [])
                 if publications:
-                    markdown_text += "    - **Notable publications:**\n\n"
-                    for pub in publications[:2]:  # Limit to top 2 publications
+                    markdown_text += "    - Notable publications:\n\n"
+                    for pub in publications[:2]:
                         pub_title = pub.get('title', 'Untitled')
                         pub_year = pub.get('publication_year', '')
                         year_text = f" ({pub_year})" if pub_year else ""
                         markdown_text += f"        - \"{pub_title}\"{year_text}\n\n"
 
-                # Add an extra line break between experts for clear separation
+                # Extra space between experts
                 if idx < len(experts) - 1:
                     markdown_text += "\n"
 
@@ -1630,9 +1623,9 @@ class GeminiLLMManager:
                 logger.error(f"Error formatting expert {idx + 1}: {e}")
                 continue
 
-        # Add closing message
         markdown_text += "\nWould you like more detailed information about any of these experts? You can ask by name or area of expertise."
         return markdown_text
+
     def safely_decode_binary_data(self, binary_data, default_encoding='utf-8'):
         """
         Safely decode binary data using multiple encoding attempts.
