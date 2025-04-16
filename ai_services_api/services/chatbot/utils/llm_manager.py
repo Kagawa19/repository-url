@@ -1704,20 +1704,409 @@ class GeminiLLMManager:
 
         markdown_text += "\nYou can ask for more details about any of these publications or request information about related research."
         return markdown_text
+    
+    async def get_navigation(self, query: str, limit: int = 3) -> Tuple[List[Dict], Optional[str]]:
+        """
+        Fetch navigation sections from Redis based on the query.
+        Matches the storage pattern used for experts and publications.
+        
+        Args:
+            query (str): The search query for navigation sections
+            limit (int): Maximum number of results to return
+            
+        Returns:
+            Tuple[List[Dict], Optional[str]]: Navigation data and optional message
+        """
+        try:
+            # Check if this is a "list navigation" request
+            is_list_request = bool(re.search(r'\b(list|show|all|many)\b.*?\b(section|page|resource|navigation)', query.lower()))
+            
+            # Check for specific section queries like "contact page"
+            section_match = re.search(r'\b(?:section|page|resource)\s+([A-Za-z\s]+(?:\s+[A-Za-z]+){0,3})\b', query.lower())
+            search_section = None
+            if section_match:
+                search_section = section_match.group(1).strip()
+                logger.info(f"Detected specific section search for '{search_section}'")
+            
+            # Adjust limit for list requests
+            if is_list_request and limit < 5:
+                limit = 5  # Increase limit for explicit list requests
+                logger.info(f"Detected list request, increased limit to {limit}")
+
+            if not self.redis_manager or not self.redis_manager.redis_text:
+                return [], "Redis manager not available"
+                
+            # Check if we need to use async or sync Redis methods
+            is_async_redis = hasattr(self.redis_manager.redis_text, 'ascan') or hasattr(self.redis_manager.redis_text, 'akeys')
+            
+            # Use consistent key pattern for navigation data
+            pattern = "meta:navigation:*"
+            keys = []
+            
+            if is_async_redis:
+                # Use async methods if available
+                if hasattr(self.redis_manager.redis_text, 'akeys'):
+                    keys = await self.redis_manager.redis_text.akeys(pattern)
+                else:
+                    # Use async scan
+                    cursor = 0
+                    while True:
+                        cursor, batch = await self.redis_manager.redis_text.ascan(
+                            cursor=cursor, 
+                            match=pattern, 
+                            count=100
+                        )
+                        keys.extend(batch)
+                        if cursor == 0:
+                            break
+            else:
+                # Use synchronous methods
+                if hasattr(self.redis_manager.redis_text, 'keys'):
+                    keys = self.redis_manager.redis_text.keys(pattern)
+                else:
+                    # Use synchronous scan
+                    cursor = 0
+                    while True:
+                        cursor, batch = self.redis_manager.redis_text.scan(
+                            cursor=cursor, 
+                            match=pattern, 
+                            count=100
+                        )
+                        keys.extend(batch)
+                        if cursor == 0:
+                            break
+            
+            # Log the number of navigation keys found
+            logger.info(f"Found {len(keys)} navigation keys in Redis")
+            if not keys:
+                return [], "No navigation sections found in database"
+            
+            # Initialize collections
+            sections = []
+            query_embedding = None
+            match_scores = {}  # Track multiple matching criteria
+
+            # Encode the query if an embedding model is available
+            if self.embedding_model:
+                try:
+                    query_embedding = self.embedding_model.encode(query.lower().strip())
+                except Exception as emb_err:
+                    logger.warning(f"Failed to create query embedding: {emb_err}")
+
+            # Extract meaningful terms from the query
+            query_terms = query.lower().split()
+            section_terms = []
+            
+            for term in query_terms:
+                # Skip very short terms and common words
+                if len(term) <= 2 or term in ['is', 'the', 'a', 'of', 'and', 
+                                            'what', 'where', 'when', 'how', 'why', 'which', 'this', 'that',
+                                            'list', 'show', 'all', 'many', 'section', 'page', 'resource', 'navigation']:
+                    continue
+                    
+                # Consider all remaining terms as potential section terms
+                section_terms.append(term)
+            
+            # If we have a specific search section from the query, add it to section terms
+            if search_section and search_section not in section_terms:
+                section_terms.extend(search_section.split())
+            
+            logger.info(f"Query analysis - Section terms: {section_terms}")
+
+            # Process each navigation key
+            for key in keys:
+                try:
+                    # Get navigation data using appropriate method
+                    section = {}
+                    if is_async_redis:
+                        if hasattr(self.redis_manager.redis_text, 'ahgetall'):
+                            section = await self.redis_manager.redis_text.ahgetall(key)
+                        else:
+                            section = await self.redis_manager.redis_text.hgetall(key)
+                    else:
+                        section = self.redis_manager.redis_text.hgetall(key)
+                    
+                    if not section:
+                        continue
+                        
+                    section_id = section.get('id') or key.split(':')[-1]
+                    match_score = 0.0
+                    matched_criteria = []
+                    
+                    # For list requests, give all sections a base score
+                    if is_list_request:
+                        match_score = 0.3  # Base score for list requests
+                        matched_criteria.append("Included in navigation list")
+                    
+                    # TITLE MATCHING - high importance
+                    title = section.get('title', '').lower()
+                    if title:
+                        for term in section_terms:
+                            if term in title:
+                                match_score += 0.8
+                                matched_criteria.append(f"Title contains '{term}'")
+                    
+                    # DESCRIPTION MATCHING
+                    description = section.get('description', '').lower()
+                    if description:
+                        for term in section_terms:
+                            if term in description:
+                                match_score += 0.7
+                                matched_criteria.append(f"Description contains '{term}'")
+                    
+                    # URL MATCHING
+                    url = section.get('url', '').lower()
+                    if url:
+                        for term in section_terms:
+                            if term in url:
+                                match_score += 0.6
+                                matched_criteria.append(f"URL contains '{term}'")
+                    
+                    # KEYWORDS/TAGS MATCHING
+                    try:
+                        keywords_json = section.get('keywords', '[]')
+                        keywords = json.loads(keywords_json) if isinstance(keywords_json, str) else keywords_json
+                        if isinstance(keywords, list):
+                            for keyword in keywords:
+                                keyword_str = str(keyword).lower()
+                                for term in section_terms:
+                                    if term in keyword_str:
+                                        match_score += 0.6
+                                        matched_criteria.append(f"Keyword contains '{term}'")
+                                        break
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    
+                    # SPECIFIC SECTION MATCHING (e.g., "contact page")
+                    if search_section:
+                        if search_section in title:
+                            match_score += 1.0  # Strong boost for title match with specific section
+                            matched_criteria.append(f"Title contains full section '{search_section}'")
+                        elif search_section in description:
+                            match_score += 0.8  # Good boost for description match with specific section
+                            matched_criteria.append(f"Description contains full section '{search_section}'")
+                    
+                    # Adjust threshold based on request type
+                    match_threshold = 0.1 if is_list_request else 0.3  # Lower threshold for list requests
+                    # Further lower threshold for specific section searches
+                    if search_section:
+                        match_threshold = 0.05
+                    
+                    if match_score > match_threshold:
+                        logger.info(f"Navigation section {section_id} matched with score {match_score:.2f}: {', '.join(matched_criteria[:3])}")
+                        
+                        # Process fields that might be stored as JSON strings
+                        for field in ['keywords', 'categories', 'tags']:
+                            if field in section and isinstance(section[field], str):
+                                try:
+                                    section[field] = json.loads(section[field])
+                                except (json.JSONDecodeError, TypeError):
+                                    # Keep as string if parsing fails
+                                    pass
+                        
+                        # Store match score for ranking
+                        section['match_score'] = match_score
+                        section['matched_criteria'] = matched_criteria
+                        
+                        # Add to results
+                        sections.append(section)
+                
+                except Exception as section_err:
+                    logger.warning(f"Error processing navigation section from key {key}: {section_err}")
+                    continue
+
+            logger.info(f"Found {len(sections)} matching navigation sections for query: {query}")
+            
+            # For list requests with no results, return top sections instead of empty list
+            if is_list_request and len(sections) == 0:
+                logger.info("No matches for list request - returning top navigation sections instead")
+                # Process first 5-10 sections without filtering
+                count = 0
+                for key in keys[:10]:  # Try first 10 keys
+                    if count >= limit:
+                        break
+                    
+                    try:
+                        section = {}
+                        if is_async_redis:
+                            if hasattr(self.redis_manager.redis_text, 'ahgetall'):
+                                section = await self.redis_manager.redis_text.ahgetall(key)
+                            else:
+                                section = await self.redis_manager.redis_text.hgetall(key)
+                        else:
+                            section = self.redis_manager.redis_text.hgetall(key)
+                        
+                        if section and section.get('title'):
+                            # Process fields that might be stored as JSON strings
+                            for field in ['keywords', 'categories', 'tags']:
+                                if field in section and isinstance(section[field], str):
+                                    try:
+                                        section[field] = json.loads(section[field])
+                                    except (json.JSONDecodeError, TypeError):
+                                        # Keep as string if parsing fails
+                                        pass
+                            
+                            section['match_score'] = 0.5  # Default score
+                            section['matched_criteria'] = ["Top navigation section"]
+                            sections.append(section)
+                            count += 1
+                    except Exception as e:
+                        logger.warning(f"Error processing fallback navigation section: {e}")
+                        continue
+                    
+                # Add a note that these are fallback sections if we had to use fallbacks
+                if sections:
+                    if search_section:
+                        return sections[:limit], f"No navigation sections found specifically for '{search_section}'. Showing top sections instead."
+                    else:
+                        return sections[:limit], "No navigation sections matched your query exactly. Showing top sections instead."
+            
+            # If we have too many matches, filter and rank them
+            if len(sections) > limit:
+                # For list requests, skip complex embedding ranking and just use match score
+                if is_list_request:
+                    # Sort primarily by match score
+                    ranked_sections = sorted(
+                        sections,
+                        key=lambda s: s.get('match_score', 0),
+                        reverse=True
+                    )
+                    return ranked_sections[:limit], None
+                    
+                # For non-list requests, try semantic ranking if possible
+                if query_embedding is not None:
+                    try:
+                        # For sections with embeddings, calculate semantic similarity
+                        sections_with_embeddings = []
+                        for section in sections:
+                            # Try to get embedding
+                            if 'embedding' not in section or section['embedding'] is None:
+                                # Get embedding from Redis
+                                section_id = section.get('id', '')
+                                if section_id:
+                                    embedding_key = f"emb:navigation:{section_id}"
+                                    try:
+                                        embedding_data = None
+                                        if is_async_redis:
+                                            if hasattr(self.redis_manager.redis_text, 'aget'):
+                                                embedding_data = await self.redis_manager.redis_text.aget(embedding_key)
+                                            else:
+                                                embedding_data = await self.redis_manager.redis_text.get(embedding_key)
+                                        else:
+                                            embedding_data = self.redis_manager.redis_text.get(embedding_key)
+                                        
+                                        if embedding_data:
+                                            # Use _safe_load_embedding helper for binary handling
+                                            try:
+                                                section['embedding'] = self._safe_load_embedding(embedding_data)
+                                            except Exception as safe_load_err:
+                                                logger.warning(f"Failed to load embedding for {section_id}: {safe_load_err}")
+                                    except Exception as emb_err:
+                                        logger.warning(f"Failed to load embedding for {section_id}: {emb_err}")
+                            
+                            if 'embedding' in section and section['embedding'] is not None:
+                                sections_with_embeddings.append(section)
+                        
+                        if sections_with_embeddings:
+                            # Calculate semantic similarity scores
+                            for section in sections_with_embeddings:
+                                try:
+                                    similarity = float(cos_sim(query_embedding, section['embedding'])[0][0])
+                                    # Boost match score with semantic similarity
+                                    section['match_score'] = 0.6 * section['match_score'] + 0.4 * similarity
+                                except Exception as sim_err:
+                                    logger.warning(f"Error calculating similarity for section: {sim_err}")
+                        
+                        # Sort by final match score
+                        ranked_sections = sorted(
+                            sections,
+                            key=lambda s: s.get('match_score', 0),
+                            reverse=True
+                        )
+                        
+                        return ranked_sections[:limit], None
+                    except Exception as ranking_err:
+                        logger.warning(f"Error in semantic ranking: {ranking_err}")
+                
+                # Fallback to basic match score ranking
+                ranked_sections = sorted(
+                    sections,
+                    key=lambda s: s.get('match_score', 0),
+                    reverse=True
+                )
+                return ranked_sections[:limit], None
+            
+            return sections[:limit], None
+
+    
+
+    def format_navigation_context(self, sections: List[Dict[str, Any]]) -> str:
+        """
+        Format navigation information into Markdown format for rendering in the frontend.
+        
+        Args:
+            sections: List of navigation section dictionaries
+            
+        Returns:
+            Formatted Markdown string with structured navigation presentations
+        """
+        if not sections:
+            return "I couldn't find any navigation sections matching your criteria. Would you like me to suggest some website resources instead?"
+
+        # Create header based on the number of sections
+        markdown_text = "# APHRC Website Navigation:\n\n" if len(sections) > 1 else "# Navigation Section:\n\n"
+
+        for idx, section in enumerate(sections):
+            try:
+                # Extract title
+                title = section.get('title', 'Untitled Section').strip()
+                
+                # Use numbered list with clear formatting
+                markdown_text += f"{idx + 1}. **{title}**\n\n"
+
+                # Description
+                description = section.get('description', '')
+                if description:
+                    if len(description) > 300:
+                        description = description[:297] + '...'
+                    markdown_text += f"    - Description: {description}\n\n"
+                
+                # URL
+                url = section.get('url', '')
+                if url:
+                    markdown_text += f"    - Link: [{url}]({url})\n\n"
+                
+                # Keywords/Tags
+                keywords = section.get('keywords', [])
+                if keywords:
+                    if isinstance(keywords, str):
+                        try:
+                            keywords = json.loads(keywords)
+                        except json.JSONDecodeError:
+                            keywords = keywords.split(',')
+                    if isinstance(keywords, list):
+                        keywords_str = ', '.join(str(k).strip() for k in keywords[:5])
+                        markdown_text += f"    - Keywords: {keywords_str}\n\n"
+                
+                # Extra space between sections
+                if idx < len(sections) - 1:
+                    markdown_text += "\n"
+
+            except Exception as e:
+                logger.error(f"Error formatting navigation section {idx + 1}: {e}")
+                continue
+
+        markdown_text += "\nWould you like more details about any of these sections or help navigating to a specific resource?"
+        return markdown_text
 
 
   
         
     async def generate_async_response(self, message: str, user_interests: str = "") -> AsyncGenerator[str, None]:
         """
-        Generates a response with enhanced prompting strategies tailored to detected intent,
-        improved context handling, tone guidance for more natural, engaging interactions,
-        and personalization based on user interests.
+        Generates a response with enhanced prompting strategies tailored to detected intent.
         """
         try:
-            # Import inspect if not already imported
-            import inspect
-            
             # Step 1: Intent Detection 
             intent_result = await self.detect_intent(message)
             intent = intent_result['intent']
@@ -1740,35 +2129,24 @@ class GeminiLLMManager:
                 experts, error = await self.get_experts(message, limit=expert_limit)
                 
                 if experts:
-                    # Check if we have a valid embedding model
-                    if self.embedding_model:
+                    if self.embedding_model and not is_list_request:
                         try:
-                            # Get query embedding
                             query_embedding = self.embedding_model.encode(message)
-                            
-                            # Only sort by similarity for non-list requests
-                            if not is_list_request:
-                                # Sort experts by similarity when both embeddings exist
-                                ranked_experts = sorted(
-                                    experts,
-                                    key=lambda e: cos_sim(query_embedding, e['embedding'])[0][0] 
-                                    if 'embedding' in e and e['embedding'] is not None else 0,
-                                    reverse=True
-                                )
-                            else:
-                                # For list requests, use original order or rank by match score
-                                ranked_experts = sorted(
-                                    experts,
-                                    key=lambda e: e.get('match_score', 0),
-                                    reverse=True
-                                )
+                            ranked_experts = sorted(
+                                experts,
+                                key=lambda e: cos_sim(query_embedding, e['embedding'])[0][0] 
+                                if 'embedding' in e and e['embedding'] is not None else 0,
+                                reverse=True
+                            )
                         except Exception as e:
                             logger.warning(f"Error ranking experts: {e}")
-                            ranked_experts = experts  # Fall back to original order
+                            ranked_experts = experts
                     else:
-                        # No embedding model available
-                        ranked_experts = experts
-                        
+                        ranked_experts = sorted(
+                            experts,
+                            key=lambda e: e.get('match_score', 0),
+                            reverse=True
+                        )
                     context = self.format_expert_context(ranked_experts)
                     context_type = "expert"
                 else:
@@ -1777,7 +2155,6 @@ class GeminiLLMManager:
             
             # Handle PUBLICATION Intent
             elif intent == QueryIntent.PUBLICATION:
-                # Adjust limit for list requests
                 pub_limit = 5 if is_list_request else 3
                 publications, error = await self.get_publications(message, limit=pub_limit)
                 if publications:
@@ -1789,8 +2166,14 @@ class GeminiLLMManager:
             
             # Handle NAVIGATION Intent
             elif intent == QueryIntent.NAVIGATION:
-                context = "I can help you navigate APHRC resources and website sections."
-                context_type = "navigation"
+                nav_limit = 5 if is_list_request else 3
+                sections, error = await self.get_navigation(message, limit=nav_limit)
+                if sections:
+                    context = self.format_navigation_context(sections)
+                    context_type = "navigation"
+                else:
+                    context = "No matching navigation sections found, but I can help you explore our website."
+                    context_type = "no_navigation"
             
             # Default context for GENERAL Intent
             else:
@@ -1801,18 +2184,7 @@ class GeminiLLMManager:
             yield json.dumps({'is_metadata': True, 'metadata': {'intent': intent.value, 'style': message_style, 'is_list_request': is_list_request}})
             
             # Step 4: Create tailored prompt with tone, style guidance, and user interests
-            # FIXED: Check signature to determine correct method call
-            # Get the signature of _create_tailored_prompt
-            sig = inspect.signature(self._create_tailored_prompt)
-            params = list(sig.parameters.keys())
-            
-            # Determine if the method accepts is_list_request
-            if len(params) >= 5 and 'is_list_request' in params:
-                # Method accepts is_list_request parameter
-                system_message = self._create_tailored_prompt(intent, context_type, message_style, user_interests, is_list_request)
-            else:
-                # Use the version with only 4 parameters
-                system_message = self._create_tailored_prompt(intent, context_type, message_style, user_interests)
+            system_message = self._create_tailored_prompt(intent, context_type, message_style, user_interests)
             
             # Step 5: Prepare the full context with system guidance and user query
             full_prompt = f"{system_message}\n\nContext:\n{context}\n\nUser Query: {message}"
@@ -1823,6 +2195,8 @@ class GeminiLLMManager:
                     full_prompt += "\n\nThis is a request for a LIST of experts. Please format your response as a clear, numbered list with concise details about each expert."
                 elif intent == QueryIntent.PUBLICATION:
                     full_prompt += "\n\nThis is a request for a LIST of publications. Please format your response as a clear, numbered list with concise details about each publication."
+                elif intent == QueryIntent.NAVIGATION:
+                    full_prompt += "\n\nThis is a request for a LIST of navigation sections. Please format your response as a clear, numbered list with concise details about each section."
             
             # Step 6: Stream Enhanced Response from Gemini
             model = self._setup_gemini()
@@ -1838,6 +2212,7 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error generating response: {e}")
             yield "I apologize, but I encountered an issue while processing your request. Could you please rephrase your question or try again later?"
+
 
     def _create_tailored_prompt(self, intent, context_type: str, message_style: str, user_interests: str = "") -> str:
         """
