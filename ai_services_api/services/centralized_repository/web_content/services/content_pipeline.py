@@ -5,7 +5,6 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 from urllib.parse import urlparse
-from ai_services_api.services.centralized_repository.web_content.services.redis_handler import ContentRedisHandler
 from ai_services_api.services.centralized_repository.web_content.utils.text_cleaner import TextCleaner
 from ai_services_api.services.centralized_repository.web_content.services.web_scraper import WebsiteScraper
 from ai_services_api.services.centralized_repository.web_content.services.pdf_processor import PDFProcessor
