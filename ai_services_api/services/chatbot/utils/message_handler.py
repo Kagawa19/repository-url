@@ -62,6 +62,54 @@ class MessageHandler:
                 return f"    - **{display_name}:** {field_content}\n\n"
         return ""
 
+    async def start_chat_session(self, user_id: str) -> str:
+        """
+        Start a new chat session.
+        
+        Args:
+            user_id (str): Unique identifier for the user
+        
+        Returns:
+            str: Generated session identifier
+        """
+        try:
+            # Generate unique session identifier
+            session_id = f"session_{user_id}_{int(time.time())}"
+            
+            # Initialize this session in memory if needed
+            if not hasattr(self, 'active_sessions'):
+                self.active_sessions = {}
+            
+            self.active_sessions[session_id] = {
+                'user_id': user_id,
+                'start_time': datetime.now(),
+                'message_count': 0
+            }
+            
+            # Try to store in database if possible
+            try:
+                async with DatabaseConnector.get_connection() as conn:
+                    await conn.execute("""
+                        INSERT INTO chat_sessions 
+                            (session_id, user_id, start_timestamp)
+                        VALUES ($1, $2, CURRENT_TIMESTAMP)
+                        RETURNING session_id
+                    """, session_id, user_id)
+                    logger.info(f"Created chat session in database: {session_id}")
+            except Exception as db_error:
+                # Continue even if database insert fails - we still have the session in memory
+                logger.warning(f"Non-critical error saving session to database: {db_error}")
+            
+            logger.info(f"Created chat session: {session_id}")
+            return session_id
+        
+        except Exception as e:
+            logger.error(f"Error in start_chat_session: {e}")
+            # Fallback to a basic session ID if something goes wrong
+            fallback_session_id = f"fallback_{user_id}_{int(time.time())}"
+            logger.info(f"Using fallback session ID: {fallback_session_id}")
+            return fallback_session_id
+
     def _extract_experts_from_text(self, text: str) -> List[Dict[str, Any]]:
         # Unchanged, kept for context
         experts = []
