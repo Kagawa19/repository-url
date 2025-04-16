@@ -708,6 +708,136 @@ class MessageHandler:
             logger.error(f"Error in send_message_async: {e}", exc_info=True)
             yield "I apologize, but I encountered an issue processing your request. Could you please try again or rephrase your question?"
 
+    async def save_chat_to_db(self, user_id: str, query: str, response: str, response_time: float):
+        """
+        Save chat interaction to database with proper error handling.
+        
+        Args:
+            user_id (str): User identifier
+            query (str): The user's message
+            response (str): The system's response
+            response_time (float): Processing time in seconds
+        """
+        try:
+            # Determine session ID - use active sessions if available
+            session_id = None
+            if hasattr(self, 'active_sessions'):
+                # Find matching session for this user
+                for sid, session_data in self.active_sessions.items():
+                    if session_data.get('user_id') == user_id:
+                        session_id = sid
+                        # Update message count
+                        session_data['message_count'] = session_data.get('message_count', 0) + 1
+                        break
+            
+            # If no session found, create a generic one
+            if not session_id:
+                session_id = f"session_{user_id}_{int(time.time())}"
+                logger.warning(f"No active session found for user {user_id}, using generated session_id: {session_id}")
+            
+            # Determine intent type from metadata if available
+            intent_type = 'general'
+            if hasattr(self, 'metadata') and self.metadata:
+                if 'intent' in self.metadata:
+                    intent_type = self.metadata.get('intent')
+            
+            # Update conversation cache
+            if not hasattr(self, 'conversation_cache'):
+                self.conversation_cache = {}
+                
+            if session_id not in self.conversation_cache:
+                self.conversation_cache[session_id] = []
+                
+            # Add current interaction to cache
+            self.conversation_cache[session_id].append({
+                'query': query,
+                'response': response,
+                'intent': intent_type,
+                'timestamp': datetime.now()
+            })
+            
+            # Limit cache size
+            if len(self.conversation_cache[session_id]) > 10:
+                self.conversation_cache[session_id] = self.conversation_cache[session_id][-10:]
+            
+            # Save to database
+            try:
+                async with DatabaseConnector.get_connection() as conn:
+                    await conn.execute("""
+                        INSERT INTO chatbot_logs 
+                            (user_id, query, response, response_time, session_id, intent_type, timestamp)
+                        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                    """, user_id, query, response, response_time, session_id, intent_type)
+                    
+                    logger.info(f"Saved chat to database - User: {user_id}, Session: {session_id}")
+                
+            except Exception as db_error:
+                logger.warning(f"Non-critical error saving chat to database: {db_error}")
+                logger.info("Continuing with in-memory cache only")
+                
+        except Exception as e:
+            logger.error(f"Error saving chat interaction: {e}")
+            # This is non-critical, so don't raise the exception
+
+    async def _get_conversation_history(self, user_id: str, session_id: str) -> List[Dict]:
+        """
+        Retrieve conversation history for the current session.
+        
+        Args:
+            user_id (str): User identifier
+            session_id (str): Session identifier
+            
+        Returns:
+            List[Dict]: Previous interactions in this conversation
+        """
+        try:
+            # First try to get history from memory cache
+            if hasattr(self, 'conversation_cache'):
+                if session_id in self.conversation_cache:
+                    logger.info(f"Retrieved conversation history from memory cache for session {session_id}")
+                    return self.conversation_cache.get(session_id, [])
+            else:
+                # Initialize conversation cache if it doesn't exist
+                self.conversation_cache = {}
+                
+            # Try to get history from database
+            try:
+                async with DatabaseConnector.get_connection() as conn:
+                    # Get the last 5 interactions for this session, ordered by timestamp
+                    history = await conn.fetch("""
+                        SELECT query, response, intent_type, timestamp
+                        FROM chatbot_logs
+                        WHERE user_id = $1 AND session_id = $2
+                        ORDER BY timestamp DESC
+                        LIMIT 5
+                    """, user_id, session_id)
+                    
+                    # Format history as a list of dictionaries
+                    conversation = []
+                    for item in history:
+                        conversation.append({
+                            'query': item.get('query', ''),
+                            'response': item.get('response', ''),
+                            'intent': item.get('intent_type', 'unknown'),
+                            'timestamp': item.get('timestamp', datetime.now())
+                        })
+                    
+                    # Update memory cache with this history
+                    self.conversation_cache[session_id] = list(reversed(conversation))
+                    
+                    # Return reversed to get chronological order
+                    logger.info(f"Retrieved {len(conversation)} history items from database for session {session_id}")
+                    return list(reversed(conversation))
+            
+            except Exception as db_error:
+                logger.warning(f"Error retrieving conversation history from database: {db_error}")
+                # Memory cache is empty at this point, so return an empty list
+                return []
+        
+        except Exception as e:
+            logger.error(f"Error retrieving conversation history: {e}")
+            return []
+
     def _get_conversation_closing(self, intent_type: str, history_length: int) -> str:
         """
         Get a contextually appropriate conversation closing based on intent and history.
