@@ -223,7 +223,22 @@ class MessageHandler:
     
   
 
-    
+    def clean_response(self, response: str) -> str:
+        """
+        Removes leading metadata JSON (if any) from the beginning of the response string.
+        
+        Args:
+            response (str): The response string to clean
+            
+        Returns:
+            str: The response with leading metadata JSON removed
+        """
+        import re
+        pattern = r'^\s*\{.*?"is_metadata"\s*:\s*true.*?\}\s*'
+        match = re.match(pattern, response, re.DOTALL)
+        if match:
+            return response[match.end():].lstrip()
+        return response
 
     async def process_stream_response(self, response_stream):
         """
