@@ -1626,6 +1626,7 @@ class GeminiLLMManager:
         markdown_text += "\nWould you like more detailed information about any of these experts? You can ask by name or area of expertise."
         return markdown_text
 
+
     def safely_decode_binary_data(self, binary_data, default_encoding='utf-8'):
         """
         Safely decode binary data using multiple encoding attempts.
@@ -1672,8 +1673,9 @@ class GeminiLLMManager:
 
         for idx, publication in enumerate(publications):
             try:
+                # Add numbering before the title
                 title = publication.get('title', 'Untitled Publication').strip()
-                markdown_text += f"<strong>{title}</strong>\n"
+                markdown_text += f"{idx + 1}. **{title}**\n"
 
                 # Add summary/abstract (trimmed to 200 characters max, ending at word boundary)
                 summary = publication.get('abstract') or publication.get('summary') or ""
@@ -1699,7 +1701,6 @@ class GeminiLLMManager:
 
         markdown_text += "\nYou can ask for more details about any of these publications or request information about related research."
         return markdown_text
-
 
         
     async def generate_async_response(self, message: str, user_interests: str = "") -> AsyncGenerator[str, None]:
