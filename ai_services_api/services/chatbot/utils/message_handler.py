@@ -293,7 +293,9 @@ class MessageHandler:
 
                 print(f"[DEBUG] Cleaned text chunk: {text}")
 
-                if not text.strip():
+                # Safeguard against invalid cleaned output
+                if not text or text.strip() == '}':
+                    print(f"[DEBUG] Skipping empty or invalid cleaned text: {text}")
                     continue
 
                 if is_first_chunk:
@@ -306,7 +308,7 @@ class MessageHandler:
                 if not in_structured_content and (
                     re.search(r'\d+\.\s+\*\*[^*]+\*\*', text) or
                     re.search(r'\d+\.\s+[^*\n]+', text) or
-                    re.search(r'# Experts|experts (in|   # Experts|experts (in|at) APHRC|Expert Profile', text) or
+                    re.search(r'#\s*Experts|experts\s+(?:in|at)\s+APHRC|Expert\s+Profile', text, re.IGNORECASE) or
                     re.search(r'([A-Z][a-z]+\s+[A-Z][a-z]+)[^A-Z]*?specializes in', text) or
                     re.search(r'\d+\.\s+\*\*[^*]+\*\*\s*\n\s*\*\*Designation:', text) or
                     re.search(r'\d+\.\s+\*\*[^*]+\*\*\s*\n\s*\*\*Theme:', text) or
@@ -324,9 +326,9 @@ class MessageHandler:
                 if not in_structured_content and (
                     re.search(r'\d+\.\s+\*\*[^*]+\*\*', text) or
                     re.search(r'\d+\.\s+[^*\n]+', text) or
-                    re.search(r'# Publications|publications (on|about) APHRC|Publication List', text) or
-                    re.search(r'publications (related to|on the topic of)', text) or
-                    re.search(r'(paper|article|publication|research) (titled|published in|by)', text) or
+                    re.search(r'#\s*Publications|publications\s+(?:on|about)\s+APHRC|Publication\s+List', text, re.IGNORECASE) or
+                    re.search(r'publications\s+(?:related\s+to|on\s+the\s+topic\s+of)', text, re.IGNORECASE) or
+                    re.search(r'(paper|article|publication|research)\s+(?:titled|published\s+in|by)', text, re.IGNORECASE) or
                     re.search(r'\d+\.\s*\*[^*]+\*', text)
                 ):
                     if is_publication_list or re.search(r'publication|paper|article|research|study|doi', text.lower()) or detected_intent == 'publication':
@@ -341,7 +343,7 @@ class MessageHandler:
                 if in_structured_content and content_type == "expert_list":
                     structured_buffer += text
                     print(f"[DEBUG] Appending to expert buffer: {text[:60]}...")
-                    if re.search(r'Would you like more detailed|more information about|anything else', structured_buffer):
+                    if re.search(r'Would\s+you\s+like\s+more\s+detailed|more\s+information\s+about|anything\s+else', structured_buffer, re.IGNORECASE):
                         structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
                         print(f"[INFO] Yielding expert list")
                         yield structured_buffer
@@ -354,7 +356,7 @@ class MessageHandler:
                 if in_structured_content and content_type == "publication_list":
                     structured_buffer += text
                     print(f"[DEBUG] Appending to publication buffer: {text[:60]}...")
-                    if re.search(r'Would you like more detailed|Is there anything else', structured_buffer):
+                    if re.search(r'Would\s+you\s+like\s+more\s+detailed|Is\s+there\s+anything\s+else', structured_buffer, re.IGNORECASE):
                         structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
                         print(f"[INFO] Yielding publication list")
                         yield structured_buffer
@@ -400,7 +402,6 @@ class MessageHandler:
                 buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', buffer)
                 print(f"[ERROR-RECOVERY] Yielding final cleaned buffer after error")
                 yield buffer.strip()
-
 
    
     async def send_message_async(self, message: str, user_id: str, session_id: str) -> AsyncGenerator:
