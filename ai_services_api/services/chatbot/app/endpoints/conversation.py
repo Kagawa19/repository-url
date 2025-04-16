@@ -51,7 +51,9 @@ async def get_user_id(request: Request) -> str:
         raise HTTPException(status_code=400, detail="X-User-ID header is required")
     return user_id
 
-@DatabaseConnector.retry_on_failure(max_retries=3)
+
+
+# Updated POST endpoint for chat@DatabaseConnector.retry_on_failure(max_retries=3)
 async def process_chat_request(query: str, user_id: str, redis_client) -> ChatResponse:
     """Handle chat request with enhanced logging for debugging and interest tracking."""
     # Capture overall start time
@@ -260,7 +262,20 @@ async def process_chat_request(query: str, user_id: str, redis_client) -> ChatRe
         except Exception as save_error:
             logger.error(f"Error in cache/DB save: {save_error}", exc_info=True)
 
-# Updated POST endpoint for chat
+        # Final logging
+        total_processing_time = (datetime.utcnow() - overall_start_time).total_seconds()
+        logger.info(f"Chat request processing completed. Total time: {total_processing_time:.2f} seconds")
+
+        return ChatResponse(**chat_data)
+
+    except Exception as critical_error:
+        # Critical error handling
+        logger.critical(f"Unhandled error in chat endpoint: {critical_error}", exc_info=True)
+        logger.error(f"Error details - User ID: {user_id}, Query: {query}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(critical_error)}"
+        )
 @router.post("/chat", response_model=ChatResponse, responses={
     400: {"model": ErrorResponse, "description": "Missing user ID or invalid request"},
     429: {"model": ErrorResponse, "description": "Rate limit exceeded"},
