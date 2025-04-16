@@ -779,6 +779,65 @@ class MessageHandler:
             logger.error(f"Error saving chat interaction: {e}")
             # This is non-critical, so don't raise the exception
 
+    async def _save_to_conversation_history(self, user_id: str, session_id: str, message: str, intent_type):
+        """
+        Save the current interaction to conversation history.
+        
+        Args:
+            user_id (str): User identifier
+            session_id (str): Session identifier
+            message (str): The user's query
+            intent_type: Detected intent type (will be converted to string)
+        """
+        try:
+            # Initialize conversation cache if it doesn't exist
+            if not hasattr(self, 'conversation_cache'):
+                self.conversation_cache = {}
+            
+            # Initialize session history if it doesn't exist
+            if session_id not in self.conversation_cache:
+                self.conversation_cache[session_id] = []
+            
+            # Convert intent_type to string if it's an enum
+            if hasattr(intent_type, 'value'):
+                intent_type_str = intent_type.value
+            else:
+                intent_type_str = str(intent_type)
+            
+            # Add current message to history (in-memory cache)
+            self.conversation_cache[session_id].append({
+                'query': message,
+                'intent': intent_type_str,
+                'timestamp': datetime.now()
+            })
+            
+            # Limit history size in memory
+            if len(self.conversation_cache[session_id]) > 10:
+                self.conversation_cache[session_id] = self.conversation_cache[session_id][-10:]
+            
+            # Also update database history if available
+            try:
+                async with DatabaseConnector.get_connection() as conn:
+                    await conn.execute("""
+                        UPDATE chatbot_logs 
+                        SET intent_type = $1, session_id = $2
+                        WHERE user_id = $3 AND query = $4
+                        AND timestamp = (
+                            SELECT MAX(timestamp) 
+                            FROM chatbot_logs 
+                            WHERE user_id = $3 AND query = $4
+                        )
+                    """, intent_type_str, session_id, user_id, message)
+                    
+                    logger.info(f"Updated conversation history in database for user {user_id}, session {session_id}")
+            except Exception as db_error:
+                logger.warning(f"Error updating conversation history in database: {db_error}")
+                # Continue even if database update fails - we still have memory cache
+        
+        except Exception as e:
+            logger.error(f"Error saving to conversation history: {e}")
+            # Non-critical error, can continue without history
+
     def _analyze_followup(self, message: str, conversation_history: List[Dict]) -> Tuple[bool, Optional[str]]:
         """
         Determine if the current message is a follow-up to previous conversation.
