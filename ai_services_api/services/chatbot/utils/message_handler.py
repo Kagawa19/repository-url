@@ -412,82 +412,46 @@ class MessageHandler:
         # Join all lines with newlines
         return "\n".join(lines)
 
-    def _format_publication_list_fixed(self, publications_text: str) -> str:
-        """
-        Parses raw publication text and returns a clean, numbered, consistently formatted list.
-        Each publication gets a new number. Only the title is bolded.
-        """
-        result = ""
-
-        # Extract entries ignoring original numbering or bullets
-        pub_entries = re.split(r'\n\s*\n', publications_text.strip())
-        
-        for i, entry in enumerate(pub_entries):
-            entry = entry.strip()
-            if not entry:
-                continue
-
-            # Extract the first non-empty line as the title
-            lines = entry.splitlines()
-            title = lines[0].strip() if lines else f"Publication {i+1}"
-            
-            # Remove existing formatting but ensure title is bold
-            title = re.sub(r'\*\*([^*]+)\*\*', r'\1', title)  # Remove existing bold
-            title = re.sub(r'\*([^*]+)\*', r'\1', title)      # Remove existing italics
-            
-            # Add numbered entry with bold title
-            result += f"{i + 1}. **{title}**\n"
-
-            # Process metadata fields
-            metadata_lines = []
-            for line in lines[1:]:
-                line = line.strip()
-                if not line:
-                    continue
-                    
-                # Format DOI links
-                if re.search(r'DOI:', line, re.IGNORECASE):
-                    doi_match = re.search(r'DOI:?\s*([^\s]+)', line, re.IGNORECASE)
-                    if doi_match:
-                        doi = doi_match.group(1).strip()
-                        if not doi.startswith('http'):
-                            doi = f"https://doi.org/{doi}"
-                        metadata_lines.append(f"   **DOI:** [Check it out]({doi})")
-                # Format summary/abstract
-                elif re.search(r'(Summary|Abstract):', line, re.IGNORECASE):
-                    summary_match = re.search(r'(?:Summary|Abstract):?\s*(.*)', line, re.IGNORECASE)
-                    if summary_match:
-                        summary = summary_match.group(1).strip()
-                        metadata_lines.append(f"   **Summary:** {summary}")
-                # Keep other metadata lines
-                else:
-                    metadata_lines.append(f"   {line}")
-                    
-            # Add all metadata with proper spacing
-            if metadata_lines:
-                result += "\n".join(metadata_lines) + "\n"
-                
-            # Add blank line between entries
-            result += "\n"
-
-        # Add closing line
-        result += "\nYou can ask for more details about any of these publications or request information about related research."
-        
-        return result
-  
-
     def _format_expert_list_fixed(self, text):
-        intro = "I am happy to provide you with a list of experts in Health Sciences at the African Population and Health Research Center (APHRC).\n\nHere are some of our experts in the field:\n"
-        
-        experts = re.findall(r'(\d+\.\s+\*\*.+?\*\*.+?)(?=\d+\.|\Z)', text, re.DOTALL)
-        
-        if not experts:
-            # Fallback to parsing with dashes if numbered format isn't detected
-            experts = re.split(r'\n?- ', text)
-            experts = [e.strip() for e in experts if e.strip()]
+        intro = (
+            "Okay, I can certainly help you with that!\n\n"
+            "I am happy to provide you with a list of experts in Health Sciences at the African Population and Health Research Center (APHRC).\n\n"
+            "Here are some of our experts in the field:\n"
+        )
 
-        formatted = [f"{i+1}. {e.strip()}" for i, e in enumerate(experts)]
-        return f"{intro}\n" + "\n\n".join(formatted) + "\n\nWould you like more detailed information about any of these experts? You can ask by name or area of expertise."
+        experts = re.split(r"\n(?=[A-Z][a-z]+ [A-Z][a-z]+)", text.strip())
+        formatted_experts = []
+
+        for i, expert in enumerate(experts, 1):
+            lines = [line.strip() for line in expert.strip().split("\n") if line.strip()]
+            if not lines:
+                continue
+            formatted_expert = f"{i}. **{lines[0]}**\n"
+            for line in lines[1:]:
+                formatted_expert += f"   {line.strip()}\n"
+            formatted_experts.append(formatted_expert.strip())
+
+        outro = "\nWould you like more detailed information about any of these experts? You can ask by name or area of expertise."
+
+        return f"{intro}\n" + "\n\n".join(formatted_experts) + f"\n\n{outro}"
+
+
+    def _format_publications_list_fixed(self, text):
+        intro = (
+            "Of course! Here is a list of selected publications from our experts:\n"
+        )
+
+        publications = re.split(r"\n(?=\d{4}|[A-Z])", text.strip())
+        formatted_pubs = []
+
+        for i, pub in enumerate(publications, 1):
+            pub = pub.replace("\n", " ").strip()
+            if pub:
+                formatted_pubs.append(f"{i}. {pub}")
+
+        outro = "\nWould you like more information about any of these publications or the authors?"
+
+        return f"{intro}\n" + "\n\n".join(formatted_pubs) + f"\n\n{outro}"
 
     async def process_stream_response(self, response_stream):
         """
