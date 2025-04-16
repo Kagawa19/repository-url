@@ -1,5 +1,3 @@
-# services/web_content/web_scraper.py
-
 import logging
 from typing import List, Dict, Set, Optional
 from urllib.parse import urljoin, urlparse
@@ -11,6 +9,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
+from retrying import retry
 import time
 import hashlib
 from datetime import datetime
@@ -48,10 +47,11 @@ class WebsiteScraper:
         self.max_depth = int(os.getenv('MAX_DEPTH', '3'))
         
         self.setup_selenium()
-        logger.info("WebsiteScraper initialized successfully")
+        logger.info(f"WebsiteScraper initialized with base_url: {self.base_url}")
 
+    @retry(stop_max_attempt_number=3, wait_fixed=2000)
     def setup_selenium(self):
-        """Configure and initialize Selenium WebDriver"""
+        """Configure and initialize Selenium WebDriver with retries"""
         try:
             options = Options()
             if self.headless:
@@ -60,20 +60,25 @@ class WebsiteScraper:
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--disable-gpu")
             options.add_argument("--window-size=1920,1080")
-            
-            # Additional options for better performance
             options.add_argument("--disable-notifications")
             options.add_argument("--disable-infobars")
             options.add_argument("--disable-extensions")
             options.add_argument("--disable-blink-features=AutomationControlled")
             
-            # Set up service with specific Chrome driver path if needed
             chrome_driver_path = os.getenv('CHROME_DRIVER_PATH')
             service = Service(chrome_driver_path) if chrome_driver_path else Service()
             
-            self.driver = webdriver.Chrome(service=service, options=options)
-            self.driver.set_page_load_timeout(self.selenium_timeout)
+            remote_url = os.getenv('SELENIUM_REMOTE_URL')
+            if remote_url:
+                logger.info(f"Using remote WebDriver at {remote_url}")
+                self.driver = webdriver.Remote(
+                    command_executor=remote_url,
+                    options=options
+                )
+            else:
+                self.driver = webdriver.Chrome(service=service, options=options)
             
+            self.driver.set_page_load_timeout(self.selenium_timeout)
             logger.info("Selenium WebDriver setup complete")
         except Exception as e:
             logger.error(f"Failed to setup Selenium: {str(e)}")
@@ -103,18 +108,13 @@ class WebsiteScraper:
         """Scroll through page to load dynamic content"""
         try:
             last_height = self.driver.execute_script("return document.body.scrollHeight")
-            
             while True:
-                # Scroll down
                 self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                 time.sleep(self.scroll_pause)
-                
-                # Calculate new scroll height and compare with last scroll height
                 new_height = self.driver.execute_script("return document.body.scrollHeight")
                 if new_height == last_height:
                     break
                 last_height = new_height
-                
         except Exception as e:
             logger.error(f"Error scrolling page: {str(e)}")
 
@@ -131,21 +131,17 @@ class WebsiteScraper:
         """
         nav_links = set()
         pdf_links = set()
-        
         try:
             for link in soup.find_all('a', href=True):
                 href = link['href']
                 absolute_url = urljoin(base_url, href)
-                
                 if self.is_valid_url(absolute_url):
                     if absolute_url.lower().endswith('.pdf'):
                         pdf_links.add(absolute_url)
                     else:
                         nav_links.add(absolute_url)
-                        
         except Exception as e:
             logger.error(f"Error extracting links: {str(e)}")
-            
         return {
             'nav_links': nav_links,
             'pdf_links': pdf_links
@@ -164,42 +160,31 @@ class WebsiteScraper:
         try:
             logger.info(f"Fetching content from: {url}")
             self.driver.get(url)
-            
-            # Wait for body to be present
             WebDriverWait(self.driver, self.selenium_timeout).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
-            
-            # Scroll to load dynamic content
             self.scroll_page()
-            
-            # Parse with BeautifulSoup
             soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-            
-            # Extract text content
             text_elements = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'article'])
             text_content = ' '.join([elem.get_text(strip=True) for elem in text_elements])
-            
-            # Clean content
             cleaned_content = self.text_cleaner.clean_text(text_content)
             
             if not cleaned_content.strip():
                 logger.warning(f"No content found at: {url}")
                 return None
                 
-            # Extract links
             links = self.extract_links(soup, url)
-            
-            # Update PDF links set
             self.pdf_links.update(links['pdf_links'])
             
-            # Get metadata
             metadata = {
                 'title': soup.title.string if soup.title else '',
                 'meta_description': soup.find('meta', {'name': 'description'})['content'] if soup.find('meta', {'name': 'description'}) else '',
                 'last_modified': self.driver.execute_script("return document.lastModified;"),
                 'word_count': len(cleaned_content.split())
             }
+            
+            content_hash = hashlib.md5(cleaned_content.encode()).hexdigest()
+            logger.debug(f"Scraped {url}: {len(cleaned_content)} chars, hash: {content_hash}")
             
             return {
                 'url': url,
@@ -209,7 +194,7 @@ class WebsiteScraper:
                 'pdf_links': list(links['pdf_links']),
                 'metadata': metadata,
                 'timestamp': datetime.now().isoformat(),
-                'content_hash': hashlib.sha256(cleaned_content.encode()).hexdigest()
+                'content_hash': content_hash
             }
             
         except TimeoutException:
@@ -231,21 +216,16 @@ class WebsiteScraper:
         """
         pages_data = []
         urls_to_visit = [(self.base_url, 0)]  # (url, depth)
-        
         try:
-            while urls_to_visit:  # Removed max_pages limit
+            while urls_to_visit:
                 url, depth = urls_to_visit.pop(0)
-                
                 if url in self.visited_urls or depth > self.max_depth:
                     continue
-                    
                 logger.info(f"Scraping: {url} (Depth: {depth})")
                 page_data = self.get_page_content(url)
-                
                 if page_data:
                     pages_data.append(page_data)
                     self.visited_urls.add(url)
-                    
                     if depth < self.max_depth:
                         new_urls = [
                             (url, depth + 1) 
@@ -253,55 +233,14 @@ class WebsiteScraper:
                             if url not in self.visited_urls
                         ]
                         urls_to_visit.extend(new_urls)
-                        
-                # Add small delay between requests
                 time.sleep(1)
-            
             logger.info(f"Scraping complete. Processed {len(pages_data)} pages")
             return pages_data
-            
         except Exception as e:
             logger.error(f"Error during site scraping: {str(e)}")
             return pages_data
         finally:
-            self.save_scrape_state()
-
-    def save_scrape_state(self):
-        """Save scraping state to file"""
-        try:
-            state = {
-                'visited_urls': list(self.visited_urls),
-                'pdf_links': list(self.pdf_links),
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            state_file = os.getenv('SCRAPE_STATE_FILE', 'scrape_state.json')
-            import json
-            with open(state_file, 'w') as f:
-                json.dump(state, f)
-                
-            logger.info(f"Saved scrape state to {state_file}")
-        except Exception as e:
-            logger.error(f"Error saving scrape state: {str(e)}")
-
-    def load_scrape_state(self) -> bool:
-        """Load previous scraping state from file"""
-        try:
-            state_file = os.getenv('SCRAPE_STATE_FILE', 'scrape_state.json')
-            if os.path.exists(state_file):
-                import json
-                with open(state_file, 'r') as f:
-                    state = json.load(f)
-                    
-                self.visited_urls = set(state['visited_urls'])
-                self.pdf_links = set(state['pdf_links'])
-                
-                logger.info(f"Loaded scrape state from {state_file}")
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Error loading scrape state: {str(e)}")
-            return False
+            self.close()
 
     def close(self):
         """Clean up resources"""

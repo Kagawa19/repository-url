@@ -1,5 +1,3 @@
-# services/web_content/content_pipeline.py
-
 import logging
 from typing import List, Dict, Set, Optional
 import hashlib
@@ -9,14 +7,8 @@ import os
 from urllib.parse import urlparse
 from ai_services_api.services.centralized_repository.web_content.services.redis_handler import ContentRedisHandler
 from ai_services_api.services.centralized_repository.web_content.utils.text_cleaner import TextCleaner
-
 from ai_services_api.services.centralized_repository.web_content.services.web_scraper import WebsiteScraper
 from ai_services_api.services.centralized_repository.web_content.services.pdf_processor import PDFProcessor
-from ai_services_api.services.centralized_repository.web_content.embeddings.model_handler import EmbeddingModel
-from ai_services_api.services.centralized_repository.database_setup import get_db_cursor
-
-
-
 
 logger = logging.getLogger(__name__)
 
@@ -26,20 +18,23 @@ class ContentPipeline:
     PDF processing, and content preparation.
     """
     
-    def __init__(self, max_workers: int = 4):
+    def __init__(self, max_workers: int = 4, webdriver_retries: int = 3):
         self.max_workers = max_workers
+        self.webdriver_retries = webdriver_retries
         self.visited_urls: Set[str] = set()
         self.pdf_links: Set[str] = set()
+        self.website_url = os.getenv('WEBSITE_URL')
         self.setup_components()
 
     def setup_components(self):
         """Initialize all required components"""
         try:
+            if not self.website_url:
+                raise ValueError("WEBSITE_URL environment variable not set")
             self.web_scraper = WebsiteScraper()
             self.pdf_processor = PDFProcessor()
-            self.embedding_model = EmbeddingModel()
             self.text_cleaner = TextCleaner()
-            logger.info("Successfully initialized pipeline components")
+            logger.info(f"Pipeline initialized with WEBSITE_URL: {self.website_url}")
         except Exception as e:
             logger.error(f"Failed to initialize pipeline components: {str(e)}")
             raise
@@ -48,14 +43,11 @@ class ContentPipeline:
         """Validate URL format and allowed domains"""
         try:
             result = urlparse(url)
-            base_domain = os.getenv('WEBSITE_URL')
-            if not base_domain:
-                raise ValueError("WEBSITE_URL environment variable not set")
-            base_domain = urlparse(base_domain).netloc
+            base_domain = urlparse(self.website_url).netloc
             return all([
                 result.scheme in ['http', 'https'],
                 result.netloc.endswith(base_domain),
-                len(url) < 2048  # Standard URL length limit
+                len(url) < 2048
             ])
         except Exception:
             return False
@@ -67,17 +59,12 @@ class ContentPipeline:
                 logger.error(f"Invalid URL format: {page_data['url']}")
                 return None
 
-            # Clean and process content
             cleaned_content = self.text_cleaner.clean_text(page_data['content'])
-            
             if not cleaned_content.strip():
                 logger.warning(f"Empty content for URL: {page_data['url']}")
                 return None
 
-            # Create hash for content
-            content_hash = hashlib.sha256(cleaned_content.encode()).hexdigest()
-
-            # Generate metadata
+            content_hash = hashlib.md5(cleaned_content.encode()).hexdigest()
             metadata = {
                 'url': page_data['url'],
                 'title': page_data.get('title', ''),
@@ -87,17 +74,18 @@ class ContentPipeline:
                 'scrape_timestamp': datetime.now().isoformat()
             }
 
-            # Update PDF links set
             if page_data.get('pdf_links'):
                 self.pdf_links.update(page_data['pdf_links'])
 
+            logger.debug(f"Processed webpage {page_data['url']}: hash {content_hash}")
             return {
                 'url': page_data['url'],
                 'title': page_data.get('title', ''),
                 'content': cleaned_content,
                 'content_hash': content_hash,
                 'metadata': metadata,
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now().isoformat(),
+                'content_type': 'webpage'
             }
 
         except Exception as e:
@@ -111,22 +99,19 @@ class ContentPipeline:
                 logger.error(f"Invalid PDF URL: {pdf_data['url']}")
                 return None
 
-            # Clean and process content
             cleaned_chunks = []
             for chunk in pdf_data['chunks']:
                 cleaned_chunk = self.text_cleaner.clean_pdf_text(chunk)
-                if cleaned_chunk.strip():  # Only keep non-empty chunks
+                if cleaned_chunk.strip():
                     cleaned_chunks.append(cleaned_chunk)
 
             if not cleaned_chunks:
                 logger.warning(f"No valid content in PDF: {pdf_data['url']}")
                 return None
 
-            # Create hash for entire PDF content
             full_content = ' '.join(cleaned_chunks)
-            content_hash = hashlib.sha256(full_content.encode()).hexdigest()
+            content_hash = hashlib.md5(full_content.encode()).hexdigest()
 
-            # Generate metadata
             metadata = {
                 'url': pdf_data['url'],
                 'file_path': pdf_data.get('file_path', ''),
@@ -136,6 +121,7 @@ class ContentPipeline:
                 'scrape_timestamp': datetime.now().isoformat()
             }
 
+            logger.debug(f"Processed PDF {pdf_data['url']}: {len(cleaned_chunks)} chunks, hash {content_hash}")
             return {
                 'url': pdf_data['url'],
                 'chunks': cleaned_chunks,
@@ -158,19 +144,14 @@ class ContentPipeline:
                 'timestamp': datetime.now().isoformat()
             }
 
-            # Scrape website pages
             pages_data = self.web_scraper.scrape_site()
             logger.info(f"Scraped {len(pages_data)} pages")
 
-            # Process webpages in parallel
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                # Submit webpage processing tasks
                 future_to_page = {
                     executor.submit(self.process_webpage, page): page 
                     for page in pages_data
                 }
-                
-                # Collect webpage results
                 for future in as_completed(future_to_page):
                     page = future_to_page[future]
                     try:
@@ -180,17 +161,12 @@ class ContentPipeline:
                     except Exception as e:
                         logger.error(f"Failed to process page {page.get('url', 'unknown')}: {str(e)}")
 
-            # Process PDFs in parallel
             pdf_data = self.pdf_processor.process_pdfs(list(self.pdf_links))
-            
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                # Submit PDF processing tasks
                 future_to_pdf = {
                     executor.submit(self.process_pdf, pdf): pdf 
                     for pdf in pdf_data
                 }
-                
-                # Collect PDF results
                 for future in as_completed(future_to_pdf):
                     pdf = future_to_pdf[future]
                     try:
@@ -200,7 +176,6 @@ class ContentPipeline:
                     except Exception as e:
                         logger.error(f"Failed to process PDF {pdf.get('url', 'unknown')}: {str(e)}")
 
-            # Update results
             results.update({
                 'total_webpages': len(results['webpage_results']),
                 'total_pdf_chunks': sum(len(pdf['chunks']) for pdf in results['pdf_results']),
@@ -208,6 +183,9 @@ class ContentPipeline:
                 'timestamp': datetime.now().isoformat()
             })
 
+            if not results['webpage_results'] and not results['pdf_results']:
+                logger.warning("No content processed. Check WEBSITE_URL and WebDriver.")
+            
             return results
 
         except Exception as e:
@@ -221,6 +199,7 @@ class ContentPipeline:
         try:
             self.web_scraper.close()
             self.pdf_processor.cleanup()
+            logger.info("Pipeline cleanup completed")
         except Exception as e:
             logger.error(f"Error during cleanup: {str(e)}")
 

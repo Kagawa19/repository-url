@@ -1,5 +1,4 @@
 from ai_services_api.services.centralized_repository.web_content.services.content_pipeline import ContentPipeline
-from ai_services_api.services.centralized_repository.web_content.services.redis_handler import ContentRedisHandler
 from ai_services_api.services.centralized_repository.web_content.services.web_scraper import WebsiteScraper
 from ai_services_api.services.centralized_repository.web_content.services.pdf_processor import PDFProcessor
 from ai_services_api.services.centralized_repository.web_content.embeddings.model_handler import EmbeddingModel
@@ -28,10 +27,10 @@ class WebContentProcessor:
         self.website_url = os.getenv('WEBSITE_URL')
         self.processing_checkpoint_hours = processing_checkpoint_hours
         self.state_file = state_file
+        self.redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
         
         self.redis_pool = None
         self.pipeline = None
-        self.redis_handler = None
         self.embedding_model = None
         
         self.setup_components()
@@ -50,7 +49,7 @@ class WebContentProcessor:
                     'processed_urls': [],
                     'failed_urls': [],
                     'timestamp': None,
-                    'content_hashes': {}  # Track content hashes for change detection
+                    'content_hashes': {}
                 }
                 logger.info("Initialized new scrape state")
         except Exception as e:
@@ -79,11 +78,9 @@ class WebContentProcessor:
                 max_workers=self.max_workers,
                 webdriver_retries=3
             )
-            self.redis_handler = ContentRedisHandler()
             self.embedding_model = EmbeddingModel()
-            
             self.redis_pool = redis.ConnectionPool.from_url(
-                self.redis_handler.redis_url,
+                self.redis_url,
                 max_connections=self.max_workers,
                 db=0
             )
@@ -127,14 +124,12 @@ class WebContentProcessor:
                     stored_hash = self.scrape_state['content_hashes'].get(url)
                     last_modified = self.scrape_state.get('timestamp')
                     
-                    # Check Redis for last modified timestamp
                     redis_key = f"url_map:{hashlib.md5(url.encode()).hexdigest()}"
                     stored_data = await redis_client.get(redis_key)
                     if stored_data:
                         stored_data = json.loads(stored_data)
                         last_modified = stored_data.get('updated_at', last_modified)
                     
-                    # Convert last_modified to datetime if it exists
                     last_modified_dt = None
                     if last_modified:
                         try:
@@ -142,7 +137,6 @@ class WebContentProcessor:
                         except (ValueError, TypeError):
                             last_modified_dt = None
                     
-                    # Determine if content has changed
                     if (stored_hash is None or 
                         stored_hash != new_hash or 
                         (last_modified_dt and 
@@ -269,7 +263,7 @@ class WebContentProcessor:
 
             for i in range(0, len(pdf_chunks), self.batch_size):
                 batch = pdf_chunks[i:i + self.batch_size]
-                logger.debug(f"Processing PDF chunk batch {i//batch_size + 1}: {len(batch)} items")
+                logger.debug(f"Processing PDF chunk batch {i//self.batch_size + 1}: {len(batch)} items")
                 batch_results = await self.process_batch(batch)
                 results['processed_chunks'] += batch_results['processed']
                 results['updated_chunks'] += batch_results['updated']
@@ -307,8 +301,6 @@ class WebContentProcessor:
         try:
             if hasattr(self, 'pipeline'):
                 self.pipeline.cleanup()
-            if hasattr(self, 'redis_handler'):
-                self.redis_handler.close()
             if hasattr(self, 'embedding_model'):
                 self.embedding_model.cleanup()
             logger.info("Resources cleaned up successfully")

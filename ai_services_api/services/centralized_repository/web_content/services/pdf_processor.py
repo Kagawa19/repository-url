@@ -1,20 +1,17 @@
-# services/web_content/pdf_processor.py
-
 import os
 import logging
 import requests
 import PyPDF2
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 import io
 from urllib.parse import urlparse
 import hashlib
 from datetime import datetime
 import tempfile
 from pathlib import Path
-import fitz  # PyMuPDF
+import fitz
 import re
 from ai_services_api.services.centralized_repository.web_content.config.settings import PDF_CHUNK_SIZE
-
 from ai_services_api.services.centralized_repository.web_content.utils.text_cleaner import TextCleaner
 
 logger = logging.getLogger(__name__)
@@ -36,9 +33,7 @@ class PDFProcessor:
         self.setup_storage()
         self.text_cleaner = TextCleaner()
         self.temp_dir = tempfile.mkdtemp()
-        
-        # Track processed PDFs
-        self.processed_files: Dict[str, str] = {}  # url -> file_path
+        self.processed_files: Dict[str, str] = {}
         logger.info("PDFProcessor initialized successfully")
 
     def setup_storage(self):
@@ -63,7 +58,6 @@ class PDFProcessor:
             Optional[str]: Path to downloaded file
         """
         try:
-            # Check if already downloaded
             if url in self.processed_files:
                 if os.path.exists(self.processed_files[url]):
                     logger.info(f"Using cached PDF for: {url}")
@@ -71,21 +65,16 @@ class PDFProcessor:
             
             logger.info(f"Downloading PDF from: {url}")
             response = requests.get(url, timeout=timeout, stream=True)
-            
             if response.status_code == 200:
-                # Check if it's actually a PDF
                 content_type = response.headers.get('content-type', '').lower()
                 if 'pdf' not in content_type:
                     logger.warning(f"URL does not point to a PDF: {url}")
                     return None
                 
-                # Generate filename
                 filename = os.path.join(
                     self.pdf_dir,
                     f"{hashlib.md5(url.encode()).hexdigest()}.pdf"
                 )
-                
-                # Save file
                 with open(filename, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
@@ -94,10 +83,6 @@ class PDFProcessor:
                 self.processed_files[url] = filename
                 logger.info(f"PDF downloaded to: {filename}")
                 return filename
-                
-            logger.error(f"Failed to download PDF. Status code: {response.status_code}")
-            return None
-            
         except requests.RequestException as e:
             logger.error(f"Error downloading PDF from {url}: {str(e)}")
             return None
@@ -118,14 +103,11 @@ class PDFProcessor:
         try:
             doc = fitz.open(file_path)
             text = []
-            
             for page_num in range(len(doc)):
                 page = doc[page_num]
                 text.append(page.get_text())
-                
             doc.close()
             return "\n".join(text)
-            
         except Exception as e:
             logger.error(f"Error extracting text with PyMuPDF: {str(e)}")
             return None
@@ -162,21 +144,14 @@ class PDFProcessor:
             Optional[str]: Extracted text
         """
         try:
-            # Try PyMuPDF first
             text = self.extract_text_with_pymupdf(file_path)
-            
-            # Fallback to pdfplumber if needed
             if not text or not text.strip():
                 text = self.extract_text_with_pdfplumber(file_path)
-                
             if text:
-                # Clean the extracted text
                 cleaned_text = self.text_cleaner.clean_pdf_text(text)
                 return cleaned_text
-                
             logger.warning(f"No text extracted from: {file_path}")
             return None
-            
         except Exception as e:
             logger.error(f"Error extracting text from PDF {file_path}: {str(e)}")
             return None
@@ -195,38 +170,26 @@ class PDFProcessor:
             chunks = []
             current_chunk = []
             current_length = 0
-            
-            # Split by paragraphs first
             paragraphs = text.split('\n\n')
-            
             for paragraph in paragraphs:
-                # Split long paragraphs if needed
                 words = paragraph.split()
-                
                 for word in words:
-                    word_length = len(word) + 1  # +1 for space
-                    
+                    word_length = len(word) + 1
                     if current_length + word_length > self.chunk_size:
-                        if current_chunk:  # Only append if there's content
+                        if current_chunk:
                             chunks.append(' '.join(current_chunk))
                         current_chunk = [word]
                         current_length = word_length
                     else:
                         current_chunk.append(word)
                         current_length += word_length
-                
-                # Add paragraph break
                 if current_chunk:
                     chunks.append(' '.join(current_chunk))
                 current_chunk = []
                 current_length = 0
-            
-            # Add any remaining content
             if current_chunk:
                 chunks.append(' '.join(current_chunk))
-            
             return [chunk for chunk in chunks if chunk.strip()]
-            
         except Exception as e:
             logger.error(f"Error chunking text: {str(e)}")
             return []
@@ -244,17 +207,13 @@ class PDFProcessor:
         try:
             doc = fitz.open(file_path)
             metadata = doc.metadata
-            
-            # Add additional metadata
             metadata.update({
                 'page_count': len(doc),
                 'file_size': os.path.getsize(file_path),
                 'extracted_at': datetime.now().isoformat()
             })
-            
             doc.close()
             return metadata
-            
         except Exception as e:
             logger.error(f"Error extracting PDF metadata: {str(e)}")
             return {}
@@ -271,25 +230,18 @@ class PDFProcessor:
         """
         try:
             logger.info(f"Processing PDF: {pdf_url}")
-            
-            # Download PDF
             pdf_path = self.download_pdf(pdf_url)
             if not pdf_path:
                 return None
-            
-            # Extract text
             text = self.extract_text_from_pdf(pdf_path)
             if not text:
                 return None
-            
-            # Create chunks
             chunks = self.chunk_text(text)
             if not chunks:
                 return None
-            
-            # Get metadata
             metadata = self.get_pdf_metadata(pdf_path)
-            
+            content_hash = hashlib.md5(' '.join(chunks).encode()).hexdigest()
+            logger.debug(f"Processed PDF {pdf_url}: {len(chunks)} chunks, hash: {content_hash}")
             return {
                 'url': pdf_url,
                 'file_path': pdf_path,
@@ -298,9 +250,8 @@ class PDFProcessor:
                 'total_length': len(text),
                 'metadata': metadata,
                 'timestamp': datetime.now().isoformat(),
-                'hash': hashlib.sha256(text.encode()).hexdigest()
+                'hash': content_hash
             }
-            
         except Exception as e:
             logger.error(f"Error processing PDF {pdf_url}: {str(e)}")
             return None
@@ -324,24 +275,21 @@ class PDFProcessor:
             except Exception as e:
                 logger.error(f"Error processing PDF {url}: {str(e)}")
                 continue
+        logger.info(f"Processed {len(results)} PDFs")
         return results
 
     def cleanup(self):
         """Clean up temporary files and resources"""
         try:
-            # Remove temporary directory
             import shutil
             shutil.rmtree(self.temp_dir, ignore_errors=True)
-            
-            # Optionally remove downloaded PDFs
             if os.getenv('CLEANUP_PDFS', 'false').lower() == 'true':
                 for file_path in self.processed_files.values():
                     try:
                         os.remove(file_path)
                     except:
                         pass
-                        
-            logger.info("Cleanup completed successfully")
+            logger.info("PDF cleanup completed")
         except Exception as e:
             logger.error(f"Error during cleanup: {str(e)}")
 
