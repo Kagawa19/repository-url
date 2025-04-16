@@ -594,7 +594,7 @@ class MessageHandler:
                     print(f"[INFO] Final yield: expert list")
                     yield formatted_text
                 elif content_type == "publication_list":
-                    formatted_text = self._format_publication_list_fixed(structured_buffer)
+                    formatted_text = self._format_publications_list_fixed(structured_buffer)
                     print(f"[INFO] Final yield: publication list")
                     yield formatted_text
                 else:
@@ -620,7 +620,7 @@ class MessageHandler:
                         print(f"[ERROR-RECOVERY] Yielding expert list after error")
                         yield formatted_text
                     elif content_type == "publication_list":
-                        formatted_text = self._format_publication_list_fixed(structured_buffer)
+                        formatted_text = self._format_publications_list_fixed(structured_buffer)
                         print(f"[ERROR-RECOVERY] Yielding publication list after error")
                         yield formatted_text
                     else:
