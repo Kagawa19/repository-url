@@ -567,7 +567,7 @@ class MessageHandler:
                     print(f"[DEBUG] Appending to publication buffer: {text[:60]}...")
                     if re.search(r'Would you like more detailed|Is there anything else', structured_buffer):
                         structured_buffer = re.sub(r'^(\s*[}\]]+\s*)+', '', structured_buffer)
-                        formatted_text = self._format_publication_list_fixed(structured_buffer)
+                        formatted_text = self._format_publications_list_fixed(structured_buffer)
                         print(f"[INFO] Yielding formatted publication list")
                         yield formatted_text
                         in_structured_content = False
