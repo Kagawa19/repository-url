@@ -411,111 +411,161 @@ class MessageHandler:
         
         # Join all lines with newlines
         return "\n".join(lines)
-  
 
     def _format_publication_list_fixed(self, publications_text: str) -> str:
         """
         Parses raw publication text and returns a clean, numbered, consistently formatted list.
         Each publication gets a new number. Only the title is bolded.
         """
-        print("\nStarting formatting of publication list...")
-
         result = ""
 
         # Extract entries ignoring original numbering or bullets
         pub_entries = re.split(r'\n\s*\n', publications_text.strip())
-        print(f"\nSplit into {len(pub_entries)} publication entries.")
-
+        
         for i, entry in enumerate(pub_entries):
-            print(f"\nProcessing publication {i + 1}")
             entry = entry.strip()
+            if not entry:
+                continue
 
             # Extract the first non-empty line as the title
             lines = entry.splitlines()
             title = lines[0].strip() if lines else f"Publication {i+1}"
-            title = re.sub(r'\*([^*]+)\*', r'\1', title)
-            title = re.sub(r'\*\*([^*]+)\*\*', r'\1', title)
-            print(f"  Title: {title}")
-
+            
+            # Remove existing formatting but ensure title is bold
+            title = re.sub(r'\*\*([^*]+)\*\*', r'\1', title)  # Remove existing bold
+            title = re.sub(r'\*([^*]+)\*', r'\1', title)      # Remove existing italics
+            
+            # Add numbered entry with bold title
             result += f"{i + 1}. **{title}**\n"
 
-            # Remaining lines (metadata fields)
-            rest_of_entry = "\n".join(lines[1:]).strip()
-            if rest_of_entry:
-                result += f"{rest_of_entry}\n"
+            # Process metadata fields
+            metadata_lines = []
+            for line in lines[1:]:
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                # Format DOI links
+                if re.search(r'DOI:', line, re.IGNORECASE):
+                    doi_match = re.search(r'DOI:?\s*([^\s]+)', line, re.IGNORECASE)
+                    if doi_match:
+                        doi = doi_match.group(1).strip()
+                        if not doi.startswith('http'):
+                            doi = f"https://doi.org/{doi}"
+                        metadata_lines.append(f"   **DOI:** [Check it out]({doi})")
+                # Format summary/abstract
+                elif re.search(r'(Summary|Abstract):', line, re.IGNORECASE):
+                    summary_match = re.search(r'(?:Summary|Abstract):?\s*(.*)', line, re.IGNORECASE)
+                    if summary_match:
+                        summary = summary_match.group(1).strip()
+                        metadata_lines.append(f"   **Summary:** {summary}")
+                # Keep other metadata lines
+                else:
+                    metadata_lines.append(f"   {line}")
+                    
+            # Add all metadata with proper spacing
+            if metadata_lines:
+                result += "\n".join(metadata_lines) + "\n"
+                
+            # Add blank line between entries
+            result += "\n"
 
-            result += "\n"  # Add blank line between entries
-
-        print("\nFinal formatted result:\n", result)
+        # Add closing line
+        result += "\nYou can ask for more details about any of these publications or request information about related research."
+        
         return result
-
-
-   
-
+  
 
     def _format_expert_list_fixed(self, experts_text: str) -> str:
         """
         Parses input text and produces a clean, consistent expert list.
-        Supports both structured lists and paragraph-style text.
+        Ensures each expert has complete information including name, designation, theme, 
+        unit, and knowledge expertise with proper formatting.
         """
         # Add header
-        result = ""
+        result = "# APHRC Experts\n\n"
 
-        # Try to find paragraph-style expert entries
-        expert_entries = re.findall(r'([A-Z][a-z]+(?:\s[A-Z][a-z]+)*):\s+(.*?)(?=\n[A-Z][a-z]+:|$)', experts_text, re.DOTALL)
-
+        # Try to extract expert entries
+        expert_entries = re.findall(r'\d+\.\s+\*\*([^*]+)\*\*(?:(?!\d+\.).)*', experts_text, re.DOTALL)
+        
         if not expert_entries:
-            # Fallback to bullet or dash or numbered format
-            expert_entries = re.findall(r'\d+\..*?(?=\d+\.|$)', experts_text, re.DOTALL)
-            if not expert_entries:
-                expert_entries = re.findall(r'[-•*].*?(?=[-•*]|$)', experts_text, re.DOTALL)
-
-        if not expert_entries:
-            return "# APHRC Experts\n\n" + re.sub(r'\*([^*]+)\*', r'**\1**', experts_text)
-
+            # Try alternative patterns if numbered format not found
+            expert_entries = re.findall(r'[-•*]\s+(.*?)(?=[-•*]|$)', experts_text, re.DOTALL)
+        
+        # Process each expert entry
         for i, entry in enumerate(expert_entries):
-            if isinstance(entry, tuple):
-                name, description = entry
-            else:
-                # fallback structure
-                name_match = re.match(r'(?:\d+\.|[-•*])?\s*([^\n:]+):?\s*(.*)', entry.strip(), re.DOTALL)
-                if name_match:
-                    name = name_match.group(1).strip()
-                    description = name_match.group(2).strip()
-                else:
-                    name = "Expert"
-                    description = entry.strip()
-
+            # Clean up the entry
+            entry = entry.strip()
+            
+            # Extract the name
+            name_match = re.search(r'\*\*([^*]+)\*\*', entry)
+            name = name_match.group(1) if name_match else f"Expert {i+1}"
+            
+            # Start with numbered list and bold name
             result += f"{i + 1}. **{name}**\n"
-
-            # Extract Designation
-            designation = re.search(r'(?:An?|The)?\s*(.*?)\s+in\s+the\s+(.*?)\s+theme', description)
-            if designation:
-                result += f"   **Designation:** {designation.group(1).strip()}\n"
-                result += f"   **Theme:** {designation.group(2).strip()}\n"
-
-            # Extract Unit
-            unit = re.search(r'within\s+the\s+(.*?)\s+unit', description)
-            if unit:
-                result += f"   **Unit:** {unit.group(1).strip()}\n"
-
-            # Extract Expertise
-            expertise = re.findall(r'expertise.*?in\s+(.*?)(?:\.|\n|$)', description, re.IGNORECASE)
-            if expertise:
-                result += f"   **Knowledge & Expertise:** {', '.join(e.strip() for e in expertise)}\n"
-            else:
-                # Try fallback extraction from keywords
-                fallback = re.findall(r'specializes in\s+(.*?)(?:\.|\n|$)', description)
-                if fallback:
-                    result += f"   **Knowledge & Expertise:** {', '.join(e.strip() for e in fallback)}\n"
-
-            if i < len(expert_entries) - 1:
-                result += "\n"
-
-        result += "\nYou can ask for more details about any of these experts or request information about their publications."
-
+            
+            # Extract designation
+            designation_match = re.search(r'(?:Designation|Position):\s*([^\n]+)', entry, re.IGNORECASE)
+            if designation_match:
+                result += f"   **Designation:** {designation_match.group(1).strip()}\n"
+            
+            # Extract theme with expansion
+            theme_match = re.search(r'Theme:\s*([^\n]+)', entry, re.IGNORECASE)
+            if theme_match:
+                theme = theme_match.group(1).strip()
+                # Add expansion for common abbreviations
+                theme_expansions = {
+                    'HAW': 'Health and Wellbeing',
+                    'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
+                    'UHP': 'Urban Health and Poverty',
+                    'ECD': 'Early Childhood Development',
+                    'PEC': 'Population, Environment, and Climate'
+                }
+                
+                # Check if theme is an abbreviation that needs expansion
+                for abbr, expansion in theme_expansions.items():
+                    if abbr in theme:
+                        theme = theme.replace(abbr, f"{abbr} ({expansion})")
+                        break
+                        
+                result += f"   **Theme:** {theme}\n"
+            
+            # Extract unit with expansion
+            unit_match = re.search(r'Unit:\s*([^\n]+)', entry, re.IGNORECASE)
+            if unit_match:
+                unit = unit_match.group(1).strip()
+                # Add expansion for common abbreviations
+                unit_expansions = {
+                    'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
+                    'RSD': 'Research Systems Development',
+                    'IDSSS': 'Innovations and Data Systems Support Services'
+                }
+                
+                # Check if unit is an abbreviation that needs expansion
+                for abbr, expansion in unit_expansions.items():
+                    if abbr in unit:
+                        unit = unit.replace(abbr, f"{abbr} ({expansion})")
+                        break
+                        
+                result += f"   **Unit:** {unit}\n"
+            
+            # Extract knowledge & expertise
+            expertise_match = re.search(r'(?:Knowledge|Expertise).*?:\s*([^\n]+)', entry, re.IGNORECASE)
+            if expertise_match:
+                expertise = expertise_match.group(1).strip()
+                # Format as pipe-separated values if commas exist
+                if ',' in expertise:
+                    expertise_items = [item.strip() for item in expertise.split(',')]
+                    expertise = " | ".join(expertise_items)
+                result += f"   **Knowledge & Expertise:** {expertise}\n"
+            
+            # Add space between experts
+            result += "\n"
+        
+        # Add closing line
+        result += "You can ask for more details about any of these experts or request information about their publications."
+        
         return result
-
 
     async def process_stream_response(self, response_stream):
         """
