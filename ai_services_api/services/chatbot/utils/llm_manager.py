@@ -1518,113 +1518,7 @@ class GeminiLLMManager:
 
    
 
-    def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
-        """
-        Format expert information into Markdown format for rendering in the frontend.
-        
-        Args:
-            experts: List of expert dictionaries
-            
-        Returns:
-            Formatted Markdown string with structured expert presentations
-        """
-        if not experts:
-            return "I couldn't find any expert information on this topic. Would you like me to help you search for something else?"
-
-        # Create header based on the number of experts
-        markdown_text = "# Experts in Health Sciences at APHRC:\n\n" if len(experts) > 1 else "# Expert Profile:\n\n"
-
-        for idx, expert in enumerate(experts):
-            try:
-                # Extract name components
-                first_name = expert.get('first_name', '').strip()
-                last_name = expert.get('last_name', '').strip()
-                full_name = f"{first_name} {last_name}".strip()
-                
-                # Use numbered list with clear formatting
-                markdown_text += f"{idx + 1}. **{full_name}**\n\n"
-
-                # Designation (not bold)
-                designation = expert.get('designation', '')
-                if designation:
-                    markdown_text += f"    - Designation: {designation}\n\n"
-                
-                # Theme
-                theme = expert.get('theme', '')
-                if theme:
-                    theme_expansion = {
-                        'HAW': 'Health and Wellbeing',
-                        'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
-                        'UHP': 'Urban Health and Poverty',
-                        'ECD': 'Early Childhood Development',
-                        'PEC': 'Population, Environment, and Climate'
-                    }
-                    theme_full = f"{theme} ({theme_expansion.get(theme, '')})" if theme in theme_expansion else theme
-                    markdown_text += f"    - Theme: {theme_full}\n\n"
-                
-                # Unit
-                unit = expert.get('unit', '')
-                if unit:
-                    unit_expansion = {
-                        'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
-                        'RSD': 'Research Systems Development',
-                        'IDSSS': 'Innovations and Data Systems Support Services',
-                        'KDHS': 'Kenya Demographic Health Survey'
-                    }
-                    unit_full = f"{unit} ({unit_expansion.get(unit, '')})" if unit in unit_expansion else unit
-                    markdown_text += f"    - Unit: {unit_full}\n\n"
-
-                # Knowledge & Expertise
-                knowledge_expertise = expert.get('knowledge_expertise', '')
-                if knowledge_expertise:
-                    if isinstance(knowledge_expertise, str) and ',' in knowledge_expertise:
-                        expertise_items = [item.strip() for item in knowledge_expertise.split(',')][:3]
-                        markdown_text += f"    - Knowledge & Expertise: {' | '.join(expertise_items)}\n\n"
-                    elif isinstance(knowledge_expertise, list):
-                        expertise_items = [str(item).strip() for item in knowledge_expertise][:3]
-                        markdown_text += f"    - Knowledge & Expertise: {' | '.join(expertise_items)}\n\n"
-                    else:
-                        markdown_text += f"    - Knowledge & Expertise: {knowledge_expertise}\n\n"
-                else:
-                    expertise_fields = expert.get('expertise', [])
-                    if expertise_fields:
-                        if isinstance(expertise_fields, list):
-                            expertise_str = " | ".join(str(item) for item in expertise_fields[:3])
-                        elif isinstance(expertise_fields, dict):
-                            expertise_str = " | ".join(str(v) for v in list(expertise_fields.values())[:3])
-                        else:
-                            expertise_str = str(expertise_fields)
-                        markdown_text += f"    - Knowledge & Expertise: {expertise_str}\n\n"
-
-                # Bio
-                bio = expert.get('bio', '')
-                if bio:
-                    if len(bio) > 300:
-                        bio_words = bio.split()
-                        if len(bio_words) > 50:
-                            bio = ' '.join(bio_words[:50]) + '...'
-                    markdown_text += f"    - Bio: {bio}\n\n"
-
-                # Publications
-                publications = expert.get('publications', [])
-                if publications:
-                    markdown_text += "    - Notable publications:\n\n"
-                    for pub in publications[:2]:
-                        pub_title = pub.get('title', 'Untitled')
-                        pub_year = pub.get('publication_year', '')
-                        year_text = f" ({pub_year})" if pub_year else ""
-                        markdown_text += f"        - \"{pub_title}\"{year_text}\n\n"
-
-                # Extra space between experts
-                if idx < len(experts) - 1:
-                    markdown_text += "\n"
-
-            except Exception as e:
-                logger.error(f"Error formatting expert {idx + 1}: {e}")
-                continue
-
-        markdown_text += "\nWould you like more detailed information about any of these experts? You can ask by name or area of expertise."
-        return markdown_text
+    
 
 
     def safely_decode_binary_data(self, binary_data, default_encoding='utf-8'):
@@ -1661,46 +1555,162 @@ class GeminiLLMManager:
             logger.warning(f"All decoding attempts failed: {e}")
             return None
 
+    def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
+        """
+        Format expert information into Markdown format for rendering in the frontend.
+        """
+        if not experts:
+            return "I couldn't find any expert information on this topic. Would you like me to help you search for something else?"
+
+        markdown_text = "# Experts in Health Sciences at APHRC:\n\n" if len(experts) > 1 else "# Expert Profile:\n\n"
+
+        for idx, expert in enumerate(experts):
+            try:
+                first_name = expert.get('first_name', '').strip()
+                last_name = expert.get('last_name', '').strip()
+                full_name = f"{first_name} {last_name}".strip()
+                markdown_text += f"{idx + 1}. **{full_name}**\n\n"
+
+                designation = expert.get('designation', '')
+                if designation:
+                    markdown_text += f"    - Designation: {designation}\n\n"
+
+                theme = expert.get('theme', '')
+                if theme:
+                    theme_expansion = {
+                        'HAW': 'Health and Wellbeing',
+                        'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
+                        'UHP': 'Urban Health and Poverty',
+                        'ECD': 'Early Childhood Development',
+                        'PEC': 'Population, Environment, and Climate'
+                    }
+                    theme_full = f"{theme} ({theme_expansion.get(theme, '')})" if theme in theme_expansion else theme
+                    markdown_text += f"    - Theme: {theme_full}\n\n"
+
+                unit = expert.get('unit', '')
+                if unit:
+                    unit_expansion = {
+                        'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
+                        'RSD': 'Research Systems Development',
+                        'IDSSS': 'Innovations and Data Systems Support Services',
+                        'KDHS': 'Kenya Demographic Health Survey'
+                    }
+                    unit_full = f"{unit} ({unit_expansion.get(unit, '')})" if unit in unit_expansion else unit
+                    markdown_text += f"    - Unit: {unit_full}\n\n"
+
+                # Knowledge & Expertise
+                knowledge_expertise = expert.get('knowledge_expertise', '')
+                if knowledge_expertise:
+                    knowledge_expertise = self.clean_response(knowledge_expertise)
+                    if isinstance(knowledge_expertise, str) and ',' in knowledge_expertise:
+                        expertise_items = [item.strip() for item in knowledge_expertise.split(',')][:3]
+                        markdown_text += f"    - Knowledge & Expertise: {' | '.join(expertise_items)}\n\n"
+                    elif isinstance(knowledge_expertise, list):
+                        expertise_items = [str(item).strip() for item in knowledge_expertise][:3]
+                        markdown_text += f"    - Knowledge & Expertise: {' | '.join(expertise_items)}\n\n"
+                    else:
+                        markdown_text += f"    - Knowledge & Expertise: {knowledge_expertise}\n\n"
+                else:
+                    expertise_fields = expert.get('expertise', [])
+                    if expertise_fields:
+                        if isinstance(expertise_fields, list):
+                            expertise_str = " | ".join(str(item) for item in expertise_fields[:3])
+                        elif isinstance(expertise_fields, dict):
+                            expertise_str = " | ".join(str(v) for v in list(expertise_fields.values())[:3])
+                        else:
+                            expertise_str = str(expertise_fields)
+                        markdown_text += f"    - Knowledge & Expertise: {expertise_str}\n\n"
+
+                # Bio
+                bio = expert.get('bio', '')
+                if bio:
+                    bio = self.clean_response(bio)
+                    if len(bio) > 300:
+                        bio_words = bio.split()
+                        if len(bio_words) > 50:
+                            bio = ' '.join(bio_words[:50]) + '...'
+                    markdown_text += f"    - Bio: {bio}\n\n"
+
+                # Publications
+                publications = expert.get('publications', [])
+                if publications:
+                    markdown_text += "    - Notable publications:\n\n"
+                    for pub in publications[:2]:
+                        pub_title = pub.get('title', 'Untitled')
+                        pub_year = pub.get('publication_year', '')
+                        year_text = f" ({pub_year})" if pub_year else ""
+                        markdown_text += f"        - \"{pub_title}\"{year_text}\n\n"
+
+                if idx < len(experts) - 1:
+                    markdown_text += "\n"
+
+            except Exception as e:
+                logger.error(f"Error formatting expert {idx + 1}: {e}")
+                continue
+
+        markdown_text += "\nWould you like more detailed information about any of these experts? You can ask by name or area of expertise."
+        return markdown_text
+
+
     def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
-        Format publication information into Markdown format with focused presentation.
-        Includes title, summary (trimmed), and DOI link with 'Check it out' text.
+        Format publication information into Markdown format for rendering in the frontend.
+        
+        Args:
+            publications: List of publication dictionaries
+
+        Returns:
+            Formatted Markdown string with structured publication listings
         """
         if not publications:
             return "I couldn't find any publications matching your criteria. Would you like me to suggest some related research areas instead?"
 
-        markdown_text = "# APHRC Publications\n\n"
+        markdown_text = "# APHRC Publications:\n\n" if len(publications) > 1 else "# Featured Publication:\n\n"
 
         for idx, publication in enumerate(publications):
             try:
-                # Add numbering before the title
+                # Title
                 title = publication.get('title', 'Untitled Publication').strip()
-                markdown_text += f"{idx + 1}. **{title}**\n"
+                markdown_text += f"{idx + 1}. **{title}**\n\n"
 
-                # Add summary/abstract (trimmed to 200 characters max, ending at word boundary)
-                summary = publication.get('abstract') or publication.get('summary') or ""
+                # Summary or Abstract
+                summary = publication.get('abstract') or publication.get('summary') or ''
                 if summary:
                     trimmed_summary = summary.strip()
                     if len(trimmed_summary) > 200:
-                        # Trim at the nearest word boundary
                         trimmed_summary = trimmed_summary[:200].rsplit(" ", 1)[0] + "..."
-                    markdown_text += f"   **Summary:** {trimmed_summary}\n"
+                    markdown_text += f"    - Summary: {trimmed_summary}\n\n"
 
-                # Add DOI with consistent formatting
-                if publication.get('doi'):
-                    doi = publication['doi'].strip()
+                # DOI
+                doi = publication.get('doi', '').strip()
+                if doi:
                     if not doi.startswith('http'):
                         doi = f"https://doi.org/{doi}"
-                    markdown_text += f"   **DOI:** [Check it out]({doi})\n"
+                    markdown_text += f"    - DOI: [Check it out]({doi})\n\n"
 
+                # Extra spacing between publications
                 if idx < len(publications) - 1:
                     markdown_text += "\n"
 
             except Exception as e:
                 logger.error(f"Error formatting publication {idx + 1}: {e}")
+                continue
 
-        markdown_text += "\nYou can ask for more details about any of these publications or request information about related research."
+        markdown_text += "\nWould you like more information about any of these publications or suggestions for related research topics?"
         return markdown_text
+
+
+    def clean_response(self, response: str) -> str:
+        """
+        Removes leading metadata JSON (if any) from the beginning of the response string.
+        """
+        import re
+        pattern = r'^\s*\{.*?"is_metadata"\s*:\s*true.*?\}\s*'
+        match = re.match(pattern, response, re.DOTALL)
+        if match:
+            return response[match.end():].lstrip()
+        return response
+
 
         
     async def generate_async_response(self, message: str, user_interests: str = "") -> AsyncGenerator[str, None]:
