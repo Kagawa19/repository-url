@@ -273,7 +273,10 @@ class MessageHandler:
                     print(f"[DEBUG] Skipping unknown chunk format: {type(chunk)}")
                     continue
 
-                print(f"[DEBUG] Raw text chunk: {text}")
+                # Clean the text to remove any leading metadata JSON
+                text = self.clean_response(text)
+
+                print(f"[DEBUG] Cleaned text chunk: {text}")
 
                 if not text.strip():
                     continue
@@ -288,7 +291,7 @@ class MessageHandler:
                 if not in_structured_content and (
                     re.search(r'\d+\.\s+\*\*[^*]+\*\*', text) or
                     re.search(r'\d+\.\s+[^*\n]+', text) or
-                    re.search(r'# Experts|experts (in|at) APHRC|Expert Profile', text) or
+                    re.search(r'# Experts|experts (in|   # Experts|experts (in|at) APHRC|Expert Profile', text) or
                     re.search(r'([A-Z][a-z]+\s+[A-Z][a-z]+)[^A-Z]*?specializes in', text) or
                     re.search(r'\d+\.\s+\*\*[^*]+\*\*\s*\n\s*\*\*Designation:', text) or
                     re.search(r'\d+\.\s+\*\*[^*]+\*\*\s*\n\s*\*\*Theme:', text) or

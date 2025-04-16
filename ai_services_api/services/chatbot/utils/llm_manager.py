@@ -1558,23 +1558,35 @@ class GeminiLLMManager:
     def format_expert_context(self, experts: List[Dict[str, Any]]) -> str:
         """
         Format expert information into Markdown format for rendering in the frontend.
+        
+        Args:
+            experts: List of expert dictionaries
+            
+        Returns:
+            Formatted Markdown string with structured expert presentations
         """
         if not experts:
             return "I couldn't find any expert information on this topic. Would you like me to help you search for something else?"
 
+        # Create header based on the number of experts
         markdown_text = "# Experts in Health Sciences at APHRC:\n\n" if len(experts) > 1 else "# Expert Profile:\n\n"
 
         for idx, expert in enumerate(experts):
             try:
+                # Extract name components
                 first_name = expert.get('first_name', '').strip()
                 last_name = expert.get('last_name', '').strip()
                 full_name = f"{first_name} {last_name}".strip()
+                
+                # Use numbered list with clear formatting
                 markdown_text += f"{idx + 1}. **{full_name}**\n\n"
 
+                # Designation (not bold)
                 designation = expert.get('designation', '')
                 if designation:
                     markdown_text += f"    - Designation: {designation}\n\n"
-
+                
+                # Theme
                 theme = expert.get('theme', '')
                 if theme:
                     theme_expansion = {
@@ -1586,7 +1598,8 @@ class GeminiLLMManager:
                     }
                     theme_full = f"{theme} ({theme_expansion.get(theme, '')})" if theme in theme_expansion else theme
                     markdown_text += f"    - Theme: {theme_full}\n\n"
-
+                
+                # Unit
                 unit = expert.get('unit', '')
                 if unit:
                     unit_expansion = {
@@ -1601,7 +1614,6 @@ class GeminiLLMManager:
                 # Knowledge & Expertise
                 knowledge_expertise = expert.get('knowledge_expertise', '')
                 if knowledge_expertise:
-                    knowledge_expertise = self.clean_response(knowledge_expertise)
                     if isinstance(knowledge_expertise, str) and ',' in knowledge_expertise:
                         expertise_items = [item.strip() for item in knowledge_expertise.split(',')][:3]
                         markdown_text += f"    - Knowledge & Expertise: {' | '.join(expertise_items)}\n\n"
@@ -1624,7 +1636,6 @@ class GeminiLLMManager:
                 # Bio
                 bio = expert.get('bio', '')
                 if bio:
-                    bio = self.clean_response(bio)
                     if len(bio) > 300:
                         bio_words = bio.split()
                         if len(bio_words) > 50:
@@ -1641,6 +1652,7 @@ class GeminiLLMManager:
                         year_text = f" ({pub_year})" if pub_year else ""
                         markdown_text += f"        - \"{pub_title}\"{year_text}\n\n"
 
+                # Extra space between experts
                 if idx < len(experts) - 1:
                     markdown_text += "\n"
 
@@ -1654,64 +1666,47 @@ class GeminiLLMManager:
 
     def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
-        Format publication information into Markdown format for rendering in the frontend.
-        
-        Args:
-            publications: List of publication dictionaries
-
-        Returns:
-            Formatted Markdown string with structured publication listings
+        Format publication information into Markdown format with focused presentation.
+        Includes title, summary (trimmed), and DOI link with 'Check it out' text.
         """
         if not publications:
             return "I couldn't find any publications matching your criteria. Would you like me to suggest some related research areas instead?"
 
-        markdown_text = "# APHRC Publications:\n\n" if len(publications) > 1 else "# Featured Publication:\n\n"
+        markdown_text = "# APHRC Publications\n\n"
 
         for idx, publication in enumerate(publications):
             try:
-                # Title
+                # Add numbering before the title
                 title = publication.get('title', 'Untitled Publication').strip()
-                markdown_text += f"{idx + 1}. **{title}**\n\n"
+                markdown_text += f"{idx + 1}. **{title}**\n"
 
-                # Summary or Abstract
-                summary = publication.get('abstract') or publication.get('summary') or ''
+                # Add summary/abstract (trimmed to 200 characters max, ending at word boundary)
+                summary = publication.get('abstract') or publication.get('summary') or ""
                 if summary:
                     trimmed_summary = summary.strip()
                     if len(trimmed_summary) > 200:
+                        # Trim at the nearest word boundary
                         trimmed_summary = trimmed_summary[:200].rsplit(" ", 1)[0] + "..."
-                    markdown_text += f"    - Summary: {trimmed_summary}\n\n"
+                    markdown_text += f"   **Summary:** {trimmed_summary}\n"
 
-                # DOI
-                doi = publication.get('doi', '').strip()
-                if doi:
+                # Add DOI with consistent formatting
+                if publication.get('doi'):
+                    doi = publication['doi'].strip()
                     if not doi.startswith('http'):
                         doi = f"https://doi.org/{doi}"
-                    markdown_text += f"    - DOI: [Check it out]({doi})\n\n"
+                    markdown_text += f"   **DOI:** [Check it out]({doi})\n"
 
-                # Extra spacing between publications
                 if idx < len(publications) - 1:
                     markdown_text += "\n"
 
             except Exception as e:
                 logger.error(f"Error formatting publication {idx + 1}: {e}")
-                continue
 
-        markdown_text += "\nWould you like more information about any of these publications or suggestions for related research topics?"
+        markdown_text += "\nYou can ask for more details about any of these publications or request information about related research."
         return markdown_text
 
 
-    def clean_response(self, response: str) -> str:
-        """
-        Removes leading metadata JSON (if any) from the beginning of the response string.
-        """
-        import re
-        pattern = r'^\s*\{.*?"is_metadata"\s*:\s*true.*?\}\s*'
-        match = re.match(pattern, response, re.DOTALL)
-        if match:
-            return response[match.end():].lstrip()
-        return response
-
-
+  
         
     async def generate_async_response(self, message: str, user_interests: str = "") -> AsyncGenerator[str, None]:
         """
