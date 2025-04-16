@@ -476,61 +476,18 @@ class MessageHandler:
         return result
   
 
-    def _format_expert_list_fixed(self, experts_text: str) -> str:
-        """
-        Parses raw expert text and returns a clean, numbered, consistently formatted list.
-        Each expert gets a new number with proper formatting for all fields.
-        """
-        result = "# APHRC Experts\n\n"
+    def _format_expert_list_fixed(self, text):
+        intro = "I am happy to provide you with a list of experts in Health Sciences at the African Population and Health Research Center (APHRC).\n\nHere are some of our experts in the field:\n"
+        
+        experts = re.findall(r'(\d+\.\s+\*\*.+?\*\*.+?)(?=\d+\.|\Z)', text, re.DOTALL)
+        
+        if not experts:
+            # Fallback to parsing with dashes if numbered format isn't detected
+            experts = re.split(r'\n?- ', text)
+            experts = [e.strip() for e in experts if e.strip()]
 
-        # Extract individual expert entries - look for numbered entries first
-        entries = re.split(r'\n\s*\n|\n(?=\d+\.)', experts_text.strip())
-        
-        for i, entry in enumerate(entries):
-            entry = entry.strip()
-            if not entry:
-                continue
-                
-            # Try to extract name with different patterns
-            name_match = re.search(r'\d+\.\s+\*\*([^*]+)\*\*', entry)
-            if not name_match:
-                name_match = re.search(r'\d+\.\s+([A-Z][a-z]+ [A-Z][a-z]+)', entry)
-            if not name_match:
-                name_match = re.search(r'^([A-Z][a-z]+ [A-Z][a-z]+)', entry)
-                
-            name = name_match.group(1).strip() if name_match else f"Expert {i+1}"
-            
-            # Add numbered entry with bold name
-            result += f"{i + 1}. **{name}**\n"
-            
-            # Extract designation
-            designation_match = re.search(r'(?:Designation|Position):\s*([^\n]+)', entry, re.IGNORECASE)
-            if designation_match:
-                result += f"   **Designation:** {designation_match.group(1).strip()}\n"
-                
-            # Extract theme
-            theme_match = re.search(r'Theme:\s*([^\n]+)', entry, re.IGNORECASE)
-            if theme_match:
-                result += f"   **Theme:** {theme_match.group(1).strip()}\n"
-                
-            # Extract unit
-            unit_match = re.search(r'Unit:\s*([^\n]+)', entry, re.IGNORECASE)
-            if unit_match:
-                result += f"   **Unit:** {unit_match.group(1).strip()}\n"
-                
-            # Extract knowledge & expertise
-            expertise_match = re.search(r'(?:Knowledge|Expertise)[^:]*:\s*([^\n]+)', entry, re.IGNORECASE)
-            if expertise_match:
-                expertise = expertise_match.group(1).strip()
-                result += f"   **Knowledge & Expertise:** {expertise}\n"
-                
-            # Add blank line between experts
-            result += "\n"
-        
-        # Add closing message
-        result += "You can ask for more details about any of these experts or request information about their publications."
-        
-        return result
+        formatted = [f"{i+1}. {e.strip()}" for i, e in enumerate(experts)]
+        return f"{intro}\n" + "\n\n".join(formatted) + "\n\nWould you like more detailed information about any of these experts? You can ask by name or area of expertise."
 
     async def process_stream_response(self, response_stream):
         """
