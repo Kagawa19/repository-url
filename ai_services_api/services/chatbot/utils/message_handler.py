@@ -478,91 +478,56 @@ class MessageHandler:
 
     def _format_expert_list_fixed(self, experts_text: str) -> str:
         """
-        Parses input text and produces a clean, consistent expert list.
-        Ensures each expert has complete information including name, designation, theme, 
-        unit, and knowledge expertise with proper formatting.
+        Parses raw expert text and returns a clean, numbered, consistently formatted list.
+        Each expert gets a new number with proper formatting for all fields.
         """
-        # Add header
         result = "# APHRC Experts\n\n"
 
-        # Try to extract expert entries
-        expert_entries = re.findall(r'\d+\.\s+\*\*([^*]+)\*\*(?:(?!\d+\.).)*', experts_text, re.DOTALL)
+        # Extract individual expert entries - look for numbered entries first
+        entries = re.split(r'\n\s*\n|\n(?=\d+\.)', experts_text.strip())
         
-        if not expert_entries:
-            # Try alternative patterns if numbered format not found
-            expert_entries = re.findall(r'[-•*]\s+(.*?)(?=[-•*]|$)', experts_text, re.DOTALL)
-        
-        # Process each expert entry
-        for i, entry in enumerate(expert_entries):
-            # Clean up the entry
+        for i, entry in enumerate(entries):
             entry = entry.strip()
+            if not entry:
+                continue
+                
+            # Try to extract name with different patterns
+            name_match = re.search(r'\d+\.\s+\*\*([^*]+)\*\*', entry)
+            if not name_match:
+                name_match = re.search(r'\d+\.\s+([A-Z][a-z]+ [A-Z][a-z]+)', entry)
+            if not name_match:
+                name_match = re.search(r'^([A-Z][a-z]+ [A-Z][a-z]+)', entry)
+                
+            name = name_match.group(1).strip() if name_match else f"Expert {i+1}"
             
-            # Extract the name
-            name_match = re.search(r'\*\*([^*]+)\*\*', entry)
-            name = name_match.group(1) if name_match else f"Expert {i+1}"
-            
-            # Start with numbered list and bold name
+            # Add numbered entry with bold name
             result += f"{i + 1}. **{name}**\n"
             
             # Extract designation
             designation_match = re.search(r'(?:Designation|Position):\s*([^\n]+)', entry, re.IGNORECASE)
             if designation_match:
                 result += f"   **Designation:** {designation_match.group(1).strip()}\n"
-            
-            # Extract theme with expansion
+                
+            # Extract theme
             theme_match = re.search(r'Theme:\s*([^\n]+)', entry, re.IGNORECASE)
             if theme_match:
-                theme = theme_match.group(1).strip()
-                # Add expansion for common abbreviations
-                theme_expansions = {
-                    'HAW': 'Health and Wellbeing',
-                    'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
-                    'UHP': 'Urban Health and Poverty',
-                    'ECD': 'Early Childhood Development',
-                    'PEC': 'Population, Environment, and Climate'
-                }
+                result += f"   **Theme:** {theme_match.group(1).strip()}\n"
                 
-                # Check if theme is an abbreviation that needs expansion
-                for abbr, expansion in theme_expansions.items():
-                    if abbr in theme:
-                        theme = theme.replace(abbr, f"{abbr} ({expansion})")
-                        break
-                        
-                result += f"   **Theme:** {theme}\n"
-            
-            # Extract unit with expansion
+            # Extract unit
             unit_match = re.search(r'Unit:\s*([^\n]+)', entry, re.IGNORECASE)
             if unit_match:
-                unit = unit_match.group(1).strip()
-                # Add expansion for common abbreviations
-                unit_expansions = {
-                    'SRMNCAH': 'Sexual, Reproductive, Maternal, Newborn, Child, and Adolescent Health',
-                    'RSD': 'Research Systems Development',
-                    'IDSSS': 'Innovations and Data Systems Support Services'
-                }
+                result += f"   **Unit:** {unit_match.group(1).strip()}\n"
                 
-                # Check if unit is an abbreviation that needs expansion
-                for abbr, expansion in unit_expansions.items():
-                    if abbr in unit:
-                        unit = unit.replace(abbr, f"{abbr} ({expansion})")
-                        break
-                        
-                result += f"   **Unit:** {unit}\n"
-            
             # Extract knowledge & expertise
-            expertise_match = re.search(r'(?:Knowledge|Expertise).*?:\s*([^\n]+)', entry, re.IGNORECASE)
+            expertise_match = re.search(r'(?:Knowledge|Expertise)[^:]*:\s*([^\n]+)', entry, re.IGNORECASE)
             if expertise_match:
                 expertise = expertise_match.group(1).strip()
-                # Format as pipe-separated values if commas exist
-                if ',' in expertise:
-                    expertise_items = [item.strip() for item in expertise.split(',')]
-                    expertise = " | ".join(expertise_items)
                 result += f"   **Knowledge & Expertise:** {expertise}\n"
-            
-            # Add space between experts
+                
+            # Add blank line between experts
             result += "\n"
         
-        # Add closing line
+        # Add closing message
         result += "You can ask for more details about any of these experts or request information about their publications."
         
         return result
