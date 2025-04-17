@@ -10,7 +10,7 @@ import os
 import hashlib
 import numpy as np
 import json
-from ...database.database_setup import insert_embedding, update_scrape_state, get_scrape_state, check_content_changes
+from ai_services_api.services.centralized_repository.web_content.database.database_setup import insert_embedding, update_scrape_state, get_scrape_state, check_content_changes
 
 logger = logging.getLogger(__name__)
 
@@ -79,20 +79,21 @@ class WebContentProcessor:
         return asyncio.run(self._async_process_batch(items))
 
     async def _async_process_batch(self, items: List[Dict]) -> Dict[str, int]:
+        """Actual async batch processing method"""
         results = {'processed': 0, 'updated': 0}
         try:
-            for item in items:
-                new_hash = hashlib.md5(item['content'].encode()).hexdigest()
-                if await self.batch_check_content_changes([item]):
-                    embedding = await self.batch_create_embeddings([item])
-                    keys = await self.batch_store_embeddings(embedding)
-                    results['updated'] += len(keys)
-                    self.scrape_state['processed_urls'].append(item['url'])
-                    self.scrape_state['content_hashes'][item['url']] = new_hash
-                    self.save_scrape_state()
-                results['processed'] += 1
+            changed_items = await self.batch_check_content_changes(items)
+            results['processed'] = len(items)
+            if changed_items:
+                item_embeddings = await self.batch_create_embeddings(changed_items)
+                keys = await self.batch_store_embeddings(item_embeddings)
+                results['updated'] = len(keys)
+                self.scrape_state['processed_urls'].extend([item['url'] for item in changed_items])
+                self.save_scrape_state()
         except Exception as e:
-            logger.error(f"Error processing batch: {str(e)}")
+            logger.error(f"Error processing batch: {str(e)}", exc_info=True)
+            self.scrape_state['failed_urls'].extend([item['url'] for item in items])
+            self.save_scrape_state()
         return results
 
     async def batch_check_content_changes(self, items: List[Dict]) -> List[Dict]:
@@ -118,7 +119,7 @@ class WebContentProcessor:
                     changed_items.append(item)
                     self.scrape_state['content_hashes'][url] = new_hash
         except Exception as e:
-            logger.error(f"Error checking content changes: {str(e)}")
+            logger.error(f"Error checking content changes: {str(e)}", exc_info=True)
         return changed_items
 
     async def batch_create_embeddings(self, items: List[Dict]) -> List[tuple]:
@@ -136,36 +137,35 @@ class WebContentProcessor:
                     logger.warning(f"Error in embedding batch {i//batch_size}: {batch_error}")
             return embeddings
         except Exception as e:
-            logger.error(f"Error in batch embedding creation: {str(e)}")
+            logger.error(f"Error in batch embedding creation: {str(e)}", exc_info=True)
             return []
 
     async def batch_store_embeddings(self, item_embeddings: List[tuple]) -> List[str]:
+        """Store embeddings in database"""
         keys = []
-        with get_db_cursor(cursor_factory=DictCursor) as (cursor, conn):
+        for item, embedding in item_embeddings:
             try:
-                for item, embedding in item_embeddings:
-                    content_type = item['content_type']
-                    content_id = item.get('content_id')
-                    if not content_id:
-                        logger.error(f"No content_id for {item.get('url', 'unknown')}")
-                        continue
-                    content_hash = hashlib.md5(item['content'].encode()).hexdigest()
-                    cursor.execute("""
-                        INSERT INTO embeddings (content_type, content_id, embedding, content_hash, timestamp)
-                        VALUES (%s, %s, %s, %s, %s)
-                        RETURNING id
-                    """, (content_type, content_id, Json(embedding.tolist()), content_hash, datetime.now()))
-                    embedding_id = cursor.fetchone()['id']
-                    keys.append(str(embedding_id))
-                conn.commit()
+                content_type = item['content_type']
+                content_id = item.get('content_id')
+                if not content_id:
+                    logger.error(f"No content_id for {item.get('url', 'unknown')}")
+                    continue
+                
+                content_hash = hashlib.md5(item['content'].encode()).hexdigest()
+                embedding_id = insert_embedding(
+                    content_type=content_type,
+                    content_id=content_id,
+                    embedding=embedding.tolist(),
+                    content_hash=content_hash
+                )
+                keys.append(str(embedding_id))
             except Exception as e:
-                conn.rollback()
-                logger.error(f"Error storing batch embeddings: {str(e)}")
-                self.scrape_state['failed_urls'].extend([item.get('url', 'unknown') for item, _ in item_embeddings])
-                return []
+                logger.error(f"Error storing embedding for {item.get('url', 'unknown')}: {str(e)}", exc_info=True)
+                self.scrape_state['failed_urls'].append(item.get('url', 'unknown'))
         return keys
+
     async def process_content(self) -> Dict:
-        """Enhanced processing method with database storage and diagnostics"""
+        """Enhanced processing method with database storage, diagnostics, and retry logic"""
         try:
             logger.info("\n" + "="*50)
             logger.info("Starting Resumable Web Content Processing...")
@@ -177,10 +177,16 @@ class WebContentProcessor:
                 'updated_pages': 0,
                 'processed_chunks': 0,
                 'updated_chunks': 0,
+                'processed_publications': 0,
+                'updated_publications': 0,
+                'retry_attempts': 0,
+                'retry_successes': 0,
                 'timestamp': datetime.now().isoformat(),
                 'processing_details': {
                     'webpage_results': [],
-                    'pdf_results': []
+                    'pdf_results': [],
+                    'publication_results': [],
+                    'retry_results': []
                 }
             }
 
@@ -191,24 +197,63 @@ class WebContentProcessor:
                 self.save_scrape_state()
                 return results
 
+            failed_urls = self.scrape_state['failed_urls'][:]
+            if failed_urls:
+                logger.info(f"Retrying {len(failed_urls)} failed URLs")
+                self.scrape_state['failed_urls'] = []
+                self.save_scrape_state()
+                retry_pipeline = ContentPipeline(max_workers=self.max_workers)
+                retry_successes = 0
+                for url in failed_urls:
+                    try:
+                        page_data = retry_pipeline.web_scraper.get_page_content(url)
+                        if page_data:
+                            processed = retry_pipeline.process_webpage(page_data)
+                            if processed:
+                                batch_results = await self.process_batch([processed])
+                                retry_successes += batch_results['processed']
+                                results['processed_pages'] += batch_results['processed']
+                                results['updated_pages'] += batch_results['updated']
+                                if processed['content_type'] == 'publication':
+                                    results['processed_publications'] += batch_results['processed']
+                                    results['updated_publications'] += batch_results['updated']
+                        else:
+                            self.scrape_state['failed_urls'].append(url)
+                    except Exception as e:
+                        logger.error(f"Retry failed for {url}: {str(e)}", exc_info=True)
+                        self.scrape_state['failed_urls'].append(url)
+                results['retry_attempts'] = len(failed_urls)
+                results['retry_successes'] = retry_successes
+                results['processing_details']['retry_results'].append({
+                    'attempted_urls': len(failed_urls),
+                    'successful_urls': retry_successes
+                })
+                retry_pipeline.cleanup()
+                self.save_scrape_state()
+
             pipeline_results = self.pipeline.run()
             logger.info(f"Pipeline results: {len(pipeline_results['webpage_results'])} webpages, {len(pipeline_results['pdf_results'])} PDFs")
 
             if not pipeline_results['webpage_results'] and not pipeline_results['pdf_results']:
                 logger.warning("No content retrieved from pipeline. Check WEBSITE_URL and WebDriver configuration.")
 
-            for i in range(0, len(pipeline_results['webpage_results']), self.batch_size):
-                batch = pipeline_results['webpage_results'][i:i + self.batch_size]
+            webpage_items = [item for item in pipeline_results['webpage_results'] if item['content_type'] in ['webpage', 'expert', 'publication']]
+            for i in range(0, len(webpage_items), self.batch_size):
+                batch = webpage_items[i:i + self.batch_size]
                 logger.debug(f"Processing webpage batch {i//self.batch_size + 1}: {len(batch)} items")
                 batch_results = await self.process_batch(batch)
                 results['processed_pages'] += batch_results['processed']
                 results['updated_pages'] += batch_results['updated']
+                if any(item['content_type'] == 'publication' for item in batch):
+                    results['processed_publications'] += batch_results['processed']
+                    results['updated_publications'] += batch_results['updated']
                 results['processing_details']['webpage_results'].append({
                     'batch_start_index': i,
                     'batch_size': len(batch),
                     'processed': batch_results['processed'],
                     'updated': batch_results['updated']
                 })
+                self.save_scrape_state()
 
             pdf_chunks = []
             for pdf in pipeline_results['pdf_results']:
@@ -232,12 +277,37 @@ class WebContentProcessor:
                     'processed': batch_results['processed'],
                     'updated': batch_results['updated']
                 })
+                self.save_scrape_state()
+
+            publication_pdfs = [pdf for pdf in pipeline_results['pdf_results'] if pdf.get('content_type') == 'publication']
+            for i in range(0, len(publication_pdfs), self.batch_size):
+                batch = publication_pdfs[i:i + self.batch_size]
+                logger.debug(f"Processing publication PDF batch {i//self.batch_size + 1}: {len(batch)} items")
+                batch_results = await self.process_batch([{
+                    'url': pdf['url'],
+                    'content': ' '.join(pdf['chunks']),
+                    'content_type': 'publication',
+                    'content_id': pdf['publication_id']
+                } for pdf in batch])
+                results['processed_publications'] += batch_results['processed']
+                results['updated_publications'] += batch_results['updated']
+                results['processing_details']['publication_results'].append({
+                    'batch_start_index': i,
+                    'batch_size': len(batch),
+                    'processed': batch_results['processed'],
+                    'updated': batch_results['updated']
+                })
+                self.save_scrape_state()
 
             logger.info(f"""Resumable Web Content Processing Results:
                 - Processed Pages: {results['processed_pages']}
                 - Updated Pages: {results['updated_pages']}
                 - Processed PDF Chunks: {results['processed_chunks']}
                 - Updated PDF Chunks: {results['updated_chunks']}
+                - Processed Publications: {results['processed_publications']}
+                - Updated Publications: {results['updated_publications']}
+                - Retry Attempts: {results['retry_attempts']}
+                - Retry Successes: {results['retry_successes']}
                 - Timestamp: {results['timestamp']}
             """)
 
@@ -248,8 +318,9 @@ class WebContentProcessor:
             return results
 
         except Exception as e:
-            logger.error(f"Error in content processing: {str(e)}")
+            logger.error(f"Error in content processing: {str(e)}", exc_info=True)
             self.scrape_state['timestamp'] = datetime.now().isoformat()
+            self.scrape_state['failed_urls'] = list(set(self.scrape_state['failed_urls']))
             self.save_scrape_state()
             raise
         finally:
@@ -265,7 +336,8 @@ class WebContentProcessor:
             logger.info("Resources cleaned up successfully")
             self.save_scrape_state()
         except Exception as e:
-            logger.error(f"Error during cleanup: {str(e)}")
+            logger.error(f"Error during cleanup: {str(e)}", exc_info=True)
+            self.save_scrape_state()
 
     def close(self):
         self.cleanup()
