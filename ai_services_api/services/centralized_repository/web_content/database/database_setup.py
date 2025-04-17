@@ -1,14 +1,10 @@
-# database/database_setup.py
-
 import logging
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 import psycopg2
-from psycopg2.extras import DictCursor
+from psycopg2.extras import DictCursor, Json
 from contextlib import contextmanager
 from datetime import datetime
 import hashlib
-import redis
-
 from ..config.settings import DATABASE_CONFIG
 
 logger = logging.getLogger(__name__)
@@ -21,133 +17,147 @@ def get_db_cursor(cursor_factory=None):
         conn = psycopg2.connect(**DATABASE_CONFIG)
         cursor = conn.cursor(cursor_factory=cursor_factory)
         yield cursor, conn
+        conn.commit()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Database error: {str(e)}")
+        raise
     finally:
         if conn:
             conn.close()
 
-class DatabaseInitializer:
-    """Minimal database initialization for content hashing and tracking"""
-    
-    def initialize_schema(self):
-        """Initialize minimal database schema"""
-        try:
-            with get_db_cursor() as (cur, conn):
-                # Table to track content hashes
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS content_hashes (
-                        url TEXT PRIMARY KEY,
-                        content_hash TEXT NOT NULL,
-                        last_checked TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                        last_modified TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                
-                # Only store embedding reference in database
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS content_embeddings (
-                        url TEXT PRIMARY KEY,
-                        embedding_key TEXT NOT NULL,
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                
-                conn.commit()
-                logger.info("Schema initialization complete")
-        except Exception as e:
-            logger.error(f"Error initializing schema: {str(e)}")
-            raise
+def insert_webpage(url: str, title: str, content: str, metadata: Dict, last_modified: str) -> Optional[int]:
+    """Insert or update a webpage record"""
+    content_hash = hashlib.md5(content.encode()).hexdigest()
+    with get_db_cursor(cursor_factory=DictCursor) as (cursor, conn):
+        cursor.execute("""
+            INSERT INTO webpages (url, title, content, content_hash, metadata, timestamp, last_modified)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (url) DO UPDATE
+            SET title = EXCLUDED.title,
+                content = EXCLUDED.content,
+                content_hash = EXCLUDED.content_hash,
+                metadata = EXCLUDED.metadata,
+                timestamp = EXCLUDED.timestamp,
+                last_modified = EXCLUDED.last_modified
+            RETURNING id
+        """, (url, title, content, content_hash, Json(metadata), datetime.now(), last_modified))
+        return cursor.fetchone()['id']
 
-class ContentTracker:
-    """Tracks content changes and embedding references"""
-    
-    def has_content_changed(self, url: str, new_hash: str) -> bool:
-        """Check if content has changed based on hash"""
-        try:
-            with get_db_cursor() as (cur, conn):
-                cur.execute("""
-                    SELECT content_hash 
-                    FROM content_hashes 
-                    WHERE url = %s
-                """, (url,))
-                
-                result = cur.fetchone()
-                if result is None:
-                    # New URL, insert hash
-                    cur.execute("""
-                        INSERT INTO content_hashes (url, content_hash)
-                        VALUES (%s, %s)
-                    """, (url, new_hash))
-                    conn.commit()
-                    return True
-                
-                old_hash = result[0]
-                if old_hash != new_hash:
-                    # Content changed, update hash
-                    cur.execute("""
-                        UPDATE content_hashes 
-                        SET content_hash = %s,
-                            last_modified = CURRENT_TIMESTAMP
-                        WHERE url = %s
-                    """, (new_hash, url))
-                    conn.commit()
-                    return True
-                
-                # Update last checked timestamp
-                cur.execute("""
-                    UPDATE content_hashes 
-                    SET last_checked = CURRENT_TIMESTAMP
-                    WHERE url = %s
-                """, (url,))
-                conn.commit()
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error checking content change: {str(e)}")
-            return True  # Assume changed on error to force update
+def insert_expert(url: str, name: str, content: str, metadata: Dict, last_modified: str) -> Optional[int]:
+    """Insert or update an expert profile"""
+    content_hash = hashlib.md5(content.encode()).hexdigest()
+    with get_db_cursor(cursor_factory=DictCursor) as (cursor, conn):
+        cursor.execute("""
+            INSERT INTO experts (url, name, content, content_hash, metadata, timestamp, last_modified)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (url) DO UPDATE
+            SET name = EXCLUDED.name,
+                content = EXCLUDED.content,
+                content_hash = EXCLUDED.content_hash,
+                metadata = EXCLUDED.metadata,
+                timestamp = EXCLUDED.timestamp,
+                last_modified = EXCLUDED.last_modified
+            RETURNING id
+        """, (url, name, content, content_hash, Json(metadata), datetime.now(), last_modified))
+        return cursor.fetchone()['id']
 
-    def update_embedding_reference(self, url: str, embedding_key: str):
-        """Store or update embedding reference"""
-        try:
-            with get_db_cursor() as (cur, conn):
-                cur.execute("""
-                    INSERT INTO content_embeddings (url, embedding_key)
-                    VALUES (%s, %s)
-                    ON CONFLICT (url) DO UPDATE
-                    SET embedding_key = EXCLUDED.embedding_key,
-                        updated_at = CURRENT_TIMESTAMP
-                """, (url, embedding_key))
-                conn.commit()
-        except Exception as e:
-            logger.error(f"Error updating embedding reference: {str(e)}")
-            raise
+def insert_pdf(url: str, file_path: str, metadata: Dict, content_hash: str) -> Optional[int]:
+    """Insert or update a PDF record"""
+    with get_db_cursor(cursor_factory=DictCursor) as (cursor, conn):
+        cursor.execute("""
+            INSERT INTO pdfs (url, file_path, content_hash, metadata, timestamp)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (url) DO UPDATE
+            SET file_path = EXCLUDED.file_path,
+                content_hash = EXCLUDED.content_hash,
+                metadata = EXCLUDED.metadata,
+                timestamp = EXCLUDED.timestamp
+            RETURNING id
+        """, (url, file_path, content_hash, Json(metadata), datetime.now()))
+        return cursor.fetchone()['id']
 
-    def get_embedding_key(self, url: str) -> Optional[str]:
-        """Get embedding key for URL"""
-        try:
-            with get_db_cursor() as (cur, conn):
-                cur.execute("""
-                    SELECT embedding_key
-                    FROM content_embeddings
-                    WHERE url = %s
-                """, (url,))
-                result = cur.fetchone()
-                return result[0] if result else None
-        except Exception as e:
-            logger.error(f"Error getting embedding key: {str(e)}")
-            return None
+def insert_pdf_chunk(pdf_id: int, chunk_index: int, content: str) -> Optional[int]:
+    """Insert a PDF chunk"""
+    content_hash = hashlib.md5(content.encode()).hexdigest()
+    with get_db_cursor(cursor_factory=DictCursor) as (cursor, conn):
+        cursor.execute("""
+            INSERT INTO pdf_chunks (pdf_id, chunk_index, content, content_hash, timestamp)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+        """, (pdf_id, chunk_index, content, content_hash, datetime.now()))
+        return cursor.fetchone()['id']
 
-    def get_urls_to_check(self, older_than_hours: int = 24) -> List[str]:
-        """Get URLs that haven't been checked recently"""
-        try:
-            with get_db_cursor() as (cur, conn):
-                cur.execute("""
-                    SELECT url
-                    FROM content_hashes
-                    WHERE last_checked < NOW() - INTERVAL '%s hours'
-                    ORDER BY last_checked ASC
-                """, (older_than_hours,))
-                return [row[0] for row in cur.fetchall()]
-        except Exception as e:
-            logger.error(f"Error getting URLs to check: {str(e)}")
-            return []
+def insert_publication(url: str, title: str, authors: List[str], abstract: str, publication_date: Optional[str], content_type: str, content_id: int, content: str, metadata: Dict) -> Optional[int]:
+    """Insert or update a publication record"""
+    content_hash = hashlib.md5(content.encode()).hexdigest()
+    with get_db_cursor(cursor_factory=DictCursor) as (cursor, conn):
+        cursor.execute("""
+            INSERT INTO publications (url, title, authors, abstract, publication_date, content_type, content_id, content_hash, metadata, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (url) DO UPDATE
+            SET title = EXCLUDED.title,
+                authors = EXCLUDED.authors,
+                abstract = EXCLUDED.abstract,
+                publication_date = EXCLUDED.publication_date,
+                content_type = EXCLUDED.content_type,
+                content_id = EXCLUDED.content_id,
+                content_hash = EXCLUDED.content_hash,
+                metadata = EXCLUDED.metadata,
+                timestamp = EXCLUDED.timestamp
+            RETURNING id
+        """, (url, title, authors, abstract, publication_date, content_type, content_id, content_hash, Json(metadata), datetime.now()))
+        return cursor.fetchone()['id']
+
+def insert_embedding(content_type: str, content_id: int, embedding: List[float], content_hash: str) -> Optional[int]:
+    """Insert an embedding"""
+    with get_db_cursor(cursor_factory=DictCursor) as (cursor, conn):
+        cursor.execute("""
+            INSERT INTO embeddings (content_type, content_id, embedding, content_hash, timestamp)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+        """, (content_type, content_id, Json(embedding), content_hash, datetime.now()))
+        return cursor.fetchone()['id']
+
+def update_scrape_state(last_run: str, processed_urls: List[str], failed_urls: List[str], content_hashes: Dict) -> None:
+    """Update the scrape state"""
+    with get_db_cursor(cursor_factory=DictCursor) as (cursor, conn):
+        cursor.execute("""
+            INSERT INTO scrape_state (last_run, timestamp, processed_urls, failed_urls, content_hashes)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE
+            SET last_run = EXCLUDED.last_run,
+                timestamp = EXCLUDED.timestamp,
+                processed_urls = EXCLUDED.processed_urls,
+                failed_urls = EXCLUDED.failed_urls,
+                content_hashes = EXCLUDED.content_hashes
+        """, (last_run, datetime.now(), processed_urls, failed_urls, Json(content_hashes)))
+
+def get_scrape_state() -> Dict:
+    """Retrieve the scrape state"""
+    with get_db_cursor(cursor_factory=DictCursor) as (cursor, conn):
+        cursor.execute("SELECT * FROM scrape_state ORDER BY timestamp DESC LIMIT 1")
+        state = cursor.fetchone()
+        if state:
+            return {
+                'last_run': state['last_run'],
+                'timestamp': state['timestamp'],
+                'processed_urls': state['processed_urls'],
+                'failed_urls': state['failed_urls'],
+                'content_hashes': state['content_hashes']
+            }
+        return {
+            'last_run': None,
+            'timestamp': None,
+            'processed_urls': [],
+            'failed_urls': [],
+            'content_hashes': {}
+        }
+
+def check_content_changes(url: str, new_hash: str) -> bool:
+    """Check if content has changed based on stored hash"""
+    with get_db_cursor(cursor_factory=DictCursor) as (cursor, conn):
+        cursor.execute("SELECT content_hashes->>%s AS hash FROM scrape_state ORDER BY timestamp DESC LIMIT 1", (url,))
+        stored_hash = cursor.fetchone()['hash'] if cursor.fetchone() else None
+        return stored_hash is None or stored_hash != new_hash

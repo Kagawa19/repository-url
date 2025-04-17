@@ -16,6 +16,7 @@ from datetime import datetime
 import os
 import re
 from ..utils.text_cleaner import TextCleaner
+from ...database.database_setup import insert_webpage, insert_expert
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +27,6 @@ class WebsiteScraper:
     """
     
     def __init__(self, headless: bool = True):
-        """
-        Initialize the web scraper.
-        
-        Args:
-            headless: Whether to run Chrome in headless mode
-        """
         self.headless = headless
         self.base_url = os.getenv('WEBSITE_URL')
         if not self.base_url:
@@ -51,7 +46,6 @@ class WebsiteScraper:
 
     @retry(stop_max_attempt_number=3, wait_fixed=2000)
     def setup_selenium(self):
-        """Configure and initialize Selenium WebDriver with retries"""
         try:
             options = Options()
             if self.headless:
@@ -65,7 +59,7 @@ class WebsiteScraper:
             options.add_argument("--disable-extensions")
             options.add_argument("--disable-blink-features=AutomationControlled")
             
-            chrome_driver_path = os.getenv('CHROME_DRIVER_PATH')
+            chrome_driver_path = os.getenv('CHROMEDRIVER_PATH')
             service = Service(chrome_driver_path) if chrome_driver_path else Service()
             
             remote_url = os.getenv('SELENIUM_REMOTE_URL')
@@ -85,15 +79,6 @@ class WebsiteScraper:
             raise
 
     def is_valid_url(self, url: str) -> bool:
-        """
-        Check if URL is valid and belongs to allowed domain.
-        
-        Args:
-            url: URL to validate
-            
-        Returns:
-            bool: Whether URL is valid
-        """
         try:
             parsed = urlparse(url)
             return all([
@@ -104,8 +89,11 @@ class WebsiteScraper:
         except Exception:
             return False
 
+    def is_expert_url(self, url: str) -> bool:
+        """Check if URL is an expert profile"""
+        return bool(re.match(r'^https?://aphrc\.org/person/.*$', url))
+
     def scroll_page(self):
-        """Scroll through page to load dynamic content"""
         try:
             last_height = self.driver.execute_script("return document.body.scrollHeight")
             while True:
@@ -119,16 +107,6 @@ class WebsiteScraper:
             logger.error(f"Error scrolling page: {str(e)}")
 
     def extract_links(self, soup: BeautifulSoup, base_url: str) -> Dict[str, Set[str]]:
-        """
-        Extract navigation and PDF links from page.
-        
-        Args:
-            soup: BeautifulSoup object
-            base_url: Base URL for resolving relative links
-            
-        Returns:
-            Dict with navigation and PDF links
-        """
         nav_links = set()
         pdf_links = set()
         try:
@@ -147,16 +125,18 @@ class WebsiteScraper:
             'pdf_links': pdf_links
         }
 
+    def extract_expert_name(self, soup: BeautifulSoup) -> Optional[str]:
+        """Extract expert name from page title or content"""
+        try:
+            title = soup.title.string if soup.title else ''
+            h1 = soup.find('h1')
+            name = h1.get_text(strip=True) if h1 else title.split('|')[0].strip()
+            return name if name else None
+        except Exception as e:
+            logger.error(f"Error extracting expert name: {str(e)}")
+            return None
+
     def get_page_content(self, url: str) -> Optional[Dict]:
-        """
-        Get content from a single webpage.
-        
-        Args:
-            url: URL to scrape
-            
-        Returns:
-            Optional[Dict]: Scraped content and metadata
-        """
         try:
             logger.info(f"Fetching content from: {url}")
             self.driver.get(url)
@@ -186,7 +166,7 @@ class WebsiteScraper:
             content_hash = hashlib.md5(cleaned_content.encode()).hexdigest()
             logger.debug(f"Scraped {url}: {len(cleaned_content)} chars, hash: {content_hash}")
             
-            return {
+            result = {
                 'url': url,
                 'content': cleaned_content,
                 'title': metadata['title'],
@@ -196,6 +176,31 @@ class WebsiteScraper:
                 'timestamp': datetime.now().isoformat(),
                 'content_hash': content_hash
             }
+            
+            # Store in the appropriate table
+            if self.is_expert_url(url):
+                name = self.extract_expert_name(soup)
+                expert_id = insert_expert(
+                    url=url,
+                    name=name,
+                    content=cleaned_content,
+                    metadata=metadata,
+                    last_modified=metadata['last_modified']
+                )
+                result['expert_id'] = expert_id
+                result['content_type'] = 'expert'
+            else:
+                webpage_id = insert_webpage(
+                    url=url,
+                    title=metadata['title'],
+                    content=cleaned_content,
+                    metadata=metadata,
+                    last_modified=metadata['last_modified']
+                )
+                result['webpage_id'] = webpage_id
+                result['content_type'] = 'webpage'
+            
+            return result
             
         except TimeoutException:
             logger.error(f"Timeout while loading: {url}")
@@ -208,12 +213,6 @@ class WebsiteScraper:
             return None
 
     def scrape_site(self) -> List[Dict]:
-        """
-        Scrape website starting from base URL.
-        
-        Returns:
-            List[Dict]: List of scraped page content
-        """
         pages_data = []
         urls_to_visit = [(self.base_url, 0)]  # (url, depth)
         try:
@@ -243,7 +242,6 @@ class WebsiteScraper:
             self.close()
 
     def close(self):
-        """Clean up resources"""
         try:
             self.driver.quit()
             logger.info("WebDriver closed successfully")

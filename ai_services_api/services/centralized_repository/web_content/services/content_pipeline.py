@@ -26,7 +26,6 @@ class ContentPipeline:
         self.setup_components()
 
     def setup_components(self):
-        """Initialize all required components"""
         try:
             if not self.website_url:
                 raise ValueError("WEBSITE_URL environment variable not set")
@@ -39,7 +38,6 @@ class ContentPipeline:
             raise
 
     def validate_url(self, url: str) -> bool:
-        """Validate URL format and allowed domains"""
         try:
             result = urlparse(url)
             base_domain = urlparse(self.website_url).netloc
@@ -52,7 +50,6 @@ class ContentPipeline:
             return False
 
     def process_webpage(self, page_data: Dict) -> Optional[Dict]:
-        """Process a single webpage"""
         try:
             if not self.validate_url(page_data['url']):
                 logger.error(f"Invalid URL format: {page_data['url']}")
@@ -69,7 +66,7 @@ class ContentPipeline:
                 'title': page_data.get('title', ''),
                 'nav_links': page_data.get('nav_links', []),
                 'pdf_links': page_data.get('pdf_links', []),
-                'last_modified': page_data.get('last_modified'),
+                'last_modified': page_data.get('metadata', {}).get('last_modified'),
                 'scrape_timestamp': datetime.now().isoformat()
             }
 
@@ -84,7 +81,8 @@ class ContentPipeline:
                 'content_hash': content_hash,
                 'metadata': metadata,
                 'timestamp': datetime.now().isoformat(),
-                'content_type': 'webpage'
+                'content_type': page_data['content_type'],
+                'content_id': page_data.get('expert_id') or page_data.get('webpage_id')
             }
 
         except Exception as e:
@@ -92,17 +90,19 @@ class ContentPipeline:
             return None
 
     def process_pdf(self, pdf_data: Dict) -> Optional[Dict]:
-        """Process a single PDF document"""
         try:
             if not self.validate_url(pdf_data['url']):
                 logger.error(f"Invalid PDF URL: {pdf_data['url']}")
                 return None
 
             cleaned_chunks = []
-            for chunk in pdf_data['chunks']:
+            chunk_ids = pdf_data.get('chunk_ids', [])
+            for idx, chunk in enumerate(pdf_data['chunks']):
                 cleaned_chunk = self.text_cleaner.clean_pdf_text(chunk)
                 if cleaned_chunk.strip():
                     cleaned_chunks.append(cleaned_chunk)
+                else:
+                    chunk_ids.pop(idx)
 
             if not cleaned_chunks:
                 logger.warning(f"No valid content in PDF: {pdf_data['url']}")
@@ -114,9 +114,9 @@ class ContentPipeline:
             metadata = {
                 'url': pdf_data['url'],
                 'file_path': pdf_data.get('file_path', ''),
-                'total_pages': pdf_data.get('total_pages', 0),
+                'total_pages': pdf_data.get('metadata', {}).get('page_count', 0),
                 'total_chunks': len(cleaned_chunks),
-                'file_size': pdf_data.get('file_size', 0),
+                'file_size': pdf_data.get('metadata', {}).get('file_size', 0),
                 'scrape_timestamp': datetime.now().isoformat()
             }
 
@@ -124,9 +124,11 @@ class ContentPipeline:
             return {
                 'url': pdf_data['url'],
                 'chunks': cleaned_chunks,
+                'chunk_ids': chunk_ids,
                 'content_hash': content_hash,
                 'metadata': metadata,
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now().isoformat(),
+                'pdf_id': pdf_data['pdf_id']
             }
 
         except Exception as e:
@@ -134,7 +136,6 @@ class ContentPipeline:
             return None
 
     def run(self) -> Dict:
-        """Run the complete content processing pipeline"""
         try:
             results = {
                 'webpage_results': [],
@@ -194,7 +195,6 @@ class ContentPipeline:
             self.cleanup()
 
     def cleanup(self):
-        """Cleanup resources"""
         try:
             self.web_scraper.close()
             self.pdf_processor.cleanup()

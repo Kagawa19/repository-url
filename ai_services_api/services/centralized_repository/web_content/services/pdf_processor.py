@@ -13,22 +13,16 @@ import fitz
 import re
 from ai_services_api.services.centralized_repository.web_content.config.settings import PDF_CHUNK_SIZE
 from ai_services_api.services.centralized_repository.web_content.utils.text_cleaner import TextCleaner
+from ...database.database_setup import insert_pdf, insert_pdf_chunk
 
 logger = logging.getLogger(__name__)
 
 class PDFProcessor:
     """
     Handles PDF downloading, text extraction, and content chunking.
-    Supports both local and remote PDFs.
     """
     
     def __init__(self, chunk_size: int = PDF_CHUNK_SIZE):
-        """
-        Initialize PDF processor.
-        
-        Args:
-            chunk_size: Maximum size of text chunks
-        """
         self.chunk_size = chunk_size
         self.setup_storage()
         self.text_cleaner = TextCleaner()
@@ -37,7 +31,6 @@ class PDFProcessor:
         logger.info("PDFProcessor initialized successfully")
 
     def setup_storage(self):
-        """Set up storage directory for PDFs"""
         try:
             self.pdf_dir = os.getenv('PDF_FOLDER', 'data/pdf_files')
             os.makedirs(self.pdf_dir, exist_ok=True)
@@ -47,16 +40,6 @@ class PDFProcessor:
             raise
 
     def download_pdf(self, url: str, timeout: int = 30) -> Optional[str]:
-        """
-        Download PDF from URL.
-        
-        Args:
-            url: URL of the PDF
-            timeout: Request timeout in seconds
-            
-        Returns:
-            Optional[str]: Path to downloaded file
-        """
         try:
             if url in self.processed_files:
                 if os.path.exists(self.processed_files[url]):
@@ -91,15 +74,6 @@ class PDFProcessor:
             return None
 
     def extract_text_with_pymupdf(self, file_path: str) -> Optional[str]:
-        """
-        Extract text from PDF using PyMuPDF.
-        
-        Args:
-            file_path: Path to PDF file
-            
-        Returns:
-            Optional[str]: Extracted text
-        """
         try:
             doc = fitz.open(file_path)
             text = []
@@ -113,15 +87,6 @@ class PDFProcessor:
             return None
 
     def extract_text_with_pdfplumber(self, file_path: str) -> Optional[str]:
-        """
-        Fallback text extraction using pdfplumber.
-        
-        Args:
-            file_path: Path to PDF file
-            
-        Returns:
-            Optional[str]: Extracted text
-        """
         try:
             import pdfplumber
             with pdfplumber.open(file_path) as pdf:
@@ -134,15 +99,6 @@ class PDFProcessor:
             return None
 
     def extract_text_from_pdf(self, file_path: str) -> Optional[str]:
-        """
-        Extract text from PDF using multiple methods.
-        
-        Args:
-            file_path: Path to PDF file
-            
-        Returns:
-            Optional[str]: Extracted text
-        """
         try:
             text = self.extract_text_with_pymupdf(file_path)
             if not text or not text.strip():
@@ -157,15 +113,6 @@ class PDFProcessor:
             return None
 
     def chunk_text(self, text: str) -> List[str]:
-        """
-        Split text into manageable chunks.
-        
-        Args:
-            text: Text to split
-            
-        Returns:
-            List[str]: List of text chunks
-        """
         try:
             chunks = []
             current_chunk = []
@@ -195,15 +142,6 @@ class PDFProcessor:
             return []
 
     def get_pdf_metadata(self, file_path: str) -> Dict:
-        """
-        Extract PDF metadata.
-        
-        Args:
-            file_path: Path to PDF file
-            
-        Returns:
-            Dict: PDF metadata
-        """
         try:
             doc = fitz.open(file_path)
             metadata = doc.metadata
@@ -219,15 +157,6 @@ class PDFProcessor:
             return {}
 
     def process_pdf(self, pdf_url: str) -> Optional[Dict]:
-        """
-        Process a single PDF document.
-        
-        Args:
-            pdf_url: URL of the PDF
-            
-        Returns:
-            Optional[Dict]: Processed PDF data
-        """
         try:
             logger.info(f"Processing PDF: {pdf_url}")
             pdf_path = self.download_pdf(pdf_url)
@@ -241,31 +170,43 @@ class PDFProcessor:
                 return None
             metadata = self.get_pdf_metadata(pdf_path)
             content_hash = hashlib.md5(' '.join(chunks).encode()).hexdigest()
+            
+            # Store PDF in database
+            pdf_id = insert_pdf(
+                url=pdf_url,
+                file_path=pdf_path,
+                metadata=metadata,
+                content_hash=content_hash
+            )
+            
+            # Store chunks in database
+            chunk_ids = []
+            for idx, chunk in enumerate(chunks):
+                chunk_id = insert_pdf_chunk(
+                    pdf_id=pdf_id,
+                    chunk_index=idx,
+                    content=chunk
+                )
+                chunk_ids.append(chunk_id)
+            
             logger.debug(f"Processed PDF {pdf_url}: {len(chunks)} chunks, hash: {content_hash}")
             return {
                 'url': pdf_url,
                 'file_path': pdf_path,
                 'chunks': chunks,
+                'chunk_ids': chunk_ids,
                 'num_chunks': len(chunks),
                 'total_length': len(text),
                 'metadata': metadata,
                 'timestamp': datetime.now().isoformat(),
-                'hash': content_hash
+                'hash': content_hash,
+                'pdf_id': pdf_id
             }
         except Exception as e:
             logger.error(f"Error processing PDF {pdf_url}: {str(e)}")
             return None
 
     def process_pdfs(self, pdf_urls: List[str]) -> List[Dict]:
-        """
-        Process multiple PDF documents.
-        
-        Args:
-            pdf_urls: List of PDF URLs
-            
-        Returns:
-            List[Dict]: List of processed PDF data
-        """
         results = []
         for url in pdf_urls:
             try:
@@ -279,7 +220,6 @@ class PDFProcessor:
         return results
 
     def cleanup(self):
-        """Clean up temporary files and resources"""
         try:
             import shutil
             shutil.rmtree(self.temp_dir, ignore_errors=True)

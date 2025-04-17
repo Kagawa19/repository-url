@@ -10,51 +10,37 @@ import os
 import hashlib
 import numpy as np
 import json
-import redis
+from ...database.database_setup import insert_embedding, update_scrape_state, get_scrape_state, check_content_changes
 
 logger = logging.getLogger(__name__)
 
 class WebContentProcessor:
-    """Optimized web content processor with Redis storage and state saving"""
+    """Optimized web content processor with PostgreSQL storage"""
     
     def __init__(self, 
                  max_workers: int = 4,
                  batch_size: int = 50,
-                 processing_checkpoint_hours: int = 24,
-                 state_file: str = "scrape_state.json"):
+                 processing_checkpoint_hours: int = 24):
         self.max_workers = max_workers
         self.batch_size = batch_size
         self.website_url = os.getenv('WEBSITE_URL')
         self.processing_checkpoint_hours = processing_checkpoint_hours
-        self.state_file = state_file
-        self.redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
         
-        self.redis_pool = None
         self.pipeline = None
         self.embedding_model = None
         
         self.setup_components()
-        self.load_scrape_state()
+        self.scrape_state = self.load_scrape_state()
 
     def load_scrape_state(self):
-        """Load scrape state from JSON file"""
+        """Load scrape state from database"""
         try:
-            if os.path.exists(self.state_file):
-                with open(self.state_file, 'r') as f:
-                    self.scrape_state = json.load(f)
-                logger.info(f"Loaded scrape state from {self.state_file}")
-            else:
-                self.scrape_state = {
-                    'last_run': None,
-                    'processed_urls': [],
-                    'failed_urls': [],
-                    'timestamp': None,
-                    'content_hashes': {}
-                }
-                logger.info("Initialized new scrape state")
+            state = get_scrape_state()
+            logger.info("Loaded scrape state from database")
+            return state
         except Exception as e:
             logger.error(f"Error loading scrape state: {str(e)}")
-            self.scrape_state = {
+            return {
                 'last_run': None,
                 'processed_urls': [],
                 'failed_urls': [],
@@ -63,27 +49,26 @@ class WebContentProcessor:
             }
 
     def save_scrape_state(self):
-        """Save scrape state to JSON file"""
+        """Save scrape state to database"""
         try:
-            with open(self.state_file, 'w') as f:
-                json.dump(self.scrape_state, f, indent=2)
-            logger.info(f"Saved scrape state to {self.state_file}")
+            update_scrape_state(
+                last_run=self.scrape_state['last_run'],
+                processed_urls=self.scrape_state['processed_urls'],
+                failed_urls=self.scrape_state['failed_urls'],
+                content_hashes=self.scrape_state['content_hashes']
+            )
+            logger.info("Saved scrape state to database")
         except Exception as e:
             logger.error(f"Error saving scrape state: {str(e)}")
 
     def setup_components(self):
-        """Initialize components with Redis connection pooling"""
+        """Initialize components"""
         try:
             self.pipeline = ContentPipeline(
                 max_workers=self.max_workers,
                 webdriver_retries=3
             )
             self.embedding_model = EmbeddingModel()
-            self.redis_pool = redis.ConnectionPool.from_url(
-                self.redis_url,
-                max_connections=self.max_workers,
-                db=0
-            )
             logger.info("Successfully initialized all components")
         except Exception as e:
             logger.error(f"Failed to initialize components: {str(e)}")
@@ -102,49 +87,36 @@ class WebContentProcessor:
             if changed_items:
                 item_embeddings = await self.batch_create_embeddings(changed_items)
                 keys = await self.batch_store_embeddings(item_embeddings)
-                if keys:
-                    await self.store_url_mappings(
-                        [item['url'] for item in changed_items],
-                        keys
-                    )
-                    results['updated'] = len(keys)
-                    self.scrape_state['processed_urls'].extend([item['url'] for item in changed_items])
+                results['updated'] = len(keys)
+                self.scrape_state['processed_urls'].extend([item['url'] for item in changed_items])
         except Exception as e:
             logger.error(f"Error processing batch: {str(e)}")
         return results
 
     async def batch_check_content_changes(self, items: List[Dict]) -> List[Dict]:
-        """Check for content changes using Redis and scrape state"""
+        """Check for content changes using database and scrape state"""
         changed_items = []
-        async with redis.Redis(connection_pool=self.redis_pool) as redis_client:
-            try:
-                for item in items:
-                    url = item['url']
-                    new_hash = hashlib.md5(item['content'].encode()).hexdigest()
-                    stored_hash = self.scrape_state['content_hashes'].get(url)
-                    last_modified = self.scrape_state.get('timestamp')
-                    
-                    redis_key = f"url_map:{hashlib.md5(url.encode()).hexdigest()}"
-                    stored_data = await redis_client.get(redis_key)
-                    if stored_data:
-                        stored_data = json.loads(stored_data)
-                        last_modified = stored_data.get('updated_at', last_modified)
-                    
-                    last_modified_dt = None
-                    if last_modified:
-                        try:
-                            last_modified_dt = datetime.fromisoformat(last_modified)
-                        except (ValueError, TypeError):
-                            last_modified_dt = None
-                    
-                    if (stored_hash is None or 
-                        stored_hash != new_hash or 
-                        (last_modified_dt and 
-                         (datetime.now() - last_modified_dt) > timedelta(hours=self.processing_checkpoint_hours))):
-                        changed_items.append(item)
-                        self.scrape_state['content_hashes'][url] = new_hash
-            except Exception as e:
-                logger.error(f"Error checking content changes: {str(e)}")
+        try:
+            for item in items:
+                url = item['url']
+                new_hash = hashlib.md5(item['content'].encode()).hexdigest()
+                stored_hash = self.scrape_state['content_hashes'].get(url)
+                last_modified = self.scrape_state.get('timestamp')
+                
+                if last_modified:
+                    try:
+                        last_modified_dt = datetime.fromisoformat(last_modified)
+                    except (ValueError, TypeError):
+                        last_modified_dt = None
+                
+                if (stored_hash is None or 
+                    stored_hash != new_hash or 
+                    (last_modified_dt and 
+                     (datetime.now() - last_modified_dt) > timedelta(hours=self.processing_checkpoint_hours))):
+                    changed_items.append(item)
+                    self.scrape_state['content_hashes'][url] = new_hash
+        except Exception as e:
+            logger.error(f"Error checking content changes: {str(e)}")
         return changed_items
 
     async def batch_create_embeddings(self, items: List[Dict]) -> List[tuple]:
@@ -166,48 +138,31 @@ class WebContentProcessor:
             return []
 
     async def batch_store_embeddings(self, item_embeddings: List[tuple]) -> List[str]:
-        """Store embeddings in Redis"""
+        """Store embeddings in database"""
         keys = []
-        async with redis.Redis(connection_pool=self.redis_pool) as redis_client:
-            for item, embedding in item_embeddings:
-                try:
-                    key = f"emb:{hashlib.md5((item['url'] + '_' + datetime.now().isoformat()).encode()).hexdigest()}"
-                    data = {
-                        'embedding': embedding.tolist(),
-                        'url': item['url'],
-                        'content_hash': hashlib.md5(item['content'].encode()).hexdigest(),
-                        'stored_at': datetime.now().isoformat(),
-                        'source_metadata': {
-                            'url': item.get('url', 'unknown'),
-                            'content_type': item.get('content_type', 'unknown')
-                        }
-                    }
-                    await redis_client.set(key, json.dumps(data), ex=timedelta(days=30))
-                    keys.append(key)
-                except Exception as e:
-                    logger.error(f"Error storing embedding for {item.get('url', 'unknown')}: {str(e)}")
-                    self.scrape_state['failed_urls'].append(item.get('url', 'unknown'))
+        for item, embedding in item_embeddings:
+            try:
+                content_type = item['content_type']
+                content_id = item.get('content_id') or item.get('chunk_ids', [None])[0]
+                if not content_id:
+                    logger.error(f"No content_id for {item.get('url', 'unknown')}")
+                    continue
+                
+                content_hash = hashlib.md5(item['content'].encode()).hexdigest()
+                embedding_id = insert_embedding(
+                    content_type=content_type,
+                    content_id=content_id,
+                    embedding=embedding.tolist(),
+                    content_hash=content_hash
+                )
+                keys.append(str(embedding_id))
+            except Exception as e:
+                logger.error(f"Error storing embedding for {item.get('url', 'unknown')}: {str(e)}")
+                self.scrape_state['failed_urls'].append(item.get('url', 'unknown'))
         return keys
 
-    async def store_url_mappings(self, urls: List[str], keys: List[str]):
-        """Store URL to embedding key mappings in Redis"""
-        async with redis.Redis(connection_pool=self.redis_pool) as redis_client:
-            try:
-                for url, key in zip(urls, keys):
-                    url_hash = hashlib.md5(url.encode()).hexdigest()
-                    redis_key = f"url_map:{url_hash}"
-                    data = {
-                        'url': url,
-                        'embedding_key': key,
-                        'updated_at': datetime.now().isoformat()
-                    }
-                    await redis_client.set(redis_key, json.dumps(data), ex=timedelta(days=30))
-            except Exception as e:
-                logger.error(f"Error storing URL mappings: {str(e)}")
-                self.scrape_state['failed_urls'].extend(urls)
-
     async def process_content(self) -> Dict:
-        """Enhanced processing method with Redis storage and diagnostics"""
+        """Enhanced processing method with database storage and diagnostics"""
         try:
             logger.info("\n" + "="*50)
             logger.info("Starting Resumable Web Content Processing...")
@@ -258,7 +213,8 @@ class WebContentProcessor:
                     pdf_chunks.append({
                         'url': f"{pdf['url']}#chunk{chunk_index}",
                         'content': chunk,
-                        'content_type': 'pdf_chunk'
+                        'content_type': 'pdf_chunk',
+                        'content_id': pdf['chunk_ids'][chunk_index]
                     })
 
             for i in range(0, len(pdf_chunks), self.batch_size):
@@ -297,7 +253,7 @@ class WebContentProcessor:
             self.cleanup()
 
     def cleanup(self):
-        """Enhanced cleanup with Redis and state management"""
+        """Enhanced cleanup with database state management"""
         try:
             if hasattr(self, 'pipeline'):
                 self.pipeline.cleanup()
@@ -309,5 +265,4 @@ class WebContentProcessor:
             logger.error(f"Error during cleanup: {str(e)}")
 
     def close(self):
-        """Cleanup method compatible with various usage patterns"""
         self.cleanup()
