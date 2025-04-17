@@ -1745,11 +1745,11 @@ class GeminiLLMManager:
 
         markdown_text += "\nYou can ask for more details about any of these publications or request information about related research."
         return markdown_text
-    
+
     async def get_navigation(self, query: str, limit: int = 3) -> Tuple[List[Dict], Optional[str]]:
         """
         Fetch navigation sections from Redis based on the query.
-        Matches the storage pattern used for experts and publications.
+        Uses the same pattern as expert and publication queries with the updated schema.
         
         Args:
             query (str): The search query for navigation sections
@@ -1887,14 +1887,6 @@ class GeminiLLMManager:
                                 match_score += 0.8
                                 matched_criteria.append(f"Title contains '{term}'")
                     
-                    # DESCRIPTION MATCHING
-                    description = section.get('description', '').lower()
-                    if description:
-                        for term in section_terms:
-                            if term in description:
-                                match_score += 0.7
-                                matched_criteria.append(f"Description contains '{term}'")
-                    
                     # URL MATCHING
                     url = section.get('url', '').lower()
                     if url:
@@ -1902,6 +1894,22 @@ class GeminiLLMManager:
                             if term in url:
                                 match_score += 0.6
                                 matched_criteria.append(f"URL contains '{term}'")
+                    
+                    # NAVIGATION TEXT MATCHING
+                    nav_text = section.get('navigation_text', '').lower()
+                    if nav_text:
+                        for term in section_terms:
+                            if term in nav_text:
+                                match_score += 0.7
+                                matched_criteria.append(f"Navigation text contains '{term}'")
+                    
+                    # CONTENT TYPE MATCHING
+                    content_type = section.get('content_type', '').lower()
+                    if content_type:
+                        for term in section_terms:
+                            if term in content_type:
+                                match_score += 0.5
+                                matched_criteria.append(f"Content type contains '{term}'")
                     
                     # KEYWORDS/TAGS MATCHING
                     try:
@@ -1923,9 +1931,12 @@ class GeminiLLMManager:
                         if search_section in title:
                             match_score += 1.0  # Strong boost for title match with specific section
                             matched_criteria.append(f"Title contains full section '{search_section}'")
-                        elif search_section in description:
-                            match_score += 0.8  # Good boost for description match with specific section
-                            matched_criteria.append(f"Description contains full section '{search_section}'")
+                        elif search_section in nav_text:
+                            match_score += 0.8  # Good boost for navigation text match
+                            matched_criteria.append(f"Navigation text contains full section '{search_section}'")
+                        elif search_section in url:
+                            match_score += 0.7  # Good boost for URL match with specific section
+                            matched_criteria.append(f"URL contains full section '{search_section}'")
                     
                     # Adjust threshold based on request type
                     match_threshold = 0.1 if is_list_request else 0.3  # Lower threshold for list requests
@@ -1936,14 +1947,13 @@ class GeminiLLMManager:
                     if match_score > match_threshold:
                         logger.info(f"Navigation section {section_id} matched with score {match_score:.2f}: {', '.join(matched_criteria[:3])}")
                         
-                        # Process fields that might be stored as JSON strings
-                        for field in ['keywords', 'categories', 'tags']:
-                            if field in section and isinstance(section[field], str):
-                                try:
-                                    section[field] = json.loads(section[field])
-                                except (json.JSONDecodeError, TypeError):
-                                    # Keep as string if parsing fails
-                                    pass
+                        # Parse keywords that might be stored as JSON strings
+                        if 'keywords' in section and isinstance(section['keywords'], str):
+                            try:
+                                section['keywords'] = json.loads(section['keywords'])
+                            except (json.JSONDecodeError, TypeError):
+                                # Keep as string if parsing fails
+                                pass
                         
                         # Store match score for ranking
                         section['match_score'] = match_score
@@ -1978,14 +1988,13 @@ class GeminiLLMManager:
                             section = self.redis_manager.redis_text.hgetall(key)
                         
                         if section and section.get('title'):
-                            # Process fields that might be stored as JSON strings
-                            for field in ['keywords', 'categories', 'tags']:
-                                if field in section and isinstance(section[field], str):
-                                    try:
-                                        section[field] = json.loads(section[field])
-                                    except (json.JSONDecodeError, TypeError):
-                                        # Keep as string if parsing fails
-                                        pass
+                            # Parse keywords field
+                            if 'keywords' in section and isinstance(section['keywords'], str):
+                                try:
+                                    section['keywords'] = json.loads(section['keywords'])
+                                except (json.JSONDecodeError, TypeError):
+                                    # Keep as string if parsing fails
+                                    pass
                             
                             section['match_score'] = 0.5  # Default score
                             section['matched_criteria'] = ["Top navigation section"]
@@ -2082,12 +2091,11 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error fetching navigation sections: {e}")
             return [], str(e)
-
-    
-
+        
     def format_navigation_context(self, sections: List[Dict[str, Any]]) -> str:
         """
         Format navigation information into Markdown format for rendering in the frontend.
+        Updated to work with the new navigation schema from the webpages table.
         
         Args:
             sections: List of navigation section dictionaries
@@ -2109,17 +2117,55 @@ class GeminiLLMManager:
                 # Use numbered list with clear formatting
                 markdown_text += f"{idx + 1}. **{title}**\n\n"
 
-                # Description
-                description = section.get('description', '')
-                if description:
-                    if len(description) > 300:
-                        description = description[:297] + '...'
-                    markdown_text += f"    - Description: {description}\n\n"
+                # Navigation Text (primary description for navigation purposes)
+                nav_text = section.get('navigation_text', '')
+                if nav_text:
+                    if len(nav_text) > 300:
+                        nav_text = nav_text[:297] + '...'
+                    markdown_text += f"    - Description: {nav_text}\n\n"
+                # If no navigation_text, use first part of content as fallback
+                elif section.get('content'):
+                    content = section.get('content', '')
+                    if len(content) > 200:
+                        content = content[:197] + '...'
+                    markdown_text += f"    - Description: {content}\n\n"
                 
                 # URL
                 url = section.get('url', '')
                 if url:
-                    markdown_text += f"    - Link: [{url}]({url})\n\n"
+                    # Format URL as a proper link
+                    if not url.startswith(('http://', 'https://')):
+                        display_url = url
+                        url = f"https://{url}" if not url.startswith('www.') else f"https://{url}"
+                    else:
+                        display_url = url.replace('https://', '').replace('http://', '')
+                    
+                    markdown_text += f"    - Link: [{display_url}]({url})\n\n"
+                
+                # Content Type
+                content_type = section.get('content_type', '')
+                if content_type:
+                    markdown_text += f"    - Type: {content_type}\n\n"
+                
+                # Last Updated
+                last_updated = section.get('last_updated', '')
+                if last_updated:
+                    # Format date nicely if possible
+                    try:
+                        if 'T' in last_updated:
+                            # ISO format
+                            date_part = last_updated.split('T')[0]
+                            date_obj = datetime.strptime(date_part, '%Y-%m-%d')
+                            formatted_date = date_obj.strftime('%B %d, %Y')
+                        else:
+                            # Try generic date parsing
+                            date_obj = datetime.strptime(last_updated.split()[0], '%Y-%m-%d')
+                            formatted_date = date_obj.strftime('%B %d, %Y')
+                        
+                        markdown_text += f"    - Last Updated: {formatted_date}\n\n"
+                    except:
+                        # If date parsing fails, use as is
+                        markdown_text += f"    - Last Updated: {last_updated}\n\n"
                 
                 # Keywords/Tags
                 keywords = section.get('keywords', [])
@@ -2129,27 +2175,9 @@ class GeminiLLMManager:
                             keywords = json.loads(keywords)
                         except json.JSONDecodeError:
                             keywords = keywords.split(',')
-                    if isinstance(keywords, list):
+                    if isinstance(keywords, list) and keywords:
                         keywords_str = ', '.join(str(k).strip() for k in keywords[:5])
                         markdown_text += f"    - Keywords: {keywords_str}\n\n"
-                
-                # Parent section or category if available
-                parent = section.get('parent_section', '') or section.get('category', '')
-                if parent:
-                    markdown_text += f"    - Section: {parent}\n\n"
-                    
-                # Related sections if available
-                related = section.get('related_sections', [])
-                if related:
-                    if isinstance(related, str):
-                        try:
-                            related = json.loads(related)
-                        except json.JSONDecodeError:
-                            related = [r.strip() for r in related.split(',') if r.strip()]
-                    
-                    if isinstance(related, list) and related:
-                        related_str = ', '.join(str(r).strip() for r in related[:3])
-                        markdown_text += f"    - Related sections: {related_str}\n\n"
                 
                 # Extra space between sections
                 if idx < len(sections) - 1:
@@ -2161,6 +2189,7 @@ class GeminiLLMManager:
 
         markdown_text += "\nWould you like more details about any of these sections or help navigating to a specific resource?"
         return markdown_text
+                #    criteria = section['matche
 
     def _create_tailored_prompt(self, intent, context_type: str, message_style: str, user_interests: str = "") -> str:
         """
@@ -2503,8 +2532,8 @@ class GeminiLLMManager:
 
     def _detect_intent_with_keywords(self, message: str) -> Dict[str, Any]:
         """
-        Detect intent using keyword pattern matching instead of embedding models.
-        Enhanced with better navigation intent detection.
+        Detect intent using keyword pattern matching with enhanced navigation detection.
+        Updated to better recognize navigation intent with the new webpages table schema.
         
         Args:
             message: The user's query message
@@ -2538,19 +2567,21 @@ class GeminiLLMManager:
                         r'department', r'faculty', r'staff', r'work(s|ed|ing) on'
                     ]
                 },
-                # ENHANCED: More detailed navigation patterns
+                # Enhanced navigation patterns for new schema
                 QueryIntent.NAVIGATION: {
                     'high_confidence': [
                         r'website', r'page', r'section', r'find', r'where (is|are|can)', 
                         r'how (do|can) i (find|get to|access)', r'link', r'url', r'navigate',
                         r'show me the', r'take me to', r'go to', r'direct me to', r'site map',
-                        r'website structure', r'menu', r'homepage', r'main page'
+                        r'website structure', r'menu', r'homepage', r'main page', r'sitemap',
+                        r'web address', r'webpage', r'web page', r'navigation', r'directions'
                     ],
                     'medium_confidence': [
                         r'resources', r'tools', r'services', r'information', r'contact', 
                         r'about', r'help', r'support', r'faq', r'documents', r'forms',
                         r'download', r'upload', r'browse', r'search', r'locate', r'directory',
-                        r'sitemap', r'navigation', r'menu', r'sections'
+                        r'content', r'where can i find', r'how to access', r'where is',
+                        r'visit', r'navigation', r'menu', r'sections'
                     ]
                 }
             }
@@ -2562,14 +2593,14 @@ class GeminiLLMManager:
                 
                 # Check high confidence patterns (match = 0.9)
                 for pattern in pattern_groups.get('high_confidence', []):
-                    if re.search(pattern, cleaned_query, re.IGNORECASE):
+                    if re.search(r'\b' + pattern + r'\b', cleaned_query, re.IGNORECASE):
                         score = max(score, 0.9)
                         break
                         
                 # If no high confidence match, check medium confidence patterns (match = 0.7)
                 if score < 0.7:
                     for pattern in pattern_groups.get('medium_confidence', []):
-                        if re.search(pattern, cleaned_query, re.IGNORECASE):
+                        if re.search(r'\b' + pattern + r'\b', cleaned_query, re.IGNORECASE):
                             score = max(score, 0.7)
                             break
                 
@@ -2583,6 +2614,13 @@ class GeminiLLMManager:
                 if score > max_score:
                     max_score = score
                     max_intent = intent
+            
+            # Additional check for URLs in the query which strongly indicate navigation intent
+            url_pattern = r'(?:https?://)?(?:www\.)?[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}(?:/[^\s]*)?'
+            if re.search(url_pattern, cleaned_query):
+                # If URL is found, likely a navigation request
+                max_intent = QueryIntent.NAVIGATION
+                max_score = max(max_score, 0.9)
             
             # Extract potential expert name if expert intent is detected
             expert_name = None
@@ -2636,6 +2674,159 @@ class GeminiLLMManager:
                 'clarification': None
             }
 
+    async def _detect_intent_with_embeddings(self, message: str) -> Dict[str, Any]:
+        """
+        Enhanced intent detection with embeddings to better recognize navigation intents.
+        Updated to include more navigation examples for the new schema.
+        """
+        try:
+            if not self.embedding_model:
+                raise ValueError("No embedding model available")
+            
+            # Clean and normalize the query
+            cleaned_message = re.sub(r'[^\w\s]', ' ', message.lower()).strip()
+            query_embedding = self.embedding_model.encode(cleaned_message)
+            
+            # Define example queries for each intent type
+            intent_examples = {
+                QueryIntent.PUBLICATION: [
+                    "Show me publications about maternal health",
+                    "What papers have been published on climate change",
+                    "Research articles on education in Africa"
+                ],
+                QueryIntent.EXPERT: [
+                    "Who are the experts in health policy",
+                    "Find researchers working on climate change",
+                    "Information about Dr. Johnson"
+                ],
+                # Updated navigation examples for the webpages schema
+                QueryIntent.NAVIGATION: [
+                    "How do I find the contact page",
+                    "Where can I access research tools",
+                    "Show me the about section",
+                    "How to navigate to publications page",
+                    "Where is the researchers directory",
+                    "Take me to the home page",
+                    "Is there a page about funding opportunities",
+                    "I want to find the news section",
+                    "Show me website resources",
+                    "How to find contact information on your site",
+                    "What's the URL for the research page",
+                    "How do I access the resources page",
+                    "Can you help me find the publications section",
+                    "Where can I find information about programs",
+                    "I need the link to apply for a grant",
+                    "Show me the main navigation menu",
+                    "Help me find the careers page",
+                    "What webpages do you have about training"
+                ]
+            }
+            
+            # Compute similarity scores for each intent
+            intent_scores = {}
+            for intent, examples in intent_examples.items():
+                example_embeddings = self.embedding_model.encode(examples)
+                similarities = cos_sim(query_embedding, example_embeddings).numpy().flatten()
+                max_similarity = max(similarities)
+                intent_scores[intent] = float(max_similarity)
+            
+            # Determine the intent with the highest score
+            max_intent = max(intent_scores, key=intent_scores.get)
+            confidence = intent_scores[max_intent]
+            
+            # Apply threshold to determine final intent
+            if confidence < 0.6:
+                max_intent = QueryIntent.GENERAL
+            
+            # Add a boost for navigation queries containing URLs
+            url_pattern = r'(?:https?://)?(?:www\.)?[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}(?:/[^\s]*)?'
+            if re.search(url_pattern, message.lower()):
+                # If URL is found and navigation is already high, boost it further
+                if max_intent == QueryIntent.NAVIGATION:
+                    confidence = min(1.0, confidence + 0.2)
+                # If URL is found but another intent is higher, consider if we should switch
+                elif intent_scores.get(QueryIntent.NAVIGATION, 0) > 0.4:
+                    max_intent = QueryIntent.NAVIGATION
+                    confidence = max(confidence, 0.7)
+            
+            return {
+                'intent': max_intent,
+                'confidence': confidence,
+                'clarification': None
+            }
+        except Exception as e:
+            logger.error(f"Error in embedding intent detection: {e}")
+            raise
+
+    async def _detect_intent_with_gemini(self, message: str) -> Dict[str, Any]:
+        """
+        Detect intent using the Gemini model with enhanced navigation detection.
+        Updated to include more context about navigation for the webpages schema.
+        """
+        try:
+            # Set up the Gemini model
+            model = self._setup_gemini()
+            
+            # Create a structured prompt for intent detection with enhanced navigation context
+            prompt = f"""
+            Analyze this query and classify its intent:
+            Query: "{message}"
+            Options:
+            - PUBLICATION (research papers, studies)
+            - EXPERT (researchers, specialists)
+            - NAVIGATION (website sections, resources, pages, help finding content)
+            - GENERAL (other queries)
+            
+            For NAVIGATION, look for:
+            - Terms related to finding information on the website
+            - Accessing specific sections or pages
+            - Questions about how to locate resources
+            - URL or link requests
+            - References to website structure or content
+            - Mentions of specific webpage types (contact, about, resources, etc.)
+            
+            If asking about publications BY someone, extract the name.
+            Return ONLY JSON in this format:
+            {{
+                "intent": "PUBLICATION|EXPERT|NAVIGATION|GENERAL",
+                "confidence": 0.0-1.0,
+                "clarification": "optional question",
+                "expert_name": "name if detected"
+            }}
+            """
+            
+            # Generate content using Gemini
+            response = await model.generate_content(prompt)  # Use generateContent for async
+            content = response.text.replace("```json", "").replace("```", "").strip()
+            
+            # Extract JSON from the response
+            json_start = content.find('{')
+            json_end = content.rfind('}') + 1
+            if json_start >= 0 and json_end > json_start:
+                result = json.loads(content[json_start:json_end])
+                
+                # Map intent strings to QueryIntent enum
+                intent_mapping = {
+                    'PUBLICATION': QueryIntent.PUBLICATION,
+                    'EXPERT': QueryIntent.EXPERT,
+                    'NAVIGATION': QueryIntent.NAVIGATION,
+                    'GENERAL': QueryIntent.GENERAL
+                }
+                intent_result = {
+                    'intent': intent_mapping.get(result.get('intent', 'GENERAL'), QueryIntent.GENERAL),
+                    'confidence': result.get('confidence', 0.0),
+                    'clarification': result.get('clarification', None)
+                }
+                logger.info(f"Gemini intent detection result: {intent_result['intent']} with confidence {intent_result['confidence']}")
+                return intent_result
+            else:
+                logger.warning(f"Could not extract valid JSON from response: {content}")
+                return {'intent': QueryIntent.GENERAL, 'confidence': 0.0, 'clarification': None}
+        except Exception as e:
+            logger.error(f"Gemini intent detection failed: {e}")
+            if "429" in str(e):  # Handle rate-limiting errors
+                await self._handle_rate_limit()
+            return {'intent': QueryIntent.GENERAL, 'confidence': 0.0, 'clarification': None}
     async def detect_intent(self, message: str) -> Dict[str, Any]:
         """Enhanced intent detection with fallbacks"""
         # Try with embeddings first

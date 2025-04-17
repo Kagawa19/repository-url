@@ -571,80 +571,12 @@ class ExpertRedisIndexManager:
             return "Error Processing Work"
     
 
-    def clear_redis_indexes(self) -> bool:
-        """Clear all Redis indexes for both experts and publications."""
-        try:
-            # Clear both old and new patterns to ensure complete cleanup
-            
-            # Clear expert indexes - old patterns
-            old_expert_patterns = ['text:expert:*', 'emb:expert:*', 'meta:expert:*']
-            for pattern in old_expert_patterns:
-                cursor = 0
-                while True:
-                    cursor, keys = self.redis_text.scan(cursor, match=pattern, count=100)
-                    if keys:
-                        self.redis_text.delete(*keys)
-                    if cursor == 0:
-                        break
-            
-            # Clear expert indexes - new patterns
-            new_expert_patterns = ['text:aphrc_expert:*', 'emb:aphrc_expert:*', 'meta:aphrc_expert:*']
-            for pattern in new_expert_patterns:
-                cursor = 0
-                while True:
-                    cursor, keys = self.redis_text.scan(cursor, match=pattern, count=100)
-                    if keys:
-                        self.redis_text.delete(*keys)
-                    if cursor == 0:
-                        break
-            
-            # Clear publication/resource indexes - old patterns
-            old_resource_patterns = [
-                'text:resource:*', 'emb:resource:*', 'meta:resource:*',
-                'text:publication:*', 'emb:publication:*', 'meta:publication:*'
-            ]
-            for pattern in old_resource_patterns:
-                cursor = 0
-                while True:
-                    cursor, keys = self.redis_text.scan(cursor, match=pattern, count=100)
-                    if keys:
-                        self.redis_text.delete(*keys)
-                    if cursor == 0:
-                        break
-            
-            # Clear publication/resource indexes - new patterns
-            new_resource_patterns = [
-                'text:expert_resource:*', 'emb:expert_resource:*', 'meta:expert_resource:*'
-            ]
-            for pattern in new_resource_patterns:
-                cursor = 0
-                while True:
-                    cursor, keys = self.redis_text.scan(cursor, match=pattern, count=100)
-                    if keys:
-                        self.redis_text.delete(*keys)
-                    if cursor == 0:
-                        break
-            
-            # Clear resource links
-            link_patterns = ['links:expert:*', 'links:resource:*', 'expert:*:resources']
-            for pattern in link_patterns:
-                cursor = 0
-                while True:
-                    cursor, keys = self.redis_text.scan(cursor, match=pattern, count=100)
-                    if keys:
-                        self.redis_text.delete(*keys)
-                    if cursor == 0:
-                        break
-            
-            logger.info("Cleared all expert and publication Redis indexes (both old and new patterns)")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error clearing Redis indexes: {e}")
-            return False
+    
 
-    def fetch_experts(self) -> List[Dict[str, Any]]:
-        """Fetch comprehensive expert data from database including their resource links."""
+    # Add these methods to the ExpertRedisIndexManager class
+
+    def fetch_navigation(self) -> List[Dict[str, Any]]:
+        """Fetch navigation data from the webpages table."""
         max_retries = 3
         retry_delay = 2
         
@@ -654,123 +586,60 @@ class ExpertRedisIndexManager:
             try:
                 conn = self.db.get_connection()
                 with conn.cursor() as cur:
-                    # Check if tables exist
+                    # Check if table exists
                     cur.execute("""
                         SELECT EXISTS (
                             SELECT FROM information_schema.tables 
-                            WHERE table_name = 'experts_expert'
-                        ) AS expert_table_exists,
-                        EXISTS (
-                            SELECT FROM information_schema.tables
-                            WHERE table_name = 'expert_resource_links'
-                        ) AS links_table_exists;
+                            WHERE table_name = 'webpages'
+                        ) AS webpages_exists;
                     """)
                     exists = cur.fetchone()
-                    if not exists[0]:  # experts_expert table doesn't exist
-                        logger.warning("experts_expert table does not exist yet")
+                    
+                    if not exists[0]:  # webpages table doesn't exist
+                        logger.warning("webpages table does not exist yet")
                         return []
                     
-                    # Fetch experts with their linked resources in one query
-                    # Expanded to include many more fields from experts_expert table
+                    # Fetch navigation data with all relevant fields
                     query = """
                         SELECT 
-                            e.id,
-                            e.first_name,
-                            e.last_name,
-                            e.middle_name,
-                            e.knowledge_expertise,
-                            e.email,
-                            e.designation,
-                            e.theme,
-                            e.unit,
-                            e.bio,
-                            e.orcid,
-                            e.domains,
-                            e.fields,
-                            e.subfields,
-                            e.normalized_domains,
-                            e.normalized_fields,
-                            e.normalized_skills,
-                            e.keywords,
-                            e.contact_details,
-                            e.photo,
-                            COALESCE(
-                                json_agg(
-                                    json_build_object(
-                                        'resource_id', erl.resource_id,
-                                        'confidence', erl.confidence_score,
-                                        'author_position', erl.author_position
-                                    ) 
-                                    ORDER BY erl.confidence_score DESC
-                                ) FILTER (WHERE erl.resource_id IS NOT NULL),
-                                '[]'::json
-                            ) AS linked_resources
-                        FROM experts_expert e
-                        LEFT JOIN expert_resource_links erl ON e.id = erl.expert_id
-                        WHERE e.id IS NOT NULL AND e.is_active = TRUE
-                        GROUP BY 
-                            e.id, e.first_name, e.last_name, e.middle_name, e.knowledge_expertise,
-                            e.email, e.designation, e.theme, e.unit, e.bio, e.orcid,
-                            e.domains, e.fields, e.subfields, e.normalized_domains,
-                            e.normalized_fields, e.normalized_skills, e.keywords,
-                            e.contact_details, e.photo
-                    """ if exists[1] else """
-                        SELECT 
                             id,
-                            first_name,
-                            last_name,
-                            middle_name,
-                            knowledge_expertise,
-                            email,
-                            designation,
-                            theme,
-                            unit,
-                            bio,
-                            orcid,
-                            domains,
-                            fields,
-                            subfields,
-                            normalized_domains,
-                            normalized_fields,
-                            normalized_skills,
-                            keywords,
-                            contact_details,
-                            photo
-                        FROM experts_expert
-                        WHERE id IS NOT NULL AND is_active = TRUE
+                            title,
+                            url,
+                            content,
+                            content_type,
+                            navigation_text,
+                            last_updated
+                        FROM webpages
+                        WHERE url IS NOT NULL
+                        ORDER BY id
                     """
                     
                     cur.execute(query)
-                    experts = []
-                    for row in cur.fetchall():
-                        # Create expert dictionary with many more fields
-                        expert = {
-                            'id': row[0],
-                            'first_name': row[1] or '',
-                            'last_name': row[2] or '',
-                            'middle_name': row[3] or '',
-                            'knowledge_expertise': self._parse_jsonb(row[4]),
-                            'email': row[5] or '',
-                            'designation': row[6] or '',
-                            'theme': row[7] or '',
-                            'unit': row[8] or '',
-                            'bio': row[9] or '',
-                            'orcid': row[10] or '',
-                            'domains': row[11] if row[11] else [],
-                            'fields': row[12] if row[12] else [],
-                            'subfields': row[13] if row[13] else [],
-                            'normalized_domains': row[14] if row[14] else [],
-                            'normalized_fields': row[15] if row[15] else [],
-                            'normalized_skills': row[16] if row[16] else [],
-                            'keywords': row[17] if row[17] else [],
-                            'contact_details': row[18] or '',
-                            'photo': row[19] or '',
-                            'linked_resources': row[20] if len(row) > 20 else []
-                        }
-                        experts.append(expert)
+                    navigation_items = []
+                    skipped_count = 0
                     
-                    logger.info(f"Fetched {len(experts)} experts with comprehensive profiles and resource links")
-                    return experts
+                    for row in cur.fetchall():
+                        try:
+                            nav_item = {
+                                'id': row[0],
+                                'title': str(row[1]) if row[1] is not None else '',
+                                'url': str(row[2]) if row[2] is not None else '',
+                                'content': str(row[3]) if row[3] is not None else '',
+                                'content_type': str(row[4]) if row[4] is not None else '',
+                                'navigation_text': str(row[5]) if row[5] is not None else '',
+                                'last_updated': row[6].isoformat() if row[6] else None
+                            }
+                            navigation_items.append(nav_item)
+                        except Exception as row_error:
+                            skipped_count += 1
+                            logger.error(f"Error processing navigation row: {row_error}")
+                            continue
+                    
+                    logger.info(
+                        f"Fetched {len(navigation_items)} navigation items from database "
+                        f"(skipped {skipped_count} invalid records)"
+                    )
+                    return navigation_items
                     
             except Exception as e:
                 logger.error(f"Attempt {attempt + 1}/{max_retries} failed: {e}")
@@ -784,6 +653,369 @@ class ExpertRedisIndexManager:
                     cur.close()
                 if conn:
                     conn.close()
+
+    def _create_navigation_text_content(self, navigation: Dict[str, Any]) -> str:
+        """Create comprehensive text content for navigation embedding."""
+        try:
+            # Create a comprehensive text representation for navigation item
+            text_parts = []
+            
+            # Title is the most important
+            if navigation.get('title'):
+                text_parts.append(f"Title: {str(navigation['title']).strip()}")
+            else:
+                text_parts.append("Title: Untitled Page")
+            
+            # URL is essential for navigation
+            if navigation.get('url'):
+                text_parts.append(f"URL: {str(navigation['url']).strip()}")
+            
+            # Navigation text (specific for navigation purposes)
+            if navigation.get('navigation_text'):
+                text_parts.append(f"Navigation Description: {str(navigation['navigation_text']).strip()}")
+            
+            # Content - use first 500 chars to avoid too much detail
+            if navigation.get('content'):
+                content = str(navigation['content']).strip()
+                if len(content) > 500:
+                    content = content[:500] + "..."
+                text_parts.append(f"Content: {content}")
+            
+            # Content type
+            if navigation.get('content_type'):
+                text_parts.append(f"Type: {navigation['content_type']}")
+            
+            # Last updated timestamp
+            if navigation.get('last_updated'):
+                text_parts.append(f"Last Updated: {navigation['last_updated']}")
+            
+            # Join all parts and ensure we have content
+            final_text = '\n'.join(text_parts)
+            if not final_text.strip():
+                return "Unknown Navigation Item"
+                
+            return final_text
+            
+        except Exception as e:
+            logger.error(f"Error creating text content for navigation {navigation.get('id', 'Unknown')}: {e}")
+            return "Error Processing Navigation Item"
+
+    def _store_navigation_data(self, navigation: Dict[str, Any], text_content: str, embedding: np.ndarray) -> None:
+        """
+        Stores navigation data in Redis using consistent key patterns.
+        
+        Args:
+            navigation: The navigation data dictionary
+            text_content: Text representation for embedding
+            embedding: The embedding vector
+        """
+        pipeline = None
+        
+        try:
+            # Get navigation ID
+            navigation_id = navigation['id']
+            
+            # Use consistent key pattern for all navigation data
+            base_key = f"navigation:{navigation_id}"
+            pipeline = self.redis_text.pipeline()
+            
+            # Store text content
+            pipeline.set(f"text:{base_key}", text_content)
+            
+            # Store embedding
+            self.redis_binary.set(
+                f"emb:{base_key}",
+                embedding.astype(np.float32).tobytes()
+            )
+            
+            # Store all available metadata fields
+            metadata = {
+                'id': str(navigation_id),
+                'title': str(navigation.get('title', '')),
+                'url': str(navigation.get('url', '')),
+                'content_type': str(navigation.get('content_type', '')),
+                'navigation_text': str(navigation.get('navigation_text', '')),
+                'last_updated': str(navigation.get('last_updated', '')),
+                # Add keywords field as an empty list - can be populated later if needed
+                'keywords': '[]'
+            }
+            
+            # Store metadata with HSET
+            pipeline.hset(f"meta:{base_key}", mapping=metadata)
+            
+            # Execute all commands
+            pipeline.execute()
+            logger.info(f"Successfully stored navigation {navigation_id}")
+            
+        except Exception as e:
+            if pipeline:
+                pipeline.reset()
+                logger.debug("Reset Redis pipeline due to error")
+            logger.error(f"Error storing navigation {navigation.get('id')}: {e}")
+            raise
+
+    def create_navigation_redis_index(self) -> bool:
+        """Create Redis indexes for navigation items."""
+        try:
+            logger.info("Starting navigation indexing...")
+            
+            navigation_items = self.fetch_navigation()
+            
+            if not navigation_items:
+                logger.warning("No navigation items found to index")
+                return False
+            
+            logger.info(f"Processing {len(navigation_items)} navigation items for indexing")
+            success_count = 0
+            error_count = 0
+            
+            for navigation in navigation_items:
+                try:
+                    navigation_id = navigation.get('id', 'Unknown')
+                    logger.info(f"Processing navigation item {navigation_id}")
+                    
+                    # Create text content
+                    text_content = self._create_navigation_text_content(navigation)
+                    if not text_content or text_content.isspace():
+                        logger.warning(f"Empty text content generated for navigation item {navigation_id}")
+                        continue
+                    
+                    # Generate embedding with robust fallback
+                    try:
+                        embedding = (
+                            self.embedding_model.encode(text_content) 
+                            if self.embedding_model is not None 
+                            else self._create_fallback_embedding(text_content)
+                        )
+                        
+                        if embedding is None or not isinstance(embedding, np.ndarray):
+                            raise ValueError("Invalid embedding generated")
+                    except Exception as embed_err:
+                        logger.error(f"Embedding generation failed for navigation {navigation_id}: {embed_err}")
+                        # Mandatory fallback embedding
+                        embedding = self._create_fallback_embedding(text_content)
+                    
+                    # Store in Redis
+                    self._store_navigation_data(navigation, text_content, embedding)
+                    success_count += 1
+                    logger.info(f"Successfully indexed navigation {navigation_id}")
+                    
+                except Exception as nav_index_err:
+                    error_count += 1
+                    logger.error(f"Error indexing navigation {navigation.get('id', 'Unknown')}: {nav_index_err}")
+            
+            logger.info(f"Navigation indexing complete. Successes: {success_count}, Failures: {error_count}")
+            return success_count > 0
+            
+        except Exception as nav_fetch_err:
+            logger.error(f"Failed to fetch or process navigation items: {nav_fetch_err}")
+            return False
+
+    # Update the create_redis_index method to include navigation
+    def create_redis_index(self) -> bool:
+        """
+        Create Redis indexes for experts, publications, and navigation items.
+        
+        Returns:
+            bool: True if indexing was successful, False otherwise
+        """
+        try:
+            logger.info("Starting comprehensive Redis indexing process...")
+            
+            # Track overall success
+            overall_success = True
+            
+            # Step 1: Clear existing indexes (optional, but can help prevent stale data)
+            self.clear_redis_indexes()
+            
+            # Step 2: Index experts
+            experts_success = self.create_expert_redis_index()
+            
+            # Step 3: Index publications/resources
+            publications_success = self.create_publications_redis_index()
+            
+            # Step 4: Index navigation items (new)
+            navigation_success = self.create_navigation_redis_index()
+            
+            # Determine final indexing status
+            if experts_success and publications_success and navigation_success:
+                logger.info("Successfully indexed experts, publications, and navigation in Redis")
+                return True
+            else:
+                logger.error("Failed to completely index all data types")
+                # Log what succeeded and what failed
+                logger.info(f"Indexing results - Experts: {experts_success}, Publications: {publications_success}, Navigation: {navigation_success}")
+                return experts_success or publications_success or navigation_success
+                
+        except Exception as final_err:
+            logger.error(f"Catastrophic error during Redis indexing: {final_err}")
+            return False
+
+    # Update the clear_redis_indexes method to include navigation
+    def clear_redis_indexes(self) -> bool:
+        """Clear all Redis indexes for experts, publications, and navigation."""
+        try:
+            # Existing patterns for experts and publications...
+            
+            # Add patterns for navigation data
+            navigation_patterns = ['text:navigation:*', 'emb:navigation:*', 'meta:navigation:*']
+            for pattern in navigation_patterns:
+                cursor = 0
+                while True:
+                    cursor, keys = self.redis_text.scan(cursor, match=pattern, count=100)
+                    if keys:
+                        self.redis_text.delete(*keys)
+                    if cursor == 0:
+                        break
+            
+            logger.info("Cleared all expert, publication, and navigation Redis indexes")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error clearing Redis indexes: {e}")
+            return False
+
+        def fetch_experts(self) -> List[Dict[str, Any]]:
+            """Fetch comprehensive expert data from database including their resource links."""
+            max_retries = 3
+            retry_delay = 2
+            
+            for attempt in range(max_retries):
+                conn = None
+                cur = None
+                try:
+                    conn = self.db.get_connection()
+                    with conn.cursor() as cur:
+                        # Check if tables exist
+                        cur.execute("""
+                            SELECT EXISTS (
+                                SELECT FROM information_schema.tables 
+                                WHERE table_name = 'experts_expert'
+                            ) AS expert_table_exists,
+                            EXISTS (
+                                SELECT FROM information_schema.tables
+                                WHERE table_name = 'expert_resource_links'
+                            ) AS links_table_exists;
+                        """)
+                        exists = cur.fetchone()
+                        if not exists[0]:  # experts_expert table doesn't exist
+                            logger.warning("experts_expert table does not exist yet")
+                            return []
+                        
+                        # Fetch experts with their linked resources in one query
+                        # Expanded to include many more fields from experts_expert table
+                        query = """
+                            SELECT 
+                                e.id,
+                                e.first_name,
+                                e.last_name,
+                                e.middle_name,
+                                e.knowledge_expertise,
+                                e.email,
+                                e.designation,
+                                e.theme,
+                                e.unit,
+                                e.bio,
+                                e.orcid,
+                                e.domains,
+                                e.fields,
+                                e.subfields,
+                                e.normalized_domains,
+                                e.normalized_fields,
+                                e.normalized_skills,
+                                e.keywords,
+                                e.contact_details,
+                                e.photo,
+                                COALESCE(
+                                    json_agg(
+                                        json_build_object(
+                                            'resource_id', erl.resource_id,
+                                            'confidence', erl.confidence_score,
+                                            'author_position', erl.author_position
+                                        ) 
+                                        ORDER BY erl.confidence_score DESC
+                                    ) FILTER (WHERE erl.resource_id IS NOT NULL),
+                                    '[]'::json
+                                ) AS linked_resources
+                            FROM experts_expert e
+                            LEFT JOIN expert_resource_links erl ON e.id = erl.expert_id
+                            WHERE e.id IS NOT NULL AND e.is_active = TRUE
+                            GROUP BY 
+                                e.id, e.first_name, e.last_name, e.middle_name, e.knowledge_expertise,
+                                e.email, e.designation, e.theme, e.unit, e.bio, e.orcid,
+                                e.domains, e.fields, e.subfields, e.normalized_domains,
+                                e.normalized_fields, e.normalized_skills, e.keywords,
+                                e.contact_details, e.photo
+                        """ if exists[1] else """
+                            SELECT 
+                                id,
+                                first_name,
+                                last_name,
+                                middle_name,
+                                knowledge_expertise,
+                                email,
+                                designation,
+                                theme,
+                                unit,
+                                bio,
+                                orcid,
+                                domains,
+                                fields,
+                                subfields,
+                                normalized_domains,
+                                normalized_fields,
+                                normalized_skills,
+                                keywords,
+                                contact_details,
+                                photo
+                            FROM experts_expert
+                            WHERE id IS NOT NULL AND is_active = TRUE
+                        """
+                        
+                        cur.execute(query)
+                        experts = []
+                        for row in cur.fetchall():
+                            # Create expert dictionary with many more fields
+                            expert = {
+                                'id': row[0],
+                                'first_name': row[1] or '',
+                                'last_name': row[2] or '',
+                                'middle_name': row[3] or '',
+                                'knowledge_expertise': self._parse_jsonb(row[4]),
+                                'email': row[5] or '',
+                                'designation': row[6] or '',
+                                'theme': row[7] or '',
+                                'unit': row[8] or '',
+                                'bio': row[9] or '',
+                                'orcid': row[10] or '',
+                                'domains': row[11] if row[11] else [],
+                                'fields': row[12] if row[12] else [],
+                                'subfields': row[13] if row[13] else [],
+                                'normalized_domains': row[14] if row[14] else [],
+                                'normalized_fields': row[15] if row[15] else [],
+                                'normalized_skills': row[16] if row[16] else [],
+                                'keywords': row[17] if row[17] else [],
+                                'contact_details': row[18] or '',
+                                'photo': row[19] or '',
+                                'linked_resources': row[20] if len(row) > 20 else []
+                            }
+                            experts.append(expert)
+                        
+                        logger.info(f"Fetched {len(experts)} experts with comprehensive profiles and resource links")
+                        return experts
+                        
+                except Exception as e:
+                    logger.error(f"Attempt {attempt + 1}/{max_retries} failed: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                    else:
+                        logger.error("All retry attempts failed")
+                        raise
+                finally:
+                    if cur:
+                        cur.close()
+                    if conn:
+                        conn.close()
         
 
     # 1. Add this method to ExpertRedisIndexManager class:
@@ -845,39 +1077,7 @@ class ExpertRedisIndexManager:
             return False
 
     
-    def create_redis_index(self) -> bool:
-        """
-        Create Redis indexes for experts, publications, and their relationships.
-        
-        Returns:
-            bool: True if indexing was successful, False otherwise
-        """
-        try:
-            logger.info("Starting comprehensive Redis indexing process...")
-            
-            # Track overall success
-            overall_success = True
-            
-            # Step 1: Clear existing indexes (optional, but can help prevent stale data)
-            self.clear_redis_indexes()
-            
-            # Step 2: Index experts
-            experts_success = self.create_expert_redis_index()
-            
-            # Step 3: Index publications/resources
-            publications_success = self.create_publications_redis_index()
-            
-            # Determine final indexing status
-            if experts_success and publications_success:
-                logger.info("Successfully indexed experts and publications in Redis")
-                return True
-            else:
-                logger.error("Failed to completely index experts and publications")
-                return False
-            
-        except Exception as final_err:
-            logger.error(f"Catastrophic error during Redis indexing: {final_err}")
-            return False
+    
 
             
     def fetch_resources(self) -> List[Dict[str, Any]]:
