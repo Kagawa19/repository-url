@@ -1,3 +1,6 @@
+"""
+Optimized web content processor with PostgreSQL storage.
+"""
 from ai_services_api.services.centralized_repository.web_content.services.content_pipeline import ContentPipeline
 from ai_services_api.services.centralized_repository.web_content.services.web_scraper import WebsiteScraper
 from ai_services_api.services.centralized_repository.web_content.services.pdf_processor import PDFProcessor
@@ -10,7 +13,7 @@ import os
 import hashlib
 import numpy as np
 import json
-from ai_services_api.services.centralized_repository.web_content.database.database_setup import insert_embedding, update_scrape_state, get_scrape_state, check_content_changes
+from ...database.database_setup import insert_embedding, update_scrape_state, get_scrape_state, check_content_changes
 
 logger = logging.getLogger(__name__)
 
@@ -74,12 +77,8 @@ class WebContentProcessor:
             logger.error(f"Failed to initialize components: {str(e)}")
             raise
 
-    def process_batch(self, items: List[Dict]) -> Dict[str, int]:
-        """Synchronous wrapper for async batch processing"""
-        return asyncio.run(self._async_process_batch(items))
-
-    async def _async_process_batch(self, items: List[Dict]) -> Dict[str, int]:
-        """Actual async batch processing method"""
+    async def process_batch_async(self, items: List[Dict]) -> Dict[str, int]:
+        """Process a batch of items asynchronously"""
         results = {'processed': 0, 'updated': 0}
         try:
             changed_items = await self.batch_check_content_changes(items)
@@ -210,7 +209,7 @@ class WebContentProcessor:
                         if page_data:
                             processed = retry_pipeline.process_webpage(page_data)
                             if processed:
-                                batch_results = await self.process_batch([processed])
+                                batch_results = await self.process_batch_async([processed])
                                 retry_successes += batch_results['processed']
                                 results['processed_pages'] += batch_results['processed']
                                 results['updated_pages'] += batch_results['updated']
@@ -241,7 +240,7 @@ class WebContentProcessor:
             for i in range(0, len(webpage_items), self.batch_size):
                 batch = webpage_items[i:i + self.batch_size]
                 logger.debug(f"Processing webpage batch {i//self.batch_size + 1}: {len(batch)} items")
-                batch_results = await self.process_batch(batch)
+                batch_results = await self.process_batch_async(batch)
                 results['processed_pages'] += batch_results['processed']
                 results['updated_pages'] += batch_results['updated']
                 if any(item['content_type'] == 'publication' for item in batch):
@@ -268,7 +267,7 @@ class WebContentProcessor:
             for i in range(0, len(pdf_chunks), self.batch_size):
                 batch = pdf_chunks[i:i + self.batch_size]
                 logger.debug(f"Processing PDF chunk batch {i//self.batch_size + 1}: {len(batch)} items")
-                batch_results = await self.process_batch(batch)
+                batch_results = await self.process_batch_async(batch)
                 results['processed_chunks'] += batch_results['processed']
                 results['updated_chunks'] += batch_results['updated']
                 results['processing_details']['pdf_results'].append({
@@ -283,7 +282,7 @@ class WebContentProcessor:
             for i in range(0, len(publication_pdfs), self.batch_size):
                 batch = publication_pdfs[i:i + self.batch_size]
                 logger.debug(f"Processing publication PDF batch {i//self.batch_size + 1}: {len(batch)} items")
-                batch_results = await self.process_batch([{
+                batch_results = await self.process_batch_async([{
                     'url': pdf['url'],
                     'content': ' '.join(pdf['chunks']),
                     'content_type': 'publication',
