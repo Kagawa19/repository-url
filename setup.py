@@ -14,7 +14,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 # Database related imports
-from .database_manager import DatabaseManager
+from ai_services_api.services.centralized_repository.database_manager import DatabaseManager
 
 # Expert matching imports
 from ai_services_api.services.centralized_repository.expert_matching.matcher import Matcher
