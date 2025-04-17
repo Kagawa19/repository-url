@@ -5,7 +5,7 @@ import requests
 from typing import Dict, List
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from urllib.parse import urljoin
-from text_summarizer import TextSummarizer
+from ai_services_api.services.centralized_repository.ai_summarizer import TextSummarizer
 import re
 import warnings
 
