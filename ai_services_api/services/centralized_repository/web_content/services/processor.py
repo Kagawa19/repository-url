@@ -5,7 +5,7 @@ import os
 from typing import Dict, List
 from datetime import datetime
 from ai_services_api.services.centralized_repository.database_manager import DatabaseManager
-from ai_services_api.services.centralized_repository.web_content.services.content_pipeline import ContentPipeline
+from ai_services_api.services.centralized_repository.web_content.services.pipeline import ContentPipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,8 +79,8 @@ class WebContentProcessor:
         try:
             logger.info("Starting web content processing...")
             
-            # Run the content pipeline
-            results = await self.content_pipeline.run()
+            # Run the content pipeline (synchronous call, no await)
+            results = self.content_pipeline.run()
             processed_pages = results.get('processed_pages', 0)
             webpage_results = results.get('processing_details', {}).get('webpage_results', [])
             
