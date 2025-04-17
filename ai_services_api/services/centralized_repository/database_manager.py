@@ -70,7 +70,7 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Database initialization failed: {e}")
             raise
-pproc
+
     def execute(self, query: str, params: tuple = None) -> Any:
         """
         Execute a query and optionally return results if available.
