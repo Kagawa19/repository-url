@@ -160,25 +160,17 @@ class SystemInitializer:
             raise
 
     async def process_web_content(self) -> Dict:
-        """Process web content and map publications to resources_resource table."""
         try:
-            logger.info("\n" + "="*50)
             logger.info("Processing web content...")
-            logger.info("="*50)
-            
             if not self.web_processor:
-                await self.initialize_web_content_processor()
+                raise ValueError("Web content processor not initialized")
             
-            start_time = time.time()
             results = await self.web_processor.process_content()
-            processing_time = time.time() - start_time
             
-            # Validate results structure
             if 'processing_details' not in results or 'webpage_results' not in results['processing_details']:
                 logger.warning("No webpage results found in processing details")
                 return results
             
-            # Extract publications from webpage_results
             publications = [
                 item for batch in results['processing_details']['webpage_results']
                 for item in batch.get('batch', [])
@@ -187,11 +179,9 @@ class SystemInitializer:
             
             logger.info(f"Found {len(publications)} publications to map to resources_resource")
             
-            # Map publications to resources_resource
             successful_mappings = 0
             for publication in publications:
                 try:
-                    # Validate required fields
                     url = publication.get('url')
                     title = publication.get('title')
                     if not url or not title:
@@ -213,25 +203,11 @@ class SystemInitializer:
                 except Exception as e:
                     logger.error(f"Failed to map publication {url or 'unknown'}: {str(e)}")
             
-            logger.info(f"""Web Content Processing Results:
-                Pages Processed: {results.get('processed_pages', 0)}
-                Pages Updated: {results.get('updated_pages', 0)}
-                PDF Chunks Processed: {results.get('processed_chunks', 0)}
-                PDF Chunks Updated: {results.get('updated_chunks', 0)}
-                Publications Processed: {results.get('processed_publications', 0)}
-                Publications Updated: {results.get('updated_publications', 0)}
-                Publications Mapped: {successful_mappings}
-                Retry Attempts: {results.get('retry_attempts', 0)}
-                Retry Successes: {results.get('retry_successes', 0)}
-                Processing Time: {processing_time:.2f} seconds
-                Average Time Per Page: {processing_time/max(results.get('processed_pages', 1), 1):.2f} seconds
-            """)
-            
+            logger.info(f"Completed mapping {successful_mappings}/{len(publications)} publications to resources_resource")
             return results
         except Exception as e:
             logger.error(f"Error processing web content: {str(e)}", exc_info=True)
             raise
-
     async def match_experts_with_resources(self) -> None:
         """Match experts with resources based on author names."""
         try:
