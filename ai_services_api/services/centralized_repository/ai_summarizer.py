@@ -34,7 +34,7 @@ class TextSummarizer:
             
             # Simple configuration without specifying API version
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-1.5-pro-latest')
+            model = genai.GenerativeModel('gemini-2.0-flash')
             logger.info("Gemini model setup completed")
             return model
             
