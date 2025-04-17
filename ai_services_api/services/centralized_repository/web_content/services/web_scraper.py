@@ -1,255 +1,347 @@
+from ai_services_api.services.centralized_repository.web_content.services.content_pipeline import ContentPipeline
+from ai_services_api.services.centralized_repository.web_content.services.web_scraper import WebsiteScraper
+from ai_services_api.services.centralized_repository.web_content.services.pdf_processor import PDFProcessor
+from ai_services_api.services.centralized_repository.web_content.embeddings.model_handler import EmbeddingModel
 import logging
-from typing import List, Dict, Set, Optional
-from urllib.parse import urljoin, urlparse
-from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
-from retrying import retry
-import time
-import hashlib
-from datetime import datetime
+from typing import Dict, Optional, List
+from datetime import datetime, timedelta
+import asyncio
 import os
-import re
-from ..utils.text_cleaner import TextCleaner
-from ...database.database_setup import insert_webpage, insert_expert
+import hashlib
+import numpy as np
+import json
+from ...database.database_setup import insert_embedding, update_scrape_state, get_scrape_state, check_content_changes
 
 logger = logging.getLogger(__name__)
 
-class WebsiteScraper:
-    """
-    Handles web scraping operations using Selenium and BeautifulSoup.
-    Supports JavaScript rendering and dynamic content loading.
-    """
+class WebContentProcessor:
+    """Optimized web content processor with PostgreSQL storage"""
     
-    def __init__(self, headless: bool = True):
-        self.headless = headless
-        self.base_url = os.getenv('WEBSITE_URL')
-        if not self.base_url:
-            raise ValueError("WEBSITE_URL environment variable not set")
-            
-        self.base_domain = urlparse(self.base_url).netloc
-        self.visited_urls: Set[str] = set()
-        self.pdf_links: Set[str] = set()
-        self.text_cleaner = TextCleaner()
+    def __init__(self, 
+                 max_workers: int = 4,
+                 batch_size: int = 50,
+                 processing_checkpoint_hours: int = 24):
+        self.max_workers = max_workers
+        self.batch_size = batch_size
+        self.website_url = os.getenv('WEBSITE_URL')
+        self.processing_checkpoint_hours = processing_checkpoint_hours
         
-        self.selenium_timeout = int(os.getenv('SELENIUM_TIMEOUT', '30'))
-        self.scroll_pause = float(os.getenv('SCROLL_PAUSE_TIME', '1.0'))
-        self.max_depth = int(os.getenv('MAX_DEPTH', '3'))
+        self.pipeline = None
+        self.embedding_model = None
         
-        self.setup_selenium()
-        logger.info(f"WebsiteScraper initialized with base_url: {self.base_url}")
+        self.setup_components()
+        self.scrape_state = self.load_scrape_state()
 
-    @retry(stop_max_attempt_number=3, wait_fixed=2000)
-    def setup_selenium(self):
+    def load_scrape_state(self):
+        """Load scrape state from database"""
         try:
-            options = Options()
-            if self.headless:
-                options.add_argument("--headless")
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--window-size=1920,1080")
-            options.add_argument("--disable-notifications")
-            options.add_argument("--disable-infobars")
-            options.add_argument("--disable-extensions")
-            options.add_argument("--disable-blink-features=AutomationControlled")
-            
-            chrome_driver_path = os.getenv('CHROMEDRIVER_PATH')
-            service = Service(chrome_driver_path) if chrome_driver_path else Service()
-            
-            remote_url = os.getenv('SELENIUM_REMOTE_URL')
-            if remote_url:
-                logger.info(f"Using remote WebDriver at {remote_url}")
-                self.driver = webdriver.Remote(
-                    command_executor=remote_url,
-                    options=options
-                )
-            else:
-                self.driver = webdriver.Chrome(service=service, options=options)
-            
-            self.driver.set_page_load_timeout(self.selenium_timeout)
-            logger.info("Selenium WebDriver setup complete")
+            state = get_scrape_state()
+            logger.info("Loaded scrape state from database")
+            return state
         except Exception as e:
-            logger.error(f"Failed to setup Selenium: {str(e)}")
+            logger.error(f"Error loading scrape state: {str(e)}")
+            return {
+                'last_run': None,
+                'processed_urls': [],
+                'failed_urls': [],
+                'timestamp': None,
+                'content_hashes': {}
+            }
+
+    def save_scrape_state(self):
+        """Save scrape state to database"""
+        try:
+            update_scrape_state(
+                last_run=self.scrape_state['last_run'],
+                processed_urls=self.scrape_state['processed_urls'],
+                failed_urls=self.scrape_state['failed_urls'],
+                content_hashes=self.scrape_state['content_hashes']
+            )
+            logger.info("Saved scrape state to database")
+        except Exception as e:
+            logger.error(f"Error saving scrape state: {str(e)}")
+
+    def setup_components(self):
+        """Initialize components"""
+        try:
+            self.pipeline = ContentPipeline(
+                max_workers=self.max_workers,
+                webdriver_retries=3
+            )
+            self.embedding_model = EmbeddingModel()
+            logger.info("Successfully initialized all components")
+        except Exception as e:
+            logger.error(f"Failed to initialize components: {str(e)}")
             raise
 
-    def is_valid_url(self, url: str) -> bool:
-        try:
-            parsed = urlparse(url)
-            return all([
-                parsed.scheme in ['http', 'https'],
-                parsed.netloc.endswith(self.base_domain),
-                len(url) < 2048
-            ])
-        except Exception:
-            return False
+    def process_batch(self, items: List[Dict]) -> Dict[str, int]:
+        """Synchronous wrapper for async batch processing"""
+        return asyncio.run(self._async_process_batch(items))
 
-    def is_expert_url(self, url: str) -> bool:
-        """Check if URL is an expert profile"""
-        return bool(re.match(r'^https?://aphrc\.org/person/.*$', url))
-
-    def scroll_page(self):
+    async def _async_process_batch(self, items: List[Dict]) -> Dict[str, int]:
+        """Actual async batch processing method"""
+        results = {'processed': 0, 'updated': 0}
         try:
-            last_height = self.driver.execute_script("return document.body.scrollHeight")
-            while True:
-                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(self.scroll_pause)
-                new_height = self.driver.execute_script("return document.body.scrollHeight")
-                if new_height == last_height:
-                    break
-                last_height = new_height
+            changed_items = await self.batch_check_content_changes(items)
+            results['processed'] = len(items)
+            if changed_items:
+                item_embeddings = await self.batch_create_embeddings(changed_items)
+                keys = await self.batch_store_embeddings(item_embeddings)
+                results['updated'] = len(keys)
+                self.scrape_state['processed_urls'].extend([item['url'] for item in changed_items])
+                self.save_scrape_state()  # Save state after successful batch
         except Exception as e:
-            logger.error(f"Error scrolling page: {str(e)}")
+            logger.error(f"Error processing batch: {str(e)}", exc_info=True)
+            self.scrape_state['failed_urls'].extend([item['url'] for item in items])
+            self.save_scrape_state()  # Save state even on failure
+        return results
 
-    def extract_links(self, soup: BeautifulSoup, base_url: str) -> Dict[str, Set[str]]:
-        nav_links = set()
-        pdf_links = set()
+    async def batch_check_content_changes(self, items: List[Dict]) -> List[Dict]:
+        """Check for content changes using database and scrape state"""
+        changed_items = []
         try:
-            for link in soup.find_all('a', href=True):
-                href = link['href']
-                absolute_url = urljoin(base_url, href)
-                if self.is_valid_url(absolute_url):
-                    if absolute_url.lower().endswith('.pdf'):
-                        pdf_links.add(absolute_url)
-                    else:
-                        nav_links.add(absolute_url)
-        except Exception as e:
-            logger.error(f"Error extracting links: {str(e)}")
-        return {
-            'nav_links': nav_links,
-            'pdf_links': pdf_links
-        }
-
-    def extract_expert_name(self, soup: BeautifulSoup) -> Optional[str]:
-        """Extract expert name from page title or content"""
-        try:
-            title = soup.title.string if soup.title else ''
-            h1 = soup.find('h1')
-            name = h1.get_text(strip=True) if h1 else title.split('|')[0].strip()
-            return name if name else None
-        except Exception as e:
-            logger.error(f"Error extracting expert name: {str(e)}")
-            return None
-
-    def get_page_content(self, url: str) -> Optional[Dict]:
-        try:
-            logger.info(f"Fetching content from: {url}")
-            self.driver.get(url)
-            WebDriverWait(self.driver, self.selenium_timeout).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
-            )
-            self.scroll_page()
-            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-            text_elements = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'article'])
-            text_content = ' '.join([elem.get_text(strip=True) for elem in text_elements])
-            cleaned_content = self.text_cleaner.clean_text(text_content)
-            
-            if not cleaned_content.strip():
-                logger.warning(f"No content found at: {url}")
-                return None
+            for item in items:
+                url = item['url']
+                new_hash = hashlib.md5(item['content'].encode()).hexdigest()
+                stored_hash = self.scrape_state['content_hashes'].get(url)
+                last_modified = self.scrape_state.get('timestamp')
                 
-            links = self.extract_links(soup, url)
-            self.pdf_links.update(links['pdf_links'])
-            
-            metadata = {
-                'title': soup.title.string if soup.title else '',
-                'meta_description': soup.find('meta', {'name': 'description'})['content'] if soup.find('meta', {'name': 'description'}) else '',
-                'last_modified': self.driver.execute_script("return document.lastModified;"),
-                'word_count': len(cleaned_content.split())
-            }
-            
-            content_hash = hashlib.md5(cleaned_content.encode()).hexdigest()
-            logger.debug(f"Scraped {url}: {len(cleaned_content)} chars, hash: {content_hash}")
-            
-            result = {
-                'url': url,
-                'content': cleaned_content,
-                'title': metadata['title'],
-                'nav_links': list(links['nav_links']),
-                'pdf_links': list(links['pdf_links']),
-                'metadata': metadata,
-                'timestamp': datetime.now().isoformat(),
-                'content_hash': content_hash
-            }
-            
-            # Store in the appropriate table
-            if self.is_expert_url(url):
-                name = self.extract_expert_name(soup)
-                expert_id = insert_expert(
-                    url=url,
-                    name=name,
-                    content=cleaned_content,
-                    metadata=metadata,
-                    last_modified=metadata['last_modified']
-                )
-                result['expert_id'] = expert_id
-                result['content_type'] = 'expert'
-            else:
-                webpage_id = insert_webpage(
-                    url=url,
-                    title=metadata['title'],
-                    content=cleaned_content,
-                    metadata=metadata,
-                    last_modified=metadata['last_modified']
-                )
-                result['webpage_id'] = webpage_id
-                result['content_type'] = 'webpage'
-            
-            return result
-            
-        except TimeoutException:
-            logger.error(f"Timeout while loading: {url}")
-            return None
-        except WebDriverException as e:
-            logger.error(f"WebDriver error for {url}: {str(e)}")
-            return None
+                if last_modified:
+                    try:
+                        last_modified_dt = datetime.fromisoformat(last_modified)
+                    except (ValueError, TypeError):
+                        last_modified_dt = None
+                
+                if (stored_hash is None or 
+                    stored_hash != new_hash or 
+                    (last_modified_dt and 
+                     (datetime.now() - last_modified_dt) > timedelta(hours=self.processing_checkpoint_hours))):
+                    changed_items.append(item)
+                    self.scrape_state['content_hashes'][url] = new_hash
         except Exception as e:
-            logger.error(f"Error processing {url}: {str(e)}")
-            return None
+            logger.error(f"Error checking content changes: {str(e)}", exc_info=True)
+        return changed_items
 
-    def scrape_site(self) -> List[Dict]:
-        pages_data = []
-        urls_to_visit = [(self.base_url, 0)]  # (url, depth)
+    async def batch_create_embeddings(self, items: List[Dict]) -> List[tuple]:
+        """Optimize embedding creation with additional error handling"""
         try:
-            while urls_to_visit:
-                url, depth = urls_to_visit.pop(0)
-                if url in self.visited_urls or depth > self.max_depth:
-                    continue
-                logger.info(f"Scraping: {url} (Depth: {depth})")
-                page_data = self.get_page_content(url)
-                if page_data:
-                    pages_data.append(page_data)
-                    self.visited_urls.add(url)
-                    if depth < self.max_depth:
-                        new_urls = [
-                            (url, depth + 1) 
-                            for url in page_data['nav_links'] 
-                            if url not in self.visited_urls
-                        ]
-                        urls_to_visit.extend(new_urls)
-                time.sleep(1)
-            logger.info(f"Scraping complete. Processed {len(pages_data)} pages")
-            return pages_data
+            batch_size = min(32, len(items))
+            embeddings = []
+            for i in range(0, len(items), batch_size):
+                batch = items[i:i + batch_size]
+                contents = [item['content'] for item in batch]
+                try:
+                    batch_embeddings = self.embedding_model.create_embeddings_batch(contents)
+                    embeddings.extend(zip(batch, batch_embeddings))
+                except Exception as batch_error:
+                    logger.warning(f"Error in embedding batch {i//batch_size}: {batch_error}")
+            return embeddings
         except Exception as e:
-            logger.error(f"Error during site scraping: {str(e)}")
-            return pages_data
+            logger.error(f"Error in batch embedding creation: {str(e)}", exc_info=True)
+            return []
+
+    async def batch_store_embeddings(self, item_embeddings: List[tuple]) -> List[str]:
+        """Store embeddings in database"""
+        keys = []
+        for item, embedding in item_embeddings:
+            try:
+                content_type = item['content_type']
+                content_id = item.get('content_id')
+                if not content_id:
+                    logger.error(f"No content_id for {item.get('url', 'unknown')}")
+                    continue
+                
+                content_hash = hashlib.md5(item['content'].encode()).hexdigest()
+                embedding_id = insert_embedding(
+                    content_type=content_type,
+                    content_id=content_id,
+                    embedding=embedding.tolist(),
+                    content_hash=content_hash
+                )
+                keys.append(str(embedding_id))
+            except Exception as e:
+                logger.error(f"Error storing embedding for {item.get('url', 'unknown')}: {str(e)}", exc_info=True)
+                self.scrape_state['failed_urls'].append(item.get('url', 'unknown'))
+        return keys
+
+    async def process_content(self) -> Dict:
+        """Enhanced processing method with database storage, diagnostics, and retry logic"""
+        try:
+            logger.info("\n" + "="*50)
+            logger.info("Starting Resumable Web Content Processing...")
+            logger.info(f"Website URL: {self.website_url}")
+            logger.info("="*50)
+
+            results = {
+                'processed_pages': 0,
+                'updated_pages': 0,
+                'processed_chunks': 0,
+                'updated_chunks': 0,
+                'processed_publications': 0,
+                'updated_publications': 0,
+                'retry_attempts': 0,
+                'retry_successes': 0,
+                'timestamp': datetime.now().isoformat(),
+                'processing_details': {
+                    'webpage_results': [],
+                    'pdf_results': [],
+                    'publication_results': [],
+                    'retry_results': []
+                }
+            }
+
+            if not self.website_url:
+                logger.error("No WEBSITE_URL provided in environment variables")
+                self.scrape_state['last_run'] = results['timestamp']
+                self.scrape_state['timestamp'] = results['timestamp']
+                self.save_scrape_state()
+                return results
+
+            # Retry failed URLs from previous run
+            failed_urls = self.scrape_state['failed_urls'][:]
+            if failed_urls:
+                logger.info(f"Retrying {len(failed_urls)} failed URLs")
+                self.scrape_state['failed_urls'] = []
+                self.save_scrape_state()
+                retry_pipeline = ContentPipeline(max_workers=self.max_workers)
+                retry_successes = 0
+                for url in failed_urls:
+                    try:
+                        page_data = retry_pipeline.web_scraper.get_page_content(url)
+                        if page_data:
+                            processed = retry_pipeline.process_webpage(page_data)
+                            if processed:
+                                batch_results = await self.process_batch([processed])
+                                retry_successes += batch_results['processed']
+                                results['processed_pages'] += batch_results['processed']
+                                results['updated_pages'] += batch_results['updated']
+                                if processed['content_type'] == 'publication':
+                                    results['processed_publications'] += batch_results['processed']
+                                    results['updated_publications'] += batch_results['updated']
+                        else:
+                            self.scrape_state['failed_urls'].append(url)
+                    except Exception as e:
+                        logger.error(f"Retry failed for {url}: {str(e)}", exc_info=True)
+                        self.scrape_state['failed_urls'].append(url)
+                results['retry_attempts'] = len(failed_urls)
+                results['retry_successes'] = retry_successes
+                results['processing_details']['retry_results'].append({
+                    'attempted_urls': len(failed_urls),
+                    'successful_urls': retry_successes
+                })
+                retry_pipeline.cleanup()
+                self.save_scrape_state()
+
+            pipeline_results = self.pipeline.run()
+            logger.info(f"Pipeline results: {len(pipeline_results['webpage_results'])} webpages, {len(pipeline_results['pdf_results'])} PDFs")
+
+            if not pipeline_results['webpage_results'] and not pipeline_results['pdf_results']:
+                logger.warning("No content retrieved from pipeline. Check WEBSITE_URL and WebDriver configuration.")
+
+            # Process webpages and publications
+            webpage_items = [item for item in pipeline_results['webpage_results'] if item['content_type'] in ['webpage', 'expert', 'publication']]
+            for i in range(0, len(webpage_items), self.batch_size):
+                batch = webpage_items[i:i + self.batch_size]
+                logger.debug(f"Processing webpage batch {i//self.batch_size + 1}: {len(batch)} items")
+                batch_results = await self.process_batch(batch)
+                results['processed_pages'] += batch_results['processed']
+                results['updated_pages'] += batch_results['updated']
+                if any(item['content_type'] == 'publication' for item in batch):
+                    results['processed_publications'] += batch_results['processed']
+                    results['updated_publications'] += batch_results['updated']
+                results['processing_details']['webpage_results'].append({
+                    'batch_start_index': i,
+                    'batch_size': len(batch),
+                    'processed': batch_results['processed'],
+                    'updated': batch_results['updated']
+                })
+                self.save_scrape_state()
+
+            # Process PDF chunks
+            pdf_chunks = []
+            for pdf in pipeline_results['pdf_results']:
+                for chunk_index, chunk in enumerate(pdf['chunks']):
+                    pdf_chunks.append({
+                        'url': f"{pdf['url']}#chunk{chunk_index}",
+                        'content': chunk,
+                        'content_type': 'pdf_chunk',
+                        'content_id': pdf['chunk_ids'][chunk_index]
+                    })
+
+            for i in range(0, len(pdf_chunks), self.batch_size):
+                batch = pdf_chunks[i:i + self.batch_size]
+                logger.debug(f"Processing PDF chunk batch {i//self.batch_size + 1}: {len(batch)} items")
+                batch_results = await self.process_batch(batch)
+                results['processed_chunks'] += batch_results['processed']
+                results['updated_chunks'] += batch_results['updated']
+                results['processing_details']['pdf_results'].append({
+                    'batch_start_index': i,
+                    'batch_size': len(batch),
+                    'processed': batch_results['processed'],
+                    'updated': batch_results['updated']
+                })
+                self.save_scrape_state()
+
+            # Process publication PDFs
+            publication_pdfs = [pdf for pdf in pipeline_results['pdf_results'] if pdf.get('content_type') == 'publication']
+            for i in range(0, len(publication_pdfs), self.batch_size):
+                batch = publication_pdfs[i:i + self.batch_size]
+                logger.debug(f"Processing publication PDF batch {i//self.batch_size + 1}: {len(batch)} items")
+                batch_results = await self.process_batch([{
+                    'url': pdf['url'],
+                    'content': ' '.join(pdf['chunks']),
+                    'content_type': 'publication',
+                    'content_id': pdf['publication_id']
+                } for pdf in batch])
+                results['processed_publications'] += batch_results['processed']
+                results['updated_publications'] += batch_results['updated']
+                results['processing_details']['publication_results'].append({
+                    'batch_start_index': i,
+                    'batch_size': len(batch),
+                    'processed': batch_results['processed'],
+                    'updated': batch_results['updated']
+                })
+                self.save_scrape_state()
+
+            logger.info(f"""Resumable Web Content Processing Results:
+                - Processed Pages: {results['processed_pages']}
+                - Updated Pages: {results['updated_pages']}
+                - Processed PDF Chunks: {results['processed_chunks']}
+                - Updated PDF Chunks: {results['updated_chunks']}
+                - Processed Publications: {results['processed_publications']}
+                - Updated Publications: {results['updated_publications']}
+                - Retry Attempts: {results['retry_attempts']}
+                - Retry Successes: {results['retry_successes']}
+                - Timestamp: {results['timestamp']}
+            """)
+
+            self.scrape_state['last_run'] = results['timestamp']
+            self.scrape_state['timestamp'] = results['timestamp']
+            self.scrape_state['processed_urls'] = list(set(self.scrape_state['processed_urls']))
+            self.save_scrape_state()
+            return results
+
+        except Exception as e:
+            logger.error(f"Error in content processing: {str(e)}", exc_info=True)
+            self.scrape_state['timestamp'] = datetime.now().isoformat()
+            self.scrape_state['failed_urls'] = list(set(self.scrape_state['failed_urls']))
+            self.save_scrape_state()
+            raise
         finally:
-            self.close()
+            self.cleanup()
+
+    def cleanup(self):
+        """Enhanced cleanup with database state management"""
+        try:
+            if hasattr(self, 'pipeline'):
+                self.pipeline.cleanup()
+            if hasattr(self, 'embedding_model'):
+                self.embedding_model.cleanup()
+            logger.info("Resources cleaned up successfully")
+            self.save_scrape_state()
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}", exc_info=True)
+            self.save_scrape_state()
 
     def close(self):
-        try:
-            self.driver.quit()
-            logger.info("WebDriver closed successfully")
-        except Exception as e:
-            logger.error(f"Error closing WebDriver: {str(e)}")
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
+        self.cleanup()

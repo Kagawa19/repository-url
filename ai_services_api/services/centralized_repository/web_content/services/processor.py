@@ -79,16 +79,18 @@ class WebContentProcessor:
         return asyncio.run(self._async_process_batch(items))
 
     async def _async_process_batch(self, items: List[Dict]) -> Dict[str, int]:
-        """Actual async batch processing method"""
         results = {'processed': 0, 'updated': 0}
         try:
-            changed_items = await self.batch_check_content_changes(items)
-            results['processed'] = len(items)
-            if changed_items:
-                item_embeddings = await self.batch_create_embeddings(changed_items)
-                keys = await self.batch_store_embeddings(item_embeddings)
-                results['updated'] = len(keys)
-                self.scrape_state['processed_urls'].extend([item['url'] for item in changed_items])
+            for item in items:
+                new_hash = hashlib.md5(item['content'].encode()).hexdigest()
+                if await self.batch_check_content_changes([item]):
+                    embedding = await self.batch_create_embeddings([item])
+                    keys = await self.batch_store_embeddings(embedding)
+                    results['updated'] += len(keys)
+                    self.scrape_state['processed_urls'].append(item['url'])
+                    self.scrape_state['content_hashes'][item['url']] = new_hash
+                    self.save_scrape_state()
+                results['processed'] += 1
         except Exception as e:
             logger.error(f"Error processing batch: {str(e)}")
         return results
@@ -138,29 +140,30 @@ class WebContentProcessor:
             return []
 
     async def batch_store_embeddings(self, item_embeddings: List[tuple]) -> List[str]:
-        """Store embeddings in database"""
         keys = []
-        for item, embedding in item_embeddings:
+        with get_db_cursor(cursor_factory=DictCursor) as (cursor, conn):
             try:
-                content_type = item['content_type']
-                content_id = item.get('content_id') or item.get('chunk_ids', [None])[0]
-                if not content_id:
-                    logger.error(f"No content_id for {item.get('url', 'unknown')}")
-                    continue
-                
-                content_hash = hashlib.md5(item['content'].encode()).hexdigest()
-                embedding_id = insert_embedding(
-                    content_type=content_type,
-                    content_id=content_id,
-                    embedding=embedding.tolist(),
-                    content_hash=content_hash
-                )
-                keys.append(str(embedding_id))
+                for item, embedding in item_embeddings:
+                    content_type = item['content_type']
+                    content_id = item.get('content_id')
+                    if not content_id:
+                        logger.error(f"No content_id for {item.get('url', 'unknown')}")
+                        continue
+                    content_hash = hashlib.md5(item['content'].encode()).hexdigest()
+                    cursor.execute("""
+                        INSERT INTO embeddings (content_type, content_id, embedding, content_hash, timestamp)
+                        VALUES (%s, %s, %s, %s, %s)
+                        RETURNING id
+                    """, (content_type, content_id, Json(embedding.tolist()), content_hash, datetime.now()))
+                    embedding_id = cursor.fetchone()['id']
+                    keys.append(str(embedding_id))
+                conn.commit()
             except Exception as e:
-                logger.error(f"Error storing embedding for {item.get('url', 'unknown')}: {str(e)}")
-                self.scrape_state['failed_urls'].append(item.get('url', 'unknown'))
+                conn.rollback()
+                logger.error(f"Error storing batch embeddings: {str(e)}")
+                self.scrape_state['failed_urls'].extend([item.get('url', 'unknown') for item, _ in item_embeddings])
+                return []
         return keys
-
     async def process_content(self) -> Dict:
         """Enhanced processing method with database storage and diagnostics"""
         try:
