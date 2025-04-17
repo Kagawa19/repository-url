@@ -1,3 +1,4 @@
+
 import logging
 import asyncio
 import os
@@ -5,6 +6,7 @@ from typing import Dict, List
 from datetime import datetime
 from ai_services_api.services.centralized_repository.database_manager import DatabaseManager
 from ai_services_api.services.centralized_repository.web_content.services.content_pipeline import ContentPipeline
+import hashlib
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,7 +55,10 @@ class WebContentProcessor:
                 logger.debug(f"Skipping webpage insertion for expert profile: {url}")
                 return 0
             
-            logger.debug(f"Attempting to insert webpage: url={url}, title={title[:50]}..., content_type={content_type}, content_length={len(content)}, navigation_text_length={len(navigation_text)}")
+            # Generate content_hash
+            content_hash = hashlib.md5(content.encode('utf-8')).hexdigest() if content else ''
+            
+            logger.debug(f"Attempting to insert webpage: url={url}, title={title[:50]}..., content_type={content_type}, content_length={len(content)}, navigation_text_length={len(navigation_text)}, content_hash={content_hash}")
             
             result = self.db.execute(
                 "SELECT id FROM webpages WHERE url = %s",
@@ -65,11 +70,11 @@ class WebContentProcessor:
             
             result = self.db.execute(
                 """
-                INSERT INTO webpages (url, title, content, content_type, navigation_text, last_updated)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO webpages (url, title, content, content_type, navigation_text, last_updated, content_hash)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (url, title, content, content_type, navigation_text, datetime.utcnow())
+                (url, title, content, content_type, navigation_text, datetime.utcnow(), content_hash)
             )
             webpage_id = result[0][0]
             logger.info(f"Inserted webpage {url} with ID {webpage_id}")
@@ -153,3 +158,4 @@ class WebContentProcessor:
                 logger.info("Database connection closed")
         except Exception as e:
             logger.error(f"Error during cleanup: {str(e)}")
+

@@ -3,10 +3,15 @@ import logging
 import os
 import requests
 from typing import Dict, List
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from urllib.parse import urljoin
 from ai_services_api.services.centralized_repository.ai_summarizer import TextSummarizer
+
 import re
+import warnings
+
+# Suppress XML parsing warnings
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +39,11 @@ class ContentPipeline:
         title = page_data.get('title', '').lower()
         content = page_data.get('content', '')
 
+        # Skip XML sitemaps
+        if url.endswith('.xml'):
+            logger.debug(f"Skipping sitemap URL: {url}")
+            return {}
+
         # Assign content_type
         if '/person/' in url:
             content_type = 'expert'
@@ -47,10 +57,8 @@ class ContentPipeline:
         contact_email = None
         if content_type == 'expert':
             soup = BeautifulSoup(page_data.get('raw_html', ''), 'html.parser')
-            # Extract affiliation (e.g., from a specific class or tag)
             aff_elem = soup.find(class_='affiliation') or soup.find('div', string=re.compile('affiliation|organization', re.I))
             affiliation = aff_elem.get_text(strip=True) if aff_elem else 'APHRC'
-            # Extract email (simplified, assumes email is in text or href)
             email_elem = soup.find('a', href=re.compile(r'^mailto:'))
             contact_email = email_elem.get('href').replace('mailto:', '') if email_elem else None
 
@@ -81,17 +89,34 @@ class ContentPipeline:
         try:
             response = self.session.get(url, timeout=10)
             response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Use XML parser for sitemap URLs
+            parser = 'xml' if url.endswith('.xml') else 'html.parser'
+            soup = BeautifulSoup(response.text, parser)
             
             title = soup.title.string if soup.title else 'Untitled'
             content = ' '.join(p.get_text(strip=True) for p in soup.find_all('p'))
+            
+            # Extract navigation text
+            nav_text = ''
+            nav_elements = (soup.find_all('nav') or 
+                           soup.find_all('ul', class_=re.compile('menu|nav|navigation|main-menu|primary-menu', re.I)) or
+                           soup.find_all(class_=re.compile('menu|nav|navigation', re.I)))
+            if nav_elements:
+                nav_links = []
+                for nav in nav_elements:
+                    links = nav.find_all('a')
+                    nav_links.extend(link.get_text(strip=True) for link in links if link.get_text(strip=True))
+                nav_text = ' | '.join(set(nav_links))[:1000]
+                logger.debug(f"Extracted navigation text for {url}: {nav_text[:100]}...")
             
             return {
                 'url': url,
                 'title': title,
                 'content': content[:5000],
                 'content_type': 'webpage',
-                'raw_html': str(soup)  # Store raw HTML for expert parsing
+                'raw_html': str(soup),
+                'navigation_text': nav_text
             }
         except Exception as e:
             logger.error(f"Error scraping {url}: {str(e)}")
@@ -100,16 +125,6 @@ class ContentPipeline:
     def run(self) -> Dict:
         """
         Run the scraping pipeline with summarization.
-        Returns:
-            {
-                'processed_pages': int,
-                'processing_details': {
-                    'webpage_results': [
-                        {'batch': [{'url': str, 'title': str, 'content': str, 'content_type': str, 'affiliation': str, 'contact_email': str}, ...]},
-                        ...
-                    ]
-                }
-            }
         """
         results = {
             'processed_pages': 0,
@@ -126,8 +141,8 @@ class ContentPipeline:
             try:
                 response = self.session.get(sitemap_url, timeout=10)
                 response.raise_for_status()
-                sitemap = BeautifulSoup(response.text, 'xml')
-                urls = [loc.text for loc in sitemap.find_all('loc') if loc.text.startswith('https://aphrc.org')]
+                soup = BeautifulSoup(response.text, 'xml')
+                urls = [loc.text for loc in soup.find_all('loc') if loc.text.startswith('https://aphrc.org') and not loc.text.endswith('.xml')]
             except Exception as e:
                 logger.warning(f"Failed to fetch sitemap: {str(e)}. Falling back to start_urls.")
                 urls = self.start_urls
@@ -149,7 +164,7 @@ class ContentPipeline:
                 links = set(
                     urljoin(url, a.get('href'))
                     for a in soup.find_all('a', href=True)
-                    if urljoin(url, a.get('href')).startswith('https://aphrc.org')
+                    if urljoin(url, a.get('href')).startswith('https://aphrc.org') and not urljoin(url, a.get('href')).endswith('.xml')
                 )
                 
                 for link in list(links)[:5]:
