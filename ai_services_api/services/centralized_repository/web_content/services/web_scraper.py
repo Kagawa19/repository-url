@@ -154,7 +154,7 @@ class WebsiteScraper:
             if self.driver:
                 self.driver.quit()
                 self.driver = None
-                logger.info("WebDriver cleaned up")ppro
+                logger.info("WebDriver cleaned up")
             if self.session:
                 self.session.close()
                 logger.info("Requests session cleaned up")
