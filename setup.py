@@ -2,32 +2,45 @@
 System initialization and database setup module.
 """
 import json
-import os
-from typing import List, Dict, Tuple
 import logging
+import asyncio
+import os
 import sys
 import argparse
-import asyncio
-from dataclasses import dataclass
 import time
-from typing import Optional
+from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass
+from datetime import datetime
 from dotenv import load_dotenv
-import subprocess
 
+# Database related imports
+from .database_manager import DatabaseManager
+
+# Expert matching imports
 from ai_services_api.services.centralized_repository.expert_matching.matcher import Matcher
+
+# OpenAlex and publication imports
 from ai_services_api.services.centralized_repository.openalex.openalex_processor import OpenAlexProcessor
 from ai_services_api.services.centralized_repository.publication_processor import PublicationProcessor
+from ai_services_api.services.centralized_repository.openalex.expert_processor import ExpertProcessor
+
+# Web content and AI services imports
+from ai_services_api.services.centralized_repository.web_content.services.processor import WebContentProcessor
 from ai_services_api.services.centralized_repository.ai_summarizer import TextSummarizer
+
+# Search and index imports
 from ai_services_api.services.recommendation.graph_initializer import GraphDatabaseInitializer
 from ai_services_api.services.search.indexing.index_creator import ExpertSearchIndexManager
 from ai_services_api.services.search.indexing.redis_index_manager import ExpertRedisIndexManager
+
+# Database setup imports
 from ai_services_api.services.centralized_repository.database_setup import DatabaseInitializer, ExpertManager
+
+# Scraper imports
 from ai_services_api.services.centralized_repository.orcid.orcid_processor import OrcidProcessor
 from ai_services_api.services.centralized_repository.knowhub.knowhub_scraper import KnowhubScraper
 from ai_services_api.services.centralized_repository.website.website_scraper import WebsiteScraper
 from ai_services_api.services.centralized_repository.nexus.researchnexus_scraper import ResearchNexusScraper
-from ai_services_api.services.centralized_repository.openalex.expert_processor import ExpertProcessor
-from ai_services_api.services.centralized_repository.database_manager import DatabaseManager
 
 # Configure logging
 logging.basicConfig(
@@ -51,6 +64,7 @@ class SetupConfig:
     expertise_csv: str = ''
     max_workers: int = 4
     batch_size: int = 50
+    checkpoint_hours: int = 24
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> 'SetupConfig':
@@ -65,14 +79,27 @@ class SetupConfig:
             skip_classification=args.skip_classification,
             expertise_csv=args.expertise_csv,
             max_workers=args.max_workers,
-            batch_size=args.batch_size
+            batch_size=args.batch_size,
+            checkpoint_hours=args.checkpoint_hours
         )
 
 class SystemInitializer:
-    """Handles system initialization and setup"""
-    def __init__(self, config: SetupConfig):
-        self.config = config
-        self.db = DatabaseManager()
+    """Initializes the complete research system, including database, web content, 
+    expert matching, publication processing, and search indexing."""
+    
+    def __init__(self, config: Optional[SetupConfig] = None):
+        """Initialize system components and set up environment."""
+        load_dotenv()
+        
+        # Set default config if none provided
+        if config is None:
+            self.config = SetupConfig()
+        else:
+            self.config = config
+            
+        # Initialize database connection
+        self.db = None
+        self.web_processor = None
         self.required_env_vars = [
             'DATABASE_URL',
             'NEO4J_URI',
@@ -85,43 +112,125 @@ class SystemInitializer:
             'ORCID_CLIENT_SECRET',
             'KNOWHUB_BASE_URL',
             'EXPERTISE_CSV',
-            'WEBSITE_URL'
+            'WEBSITE_URL',
+            'MAX_WORKERS',
+            'BATCH_SIZE',
+            'CHECKPOINT_HOURS'
         ]
+        
+        try:
+            self.db = DatabaseManager()
+        except Exception as e:
+            logger.error(f"Failed to initialize DatabaseManager: {str(e)}")
+            raise
 
     def verify_environment(self) -> None:
         """Verify all required environment variables are set"""
-        load_dotenv()
         missing_vars = [var for var in self.required_env_vars if not os.getenv(var)]
         if missing_vars:
-            raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
-
-    def _fetch_experts_data(self):
-        """Fetch experts data from PostgreSQL"""
-        from ai_services_api.services.centralized_repository.database_setup import get_db_cursor
+            logger.warning(f"Missing environment variables: {', '.join(missing_vars)}")
+            logger.warning("Using default values where possible...")
         
+        # Set config values from environment if not already set
+        if not hasattr(self.config, 'max_workers') or not self.config.max_workers:
+            self.config.max_workers = int(os.getenv('MAX_WORKERS', 4))
+        
+        if not hasattr(self.config, 'batch_size') or not self.config.batch_size:
+            self.config.batch_size = int(os.getenv('BATCH_SIZE', 50))
+            
+        if not hasattr(self.config, 'checkpoint_hours') or not self.config.checkpoint_hours:
+            self.config.checkpoint_hours = int(os.getenv('CHECKPOINT_HOURS', 24))
+            
+        # Validate configuration values
+        if self.config.max_workers < 1 or self.config.batch_size < 1 or self.config.checkpoint_hours < 1:
+            raise ValueError("Invalid configuration: MAX_WORKERS, BATCH_SIZE, and CHECKPOINT_HOURS must be positive")
+
+    async def initialize_web_content_processor(self):
+        """Initialize the WebContentProcessor with configuration settings."""
         try:
-            with get_db_cursor() as (cur, conn):
-                cur.execute("""
-                    SELECT 
-                        id,
-                        first_name, 
-                        last_name,
-                        knowledge_expertise,
-                        designation,
-                        theme,
-                        unit,
-                        orcid,
-                        is_active
-                    FROM experts_expert
-                    WHERE id IS NOT NULL
-                """)
-                
-                experts_data = cur.fetchall()
-                logger.info(f"Fetched {len(experts_data)} experts from database")
-                return experts_data
+            self.web_processor = WebContentProcessor(
+                max_workers=self.config.max_workers,
+                batch_size=self.config.batch_size,
+                processing_checkpoint_hours=self.config.checkpoint_hours
+            )
+            logger.info(f"Web content processor initialized with max_workers={self.config.max_workers}, "
+                       f"batch_size={self.config.batch_size}, checkpoint_hours={self.config.checkpoint_hours}")
         except Exception as e:
-            logger.error(f"Error fetching experts data: {e}")
-            return []
+            logger.error(f"Failed to initialize web content processor: {str(e)}")
+            raise
+
+    async def process_web_content(self) -> Dict:
+        """Process web content and map publications to resources_resource table."""
+        try:
+            logger.info("\n" + "="*50)
+            logger.info("Processing web content...")
+            logger.info("="*50)
+            
+            if not self.web_processor:
+                await self.initialize_web_content_processor()
+            
+            start_time = time.time()
+            results = await self.web_processor.process_content()
+            processing_time = time.time() - start_time
+            
+            # Validate results structure
+            if 'processing_details' not in results or 'webpage_results' not in results['processing_details']:
+                logger.warning("No webpage results found in processing details")
+                return results
+            
+            # Extract publications from webpage_results
+            publications = [
+                item for batch in results['processing_details']['webpage_results']
+                for item in batch.get('batch', [])
+                if item.get('content_type') == 'publication'
+            ]
+            
+            logger.info(f"Found {len(publications)} publications to map to resources_resource")
+            
+            # Map publications to resources_resource
+            successful_mappings = 0
+            for publication in publications:
+                try:
+                    # Validate required fields
+                    url = publication.get('url')
+                    title = publication.get('title')
+                    if not url or not title:
+                        logger.warning(f"Skipping publication with missing url or title: {publication}")
+                        continue
+                    
+                    self.db.add_publication(
+                        title=title or 'Untitled',
+                        summary=publication.get('content', ''),
+                        source=url,
+                        type=publication.get('content_type', 'webpage'),
+                        authors=publication.get('metadata', {}).get('authors', []) or [],
+                        domains=publication.get('metadata', {}).get('domains', []) or [],
+                        publication_year=publication.get('metadata', {}).get('year'),
+                        doi=publication.get('metadata', {}).get('doi')
+                    )
+                    successful_mappings += 1
+                    logger.debug(f"Mapped publication: {url}")
+                except Exception as e:
+                    logger.error(f"Failed to map publication {url or 'unknown'}: {str(e)}")
+            
+            logger.info(f"""Web Content Processing Results:
+                Pages Processed: {results.get('processed_pages', 0)}
+                Pages Updated: {results.get('updated_pages', 0)}
+                PDF Chunks Processed: {results.get('processed_chunks', 0)}
+                PDF Chunks Updated: {results.get('updated_chunks', 0)}
+                Publications Processed: {results.get('processed_publications', 0)}
+                Publications Updated: {results.get('updated_publications', 0)}
+                Publications Mapped: {successful_mappings}
+                Retry Attempts: {results.get('retry_attempts', 0)}
+                Retry Successes: {results.get('retry_successes', 0)}
+                Processing Time: {processing_time:.2f} seconds
+                Average Time Per Page: {processing_time/max(results.get('processed_pages', 1), 1):.2f} seconds
+            """)
+            
+            return results
+        except Exception as e:
+            logger.error(f"Error processing web content: {str(e)}", exc_info=True)
+            raise
 
     async def match_experts_with_resources(self) -> None:
         """Match experts with resources based on author names."""
@@ -198,7 +307,7 @@ class SystemInitializer:
     async def load_initial_experts(self) -> None:
         """Load initial experts from CSV if provided"""
         try:
-            csv_path = 'experts.csv'
+            csv_path = self.config.expertise_csv or 'experts.csv'
             
             if os.path.exists(csv_path):
                 logger.info(f"Loading experts from {csv_path}...")
@@ -206,7 +315,7 @@ class SystemInitializer:
                 expert_manager.load_experts_from_csv(csv_path)
                 logger.info("Initial experts loaded successfully!")
             else:
-                logger.warning("No experts.csv found. Skipping expert loading.")
+                logger.warning(f"No experts CSV found at {csv_path}. Skipping expert loading.")
         except Exception as e:
             logger.error(f"Error loading initial experts: {e}")
             raise
@@ -532,92 +641,34 @@ class SystemInitializer:
             logger.error(f"Redis search index creation failed: {e}")
             return False
 
-    async def process_web_content(self) -> bool:
-        """Process web content with optimized batch processing"""
+    def cleanup(self):
+        """Clean up resources, including web processor and database connections."""
         try:
-            if not self.config.skip_scraping:
-                logger.info("\n" + "="*50)
-                logger.info("Starting Web Content Processing...")
-                logger.info("="*50)
-
-                start_time = time.time()
-                
-                try:
-                    from ai_services_api.services.centralized_repository.web_content.services.processor import WebContentProcessor
-                except ImportError as e:
-                    logger.error(f"Failed to import WebContentProcessor: {str(e)}", exc_info=True)
-                    raise
-
-                processor = WebContentProcessor(
-                    max_workers=self.config.max_workers,
-                    batch_size=self.config.batch_size
-                )
-
-                try:
-                    results = await processor.process_content()
-                    processing_time = time.time() - start_time
-                    
-                    logger.info(f"""Web Content Processing Results:
-                        Pages Processed: {results['processed_pages']}
-                        Pages Updated: {results['updated_pages']}
-                        PDF Chunks Processed: {results['processed_chunks']}
-                        PDF Chunks Updated: {results['updated_chunks']}
-                        Publications Processed: {results['processed_publications']}
-                        Publications Updated: {results['updated_publications']}
-                        Retry Attempts: {results['retry_attempts']}
-                        Retry Successes: {results['retry_successes']}
-                        Processing Time: {processing_time:.2f} seconds
-                        Average Time Per Page: {processing_time/max(results['processed_pages'], 1):.2f} seconds
-                    """)
-                    
-                    logger.info("Mapping publications to resources_resource...")
-                    with self.db.get_cursor() as (cur, conn):
-                        cur.execute("""
-                            INSERT INTO resources_resource (
-                                title, summary, authors, source, domains, publication_date, created_at, updated_at, url
-                            )
-                            SELECT 
-                                p.title, 
-                                p.abstract AS summary, 
-                                p.authors, 
-                                'website' AS source, 
-                                ARRAY[]::text[] AS domains, 
-                                p.publication_date, 
-                                NOW() AS created_at, 
-                                NOW() AS updated_at,
-                                p.url
-                            FROM publications p
-                            LEFT JOIN resources_resource r ON p.url = r.url
-                            WHERE r.id IS NULL
-                        """)
-                        conn.commit()
-                        mapped_count = cur.rowcount
-                        logger.info(f"Mapped {mapped_count} publications to resources_resource")
-                
-                finally:
-                    processor.cleanup()
-                
-                return True
+            if self.web_processor:
+                self.web_processor.cleanup()
+                logger.info("Web content processor cleaned up")
+                self.web_processor = None
+            if self.db:
+                self.db.close()
+                logger.info("Database connection closed")
+                self.db = None
+            logger.info("System initializer cleanup completed")
         except Exception as e:
-            logger.error(f"Error processing web content: {str(e)}", exc_info=True)
-            raise
+            logger.error(f"Error during cleanup: {str(e)}")
 
-    async def initialize_system(self) -> None:
-        """Main initialization flow"""
+    async def initialize(self):
+        """Run the full initialization process."""
         try:
-            logger.info('Starting system initialization...')
+            logger.info("Starting system initialization...")
             
+            # Step 1: Verify environment and settings
             self.verify_environment()
             logger.debug('Environment verified successfully.')
             
+            # Step 2: Database initialization (if not skipped)
             if not self.config.skip_database:
-                logger.info('Initializing database...')
                 await self.initialize_database()
-                logger.info('Database initialized successfully.')
-                
-                logger.info('Loading initial experts...')
                 await self.load_initial_experts()
-                logger.info('Initial experts loaded successfully.')
                 
                 logger.info('Starting expert fields processing...')
                 openalex_processor = OpenAlexProcessor()
@@ -631,58 +682,45 @@ class SystemInitializer:
                     expert_processor.close()
                     openalex_processor.close()
             
-            logger.info('Initializing text summarizer...')
+            # Step 3: Initialize text summarizer for AI-powered tasks
             summarizer = TextSummarizer()
             logger.info('Text summarizer initialized successfully.')
             
+            # Step 4: Process publications (if not skipped)
             if not self.config.skip_publications:
-                logger.info('Processing publications...')
                 await self.process_publications(summarizer)
-                logger.info('Publications processed successfully.')
-                
-                logger.info('Classifying publications...')
                 await self.classify_all_publications(summarizer)
-                logger.info('Publications classified successfully.')
             
+            # Step 5: Initialize graph database for recommendations
             if not self.config.skip_graph:
                 logger.info('Initializing graph...')
-                graph_success = await self.initialize_graph()
-                if not graph_success:
-                    logger.error('Graph initialization failed')
-                    raise Exception("Graph initialization failed")
+                await self.initialize_graph()
                 logger.info('Graph initialized successfully.')
             
-            logger.info('Creating search index...')
-            if not await self.create_search_index():
-                logger.error('Search index creation failed')
-                raise Exception("Search index creation failed")
-            logger.info('Search index created successfully.')
+            # Step 6: Create search indexes
+            await self.create_search_index()
+            await self.create_redis_index()
             
-            logger.info('Creating Redis index...')
-            if not await self.create_redis_index():
-                logger.error('Redis index creation failed')
-                raise Exception("Redis index creation failed")
-            logger.info('Redis index created successfully.')
-            
+            # Step 7: Process web content
             if not self.config.skip_scraping:
-                logger.info('Processing web content...')
-                if not await self.process_web_content():
-                    logger.error('Web content processing failed')
-                    raise Exception("Web content processing failed")
-                logger.info('Web content processed successfully.')
+                await self.initialize_web_content_processor()
+                results = await self.process_web_content()
+                logger.info(f"Web content processing completed with {results.get('processed_pages', 0)} pages processed")
             
-            logger.info('Matching experts with resources...')
+            # Step 8: Match experts with resources
             await self.match_experts_with_resources()
-            logger.info('Expert-resource matching completed successfully.')
             
-            logger.info('System initialization completed successfully!')
+            logger.info(f"System initialization completed successfully!")
+            return {"status": "success", "message": "System initialization completed successfully"}
         except Exception as e:
-            logger.error(f'System initialization failed: {e}')
+            logger.error(f"System initialization failed: {str(e)}", exc_info=True)
             raise
+        finally:
+            self.cleanup()
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Initialize and populate the research database.')
+    parser = argparse.ArgumentParser(description='Initialize and populate the research database system.')
     
     parser.add_argument('--skip-database', action='store_true',
                         help='Skip database initialization')
@@ -699,29 +737,36 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--skip-scraping', action='store_true',
                         help='Skip web content scraping')
     parser.add_argument('--skip-classification', action='store_true',
-                        help='Skip the 5-category corpus classification')
+                        help='Skip the publication classification')
     parser.add_argument('--expertise-csv', type=str, default='',
                         help='Path to the CSV file containing initial expert data')
-    parser.add_argument('--max-pages', type=int, default=1000,
-                        help='Maximum number of pages to scrape')
     parser.add_argument('--max-workers', type=int, default=4,
                         help='Maximum number of worker threads')
     parser.add_argument('--batch-size', type=int, default=50,
                         help='Batch size for web content processing')
+    parser.add_argument('--checkpoint-hours', type=int, default=24,
+                        help='Hours between processing checkpoints')
     args = parser.parse_args()
     return args
 
-async def main() -> None:
-    """Main execution function"""
+async def main():
+    """Main entry point for system initialization."""
     args = parse_arguments()
     config = SetupConfig.from_args(args)
     initializer = SystemInitializer(config)
-    await initializer.initialize_system()
-
-def run() -> None:
-    """Entry point function"""
     try:
-        if os.name == 'nt':
+        await initializer.initialize()
+        logger.info("Main process completed successfully")
+    except Exception as e:
+        logger.error(f"Main process failed: {str(e)}")
+        raise
+    finally:
+        initializer.cleanup()
+
+def run():
+    """Entry point function that can be called from command line or other modules."""
+    try:
+        if os.name == 'nt':  # For Windows
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         asyncio.run(main())
     except KeyboardInterrupt:
