@@ -5,7 +5,7 @@ import os
 from typing import Dict, List
 from datetime import datetime
 from ai_services_api.services.centralized_repository.database_manager import DatabaseManager
-from ai_services_api.services.centralized_repository.web_content.services.pipeline import ContentPipeline
+from ai_services_api.services.centralized_repository.web_content.services.content_pipeline import ContentPipeline
 
 logging.basicConfig(
     level=logging.INFO,
