@@ -13,7 +13,7 @@ import os
 import hashlib
 import numpy as np
 import json
-from ...database.database_setup import insert_embedding, update_scrape_state, get_scrape_state, check_content_changes
+from ai_services_api.services.centralized_repository.web_content.database.database_setup import insert_embedding, update_scrape_state, get_scrape_state, check_content_changes
 
 logger = logging.getLogger(__name__)
 
