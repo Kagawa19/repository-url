@@ -1,4 +1,3 @@
-
 import logging
 import asyncio
 import os
@@ -44,12 +43,18 @@ class WebContentProcessor:
             title = item.get('title', 'Untitled')
             content = item.get('content', '')
             content_type = item.get('content_type', 'webpage')
+            navigation_text = item.get('navigation_text', '')
             
             if not url:
                 logger.warning(f"Skipping webpage with missing URL: {item}")
                 return 0
             
-            # Check if webpage exists
+            if content_type == 'expert':
+                logger.debug(f"Skipping webpage insertion for expert profile: {url}")
+                return 0
+            
+            logger.debug(f"Attempting to insert webpage: url={url}, title={title[:50]}..., content_type={content_type}, content_length={len(content)}, navigation_text_length={len(navigation_text)}")
+            
             result = self.db.execute(
                 "SELECT id FROM webpages WHERE url = %s",
                 (url,)
@@ -58,54 +63,79 @@ class WebContentProcessor:
                 logger.debug(f"Webpage {url} already exists with ID {result[0][0]}")
                 return result[0][0]
             
-            # Insert new webpage
             result = self.db.execute(
                 """
-                INSERT INTO webpages (url, title, content, content_type, last_updated)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO webpages (url, title, content, content_type, navigation_text, last_updated)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (url, title, content, content_type, datetime.utcnow())
+                (url, title, content, content_type, navigation_text, datetime.utcnow())
             )
             webpage_id = result[0][0]
             logger.info(f"Inserted webpage {url} with ID {webpage_id}")
             return webpage_id
         except Exception as e:
-            logger.error(f"Error inserting webpage {url or 'unknown'}: {str(e)}")
+            logger.error(f"Error inserting webpage {url or 'unknown'}: {str(e)}", exc_info=True)
             return 0
 
     async def process_content(self) -> Dict:
-        """Process web content and store scraped data in the webpages table."""
+        """
+        Process web content and store scraped data in the webpages table.
+        """
         try:
             logger.info("Starting web content processing...")
             
-            # Run the content pipeline (synchronous call, no await)
             results = self.content_pipeline.run()
+            
+            if not isinstance(results, dict):
+                logger.error("ContentPipeline.run() did not return a dictionary")
+                raise ValueError("Invalid pipeline results format")
+            
             processed_pages = results.get('processed_pages', 0)
             webpage_results = results.get('processing_details', {}).get('webpage_results', [])
             
             if not webpage_results:
                 logger.warning("No webpage results received from pipeline")
-                return results
+                return {
+                    'processed_pages': processed_pages,
+                    'updated_pages': 0,
+                    'processed_publications': 0,
+                    'processed_experts': 0,
+                    'processing_details': {'webpage_results': []}
+                }
             
-            # Process each batch and insert webpages
             updated_pages = 0
             for batch in webpage_results:
                 batch_items = batch.get('batch', [])
+                if not isinstance(batch_items, list):
+                    logger.warning(f"Invalid batch format: {batch}")
+                    continue
                 for item in batch_items:
+                    if not isinstance(item, dict):
+                        logger.warning(f"Invalid item format: {item}")
+                        continue
+                    logger.debug(f"Processing item: {item.get('url', 'unknown')}")
                     webpage_id = await self.insert_webpage(item)
                     if webpage_id:
                         updated_pages += 1
             
-            logger.info(f"Processed {processed_pages} pages, inserted/updated {updated_pages} webpages")
-            
-            # Update results with actual insertions
-            results['updated_pages'] = updated_pages
-            results['processed_publications'] = sum(
+            processed_publications = sum(
                 1 for batch in webpage_results
                 for item in batch.get('batch', [])
-                if item.get('content_type') == 'publication'
+                if isinstance(item, dict) and item.get('content_type') == 'publication'
             )
+            processed_experts = sum(
+                1 for batch in webpage_results
+                for item in batch.get('batch', [])
+                if isinstance(item, dict) and item.get('content_type') == 'expert'
+            )
+            
+            logger.info(f"Processed {processed_pages} pages, inserted/updated {updated_pages} webpages, "
+                       f"found {processed_publications} publications, {processed_experts} experts")
+            
+            results['updated_pages'] = updated_pages
+            results['processed_publications'] = processed_publications
+            results['processed_experts'] = processed_experts
             
             return results
         except Exception as e:
