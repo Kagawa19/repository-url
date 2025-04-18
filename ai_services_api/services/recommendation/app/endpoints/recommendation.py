@@ -11,6 +11,8 @@ import json
 import psycopg2
 from redis.asyncio import Redis
 from ai_services_api.services.recommendation.services.expert_matching import ExpertMatchingService
+from ai_services_api.services.recommendation.services.recommendation_monitor import RecommendationMonitor
+
 from ai_services_api.services.message.core.database import get_db_connection
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
@@ -38,6 +40,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TEST_USER_ID = "test_user_123"
+recommendation_monitor = RecommendationMonitor()
+logger.info("RecommendationMonitor initialized successfully")
 
 async def get_redis():
     """Establish Redis connection with detailed logging"""
@@ -182,6 +186,65 @@ async def process_recommendations(user_id: str, redis_client: Redis) -> Dict:
             # ---- Log this recommendation event ----
             await _log_recommendation_event(user_id, response_data, redis_client)
             
+            # ---- NEW: Record recommendation snapshot for monitoring ----
+            try:
+                # Get data source information
+                data_sources = ["regular"]
+                features_used = ["similarity", "organization"]
+                
+                if search_analytics and search_terms:
+                    data_sources.append("search_history")
+                    features_used.append("search_terms")
+                
+                # Gather weight information if available from the expertise service 
+                weights = {
+                    "concept_weight": getattr(expert_matching, "_concept_weight", 0.3),
+                    "domain_weight": getattr(expert_matching, "_domain_weight", 0.2),
+                    "field_weight": getattr(expert_matching, "_field_weight", 0.2),
+                    "organizational_weight": getattr(expert_matching, "_org_weight", 0.1),
+                    "search_weight": 0.1 if search_terms else 0.0
+                }
+                
+                # Record the snapshot
+                recommendation_monitor.record_recommendation_snapshot(
+                    user_id=user_id,
+                    recommendations=recommendations or [],
+                    weights=weights,
+                    features_used=features_used,
+                    data_sources_used=data_sources
+                )
+                
+                # Record timing metric
+                recommendation_monitor.record_metric(
+                    metric_type="performance",
+                    metric_name="response_time",
+                    metric_value=response_data['response_time'],
+                    user_id=user_id
+                )
+                
+                # Record quality metrics
+                if recommendations:
+                    recommendation_monitor.record_metric(
+                        metric_type="quality",
+                        metric_name="recommendation_count",
+                        metric_value=len(recommendations),
+                        user_id=user_id
+                    )
+                    
+                    # Average similarity score
+                    avg_score = sum(rec.get('similarity_score', 0) for rec in recommendations) / len(recommendations)
+                    recommendation_monitor.record_metric(
+                        metric_type="quality",
+                        metric_name="average_similarity_score",
+                        metric_value=avg_score,
+                        user_id=user_id
+                    )
+                
+                logger.info("Recommendation monitoring data recorded successfully")
+            except Exception as monitoring_err:
+                logger.error(f"Error recording recommendation monitoring data: {str(monitoring_err)}")
+                # Continue anyway - monitoring shouldn't break the main functionality
+            
             return response_data
         
         except Exception as matching_err:
@@ -248,6 +311,32 @@ async def _check_for_database_changes(user_id: str, redis_client: Redis) -> bool
         logger.error(f"Error checking for database changes: {e}")
         # On error, assume we should refresh data to be safe
         return True
+    
+@router.get("/recommendations/monitoring/report")
+async def get_recommendation_monitoring_report(
+    request: Request,
+    user_id: str = Depends(get_user_id),
+    days: int = 30,
+    format: str = "json"
+):
+    """Generate a report on recommendation system adaptiveness"""
+    try:
+        from datetime import datetime, timedelta
+        
+        # Generate the report
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+        
+        report = recommendation_monitor.generate_adaptation_report(
+            start_date=start_date,
+            end_date=end_date,
+            output_format=format
+        )
+        
+        return report
+    except Exception as e:
+        logger.error(f"Error generating monitoring report: {e}")
+        raise HTTPException(status_code=500, detail=f"Error generating report: {str(e)}")
 
 async def _get_current_data_version(redis_client: Redis) -> int:
     """
@@ -361,7 +450,20 @@ async def get_messaging_based_recommendations(
         
         if cached_response:
             logger.info(f"Cache hit for messaging-based recommendations: {cache_key}")
-            return json.loads(cached_response)
+            response_data = json.loads(cached_response)
+            
+            # Even for cached responses, record a monitoring entry to track usage
+            try:
+                recommendation_monitor.record_metric(
+                    metric_type="usage",
+                    metric_name="messaging_recommendations_cache_hit",
+                    metric_value=1.0,
+                    user_id=user_id
+                )
+            except Exception as monitor_err:
+                logger.error(f"Error recording cache hit metric: {monitor_err}")
+                
+            return response_data
         
         conn = None
         try:
@@ -399,9 +501,39 @@ async def get_messaging_based_recommendations(
                 
                 logger.info(f"Found {len(top_domains)} top domains and {len(top_fields)} top fields from messaging history")
                 
+                # Record domain/field discovery metric
+                try:
+                    recommendation_monitor.record_metric(
+                        metric_type="data_quality",
+                        metric_name="messaging_domain_field_count",
+                        metric_value=len(top_domains) + len(top_fields),
+                        user_id=user_id,
+                        details={
+                            "domains_count": len(top_domains),
+                            "fields_count": len(top_fields),
+                            "top_domains": top_domains[:3],  # Just include top 3 for brevity
+                            "top_fields": top_fields[:3]
+                        }
+                    )
+                except Exception as monitor_err:
+                    logger.error(f"Error recording domain/field metric: {monitor_err}")
+                
                 # If no messaging history, fall back to regular recommendations
                 if not top_domains and not top_fields:
                     logger.info(f"No messaging history found for user {user_id}, using regular recommendations")
+                    
+                    # Record fallback metric
+                    try:
+                        recommendation_monitor.record_metric(
+                            metric_type="adaptation",
+                            metric_name="messaging_recommendations_fallback",
+                            metric_value=1.0,
+                            user_id=user_id,
+                            details={"reason": "no_domains_or_fields"}
+                        )
+                    except Exception as monitor_err:
+                        logger.error(f"Error recording fallback metric: {monitor_err}")
+                    
                     recommendations = await process_recommendations(user_id, redis_client)
                     return recommendations
                 
@@ -479,9 +611,36 @@ async def get_messaging_based_recommendations(
                         
                         messaging_recommendations = [record["result"] for record in result]
                         
+                        # Record match success metric
+                        try:
+                            recommendation_monitor.record_metric(
+                                metric_type="quality",
+                                metric_name="messaging_match_success",
+                                metric_value=len(messaging_recommendations) / 5.0,  # Percentage of filled slots
+                                user_id=user_id,
+                                details={
+                                    "recommendations_found": len(messaging_recommendations),
+                                    "target_count": 5
+                                }
+                            )
+                        except Exception as monitor_err:
+                            logger.error(f"Error recording match success metric: {monitor_err}")
+                        
                         # If we don't have enough recommendations, get some regular ones to supplement
                         if len(messaging_recommendations) < 5:
                             logger.info(f"Only found {len(messaging_recommendations)} messaging-based recommendations, adding regular ones")
+                            
+                            # Record supplementation metric
+                            try:
+                                recommendation_monitor.record_metric(
+                                    metric_type="adaptation",
+                                    metric_name="messaging_recommendations_supplemented",
+                                    metric_value=(5 - len(messaging_recommendations)) / 5.0,  # Percentage that needed supplementing
+                                    user_id=user_id,
+                                    details={"messaging_count": len(messaging_recommendations)}
+                                )
+                            except Exception as monitor_err:
+                                logger.error(f"Error recording supplementation metric: {monitor_err}")
                             
                             # Get IDs of experts we already recommended
                             existing_ids = {rec['id'] for rec in messaging_recommendations}
@@ -496,6 +655,19 @@ async def get_messaging_based_recommendations(
                 
                 except Exception as matching_err:
                     logger.error(f"Neo4j query error: {str(matching_err)}", exc_info=True)
+                    
+                    # Record error metric
+                    try:
+                        recommendation_monitor.record_metric(
+                            metric_type="errors",
+                            metric_name="messaging_recommendations_query_error",
+                            metric_value=1.0,
+                            user_id=user_id,
+                            details={"error": str(matching_err)[:200]}  # Truncate to avoid massive error messages
+                        )
+                    except Exception as monitor_err:
+                        logger.error(f"Error recording error metric: {monitor_err}")
+                    
                     # Fall back to regular recommendations
                     recommendations = await process_recommendations(user_id, redis_client)
                     return recommendations
@@ -557,11 +729,85 @@ async def get_messaging_based_recommendations(
                 except Exception as log_err:
                     logger.error(f"Error logging recommendation event: {log_err}")
                 
+                # NEW: Record recommendation monitoring data
+                try:
+                    # Record this recommendation snapshot with domain/field information
+                    weights = {
+                        "domain_weight": 0.6,
+                        "field_weight": 0.4,
+                        "concept_weight": 0.0,  # Not used in this particular query
+                        "organizational_weight": 0.0  # Not used in this particular query
+                    }
+                    
+                    # Record the snapshot
+                    recommendation_monitor.record_recommendation_snapshot(
+                        user_id=user_id,
+                        recommendations=messaging_recommendations,
+                        weights=weights,
+                        features_used=["messaging_history", "domain_matching", "field_matching"],
+                        data_sources_used=["message_domains", "message_fields"]
+                    )
+                    
+                    # Record adaptiveness metric - this recommendation was based on messaging data
+                    recommendation_monitor.record_metric(
+                        metric_type="adaptation",
+                        metric_name="messaging_based_recommendations",
+                        metric_value=1.0,  # Using this feature is 100% adoption
+                        user_id=user_id,
+                        details={
+                            "domain_count": len(top_domains),
+                            "field_count": len(top_fields),
+                            "recommendation_count": len(messaging_recommendations),
+                            "response_time": process_time
+                        }
+                    )
+                    
+                    # Monitor changes from previous recommendations
+                    change_metrics = recommendation_monitor.monitor_recommendation_changes(
+                        user_id=user_id,
+                        new_recommendations=messaging_recommendations,
+                        weights=weights,
+                        features_used=["messaging_history", "domain_matching", "field_matching"],
+                        data_sources_used=["message_domains", "message_fields"]
+                    )
+                    
+                    # Record the change metrics if this isn't the first recommendation
+                    if change_metrics and not change_metrics.get('is_first_recommendation', False):
+                        recommendation_monitor.record_metric(
+                            metric_type="adaptation",
+                            metric_name="recommendation_turnover_rate",
+                            metric_value=change_metrics.get('turnover_rate', 0.0),
+                            user_id=user_id,
+                            details={
+                                "added_experts_count": len(change_metrics.get('added_experts', [])),
+                                "removed_experts_count": len(change_metrics.get('removed_experts', [])),
+                                "uses_messaging_data": True
+                            }
+                        )
+                    
+                    logger.info("Recommendation monitoring data recorded successfully")
+                except Exception as monitoring_err:
+                    logger.error(f"Error recording recommendation monitoring data: {str(monitoring_err)}")
+                    # Continue anyway - monitoring shouldn't break the main functionality
+                
                 logger.info(f"Successfully returned {len(messaging_recommendations)} messaging-based recommendations for user {user_id}")
                 return response_data
                 
         except Exception as db_error:
             logger.error(f"Database error getting messaging history: {str(db_error)}")
+            
+            # Record error metric
+            try:
+                recommendation_monitor.record_metric(
+                    metric_type="errors",
+                    metric_name="messaging_recommendations_db_error",
+                    metric_value=1.0,
+                    user_id=user_id,
+                    details={"error": str(db_error)[:200]}  # Truncate to avoid massive error messages
+                )
+            except Exception:
+                pass  # If we can't record the metric, just continue
+                
             # Fall back to regular recommendations
             recommendations = await process_recommendations(user_id, redis_client)
             return recommendations
@@ -571,6 +817,19 @@ async def get_messaging_based_recommendations(
         
     except Exception as e:
         logger.error(f"Error getting messaging-based recommendations for user {user_id}: {str(e)}", exc_info=True)
+        
+        # Record critical error metric
+        try:
+            recommendation_monitor.record_metric(
+                metric_type="errors",
+                metric_name="messaging_recommendations_critical_error",
+                metric_value=1.0,
+                user_id=user_id,
+                details={"error": str(e)[:200]}  # Truncate to avoid massive error messages
+            )
+        except Exception:
+            pass  # If we can't record the metric, just continue
+            
         raise HTTPException(status_code=500, detail=f"Error getting recommendations: {str(e)}")
 
 @router.delete("/cache/recommendations/{user_id}")
@@ -934,9 +1193,6 @@ async def get_expert_recommendations(
     return recommendations
 
 
-class RecommendationClick(BaseModel):
-    view_id: str
-    expert_id: str
 @router.post("/recommend/track")
 async def track_recommendation_click(
     request: Request,
@@ -960,6 +1216,20 @@ async def track_recommendation_click(
 
         if not view_data:
             logger.warning(f"Invalid view ID: {view_id}")
+            
+            # Record invalid click attempt
+            try:
+                recommendation_monitor.record_metric(
+                    metric_type="errors",
+                    metric_name="invalid_recommendation_click",
+                    metric_value=1.0,
+                    user_id=user_id,
+                    expert_id=expert_id,
+                    details={"view_id": view_id, "reason": "view_id_not_found"}
+                )
+            except Exception as monitor_err:
+                logger.error(f"Error recording invalid click metric: {monitor_err}")
+                
             return {"status": "error", "message": "Invalid view ID"}
 
         try:
@@ -968,6 +1238,24 @@ async def track_recommendation_click(
             # Verify expert was in this recommendation set
             if expert_id not in view_info.get('experts', []):
                 logger.warning(f"Expert {expert_id} not in recommendation view {view_id}")
+                
+                # Record invalid expert click
+                try:
+                    recommendation_monitor.record_metric(
+                        metric_type="errors",
+                        metric_name="invalid_recommendation_click",
+                        metric_value=1.0,
+                        user_id=user_id,
+                        expert_id=expert_id,
+                        details={
+                            "view_id": view_id, 
+                            "reason": "expert_not_in_recommendations",
+                            "recommended_experts": view_info.get('experts', [])
+                        }
+                    )
+                except Exception as monitor_err:
+                    logger.error(f"Error recording invalid expert click metric: {monitor_err}")
+                    
                 return {"status": "error", "message": "Expert not in recommendation set"}
 
             # Calculate position in recommendations (1-based)
@@ -1076,11 +1364,87 @@ async def track_recommendation_click(
                                         engagement_score = user_topic_interests.engagement_score * 0.9 + 1.0
                                 """, (user_id, domain.lower(), 'publication_domain'))
 
-                conn.commit()
-                logger.info(f"Recorded recommendation click for user {user_id} on expert {expert_id}")
+                    conn.commit()
+                    logger.info(f"Recorded recommendation click for user {user_id} on expert {expert_id}")
+                    
+                    # NEW: Record recommendation monitoring data
+                    try:
+                        # Determine recommendation method from view data
+                        recommendation_method = "regular"
+                        if view_info.get('source') == 'messaging':
+                            recommendation_method = "messaging_based"
+                            
+                        # Record this click as feedback
+                        recommendation_monitor.record_feedback(
+                            user_id=user_id,
+                            expert_id=expert_id,
+                            recommendation_method=recommendation_method,
+                            interaction_type="click",
+                            feedback_score=1.0,  # Positive feedback for clicks
+                            details={
+                                "position": position,
+                                "view_id": view_id,
+                                "source": view_info.get('source', 'regular')
+                            }
+                        )
+                        
+                        # Record click-through metric 
+                        recommendation_monitor.record_metric(
+                            metric_type="engagement",
+                            metric_name="recommendation_click",
+                            metric_value=1.0,
+                            user_id=user_id,
+                            expert_id=expert_id,
+                            details={
+                                "position": position,
+                                "recommendation_method": recommendation_method
+                            }
+                        )
+                        
+                        # Record position-based metric
+                        recommendation_monitor.record_metric(
+                            metric_type="quality",
+                            metric_name=f"click_position_{position}",
+                            metric_value=1.0,
+                            user_id=user_id,
+                            expert_id=expert_id
+                        )
+                        
+                        # If this was a messaging-based recommendation, record its effectiveness
+                        if recommendation_method == "messaging_based":
+                            recommendation_monitor.record_metric(
+                                metric_type="adaptation",
+                                metric_name="messaging_recommendation_effective",
+                                metric_value=1.0,
+                                user_id=user_id,
+                                expert_id=expert_id,
+                                details={
+                                    "position": position,
+                                    "view_id": view_id
+                                }
+                            )
+                        
+                        logger.info(f"Recorded recommendation feedback monitoring for click on expert {expert_id}")
+                    except Exception as monitor_err:
+                        logger.error(f"Error recording recommendation feedback: {monitor_err}")
+                        # Continue anyway - monitoring shouldn't break the main functionality
 
             except Exception as db_error:
                 logger.error(f"Database error recording recommendation click: {db_error}")
+                
+                # Record error metric
+                try:
+                    recommendation_monitor.record_metric(
+                        metric_type="errors",
+                        metric_name="recommendation_click_db_error",
+                        metric_value=1.0,
+                        user_id=user_id,
+                        expert_id=expert_id,
+                        details={"error": str(db_error)[:200]}  # Truncate to avoid massive error messages
+                    )
+                except Exception:
+                    pass  # If we can't record the metric, just continue
+                    
                 if conn:
                     conn.rollback()
             finally:
@@ -1100,13 +1464,39 @@ async def track_recommendation_click(
 
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding view data: {e}")
+            
+            # Record error metric
+            try:
+                recommendation_monitor.record_metric(
+                    metric_type="errors",
+                    metric_name="recommendation_click_json_error",
+                    metric_value=1.0,
+                    user_id=user_id,
+                    expert_id=expert_id,
+                    details={"view_id": view_id, "error": str(e)}
+                )
+            except Exception:
+                pass  # If we can't record the metric, just continue
+                
             return {"status": "error", "message": "Invalid view data format"}
 
     except Exception as e:
         logger.error(f"Error tracking recommendation click: {e}")
+        
+        # Record critical error metric
+        try:
+            recommendation_monitor.record_metric(
+                metric_type="errors",
+                metric_name="recommendation_click_critical_error",
+                metric_value=1.0,
+                user_id=user_id,
+                expert_id=expert_id,
+                details={"error": str(e)[:200]}  # Truncate to avoid massive error messages
+            )
+        except Exception:
+            pass  # If we can't record the metric, just continue
+            
         return {"status": "error", "message": f"Internal error: {str(e)}"}
-
- 
 
 @router.get("/test/recommend")
 async def test_get_expert_recommendations(
