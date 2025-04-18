@@ -8,11 +8,15 @@ from ai_services_api.services.centralized_repository.ai_summarizer import TextSu
 from ai_services_api.services.centralized_repository.web_content.services.web_scraper import WebsiteScraper, ScraperConfig
 from ai_services_api.services.centralized_repository.web_content.services.pdf_processor import PDFProcessor
 import re
-import warnings
+
 import psutil
 import gc
+import hashlib
 from urllib.parse import urljoin
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Optional
+from ai_services_api.services.centralized_repository.database_manager import DatabaseManager
+
+import warnings
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
@@ -26,15 +30,22 @@ logger = logging.getLogger(__name__)
 class ContentPipeline:
     """Manages web content scraping and processing pipeline with summarization."""
     
-    def __init__(self, batch_size: int = 100):
-        """Initialize pipeline with scraper, summarizer, and PDF processor."""
+    def __init__(
+        self,
+        start_urls: List[str],
+        scraper: WebsiteScraper,
+        pdf_processor: PDFProcessor,
+        db: DatabaseManager,
+        batch_size: int = 100
+    ):
+        self.start_urls = start_urls
+        self.scraper = scraper
+        self.pdf_processor = pdf_processor
+        self.db = db  # Initialize DatabaseManager
         self.batch_size = batch_size
-        self.summarizer = TextSummarizer()
-        self.scraper = WebsiteScraper(summarizer=self.summarizer)
-        self.pdf_processor = PDFProcessor()
-        self.start_urls = ['https://aphrc.org']
-        self.visited_urls = set()
-        logger.info(f"ContentPipeline initialized with batch_size={batch_size}")
+        self.visited_urls: Set[str] = set()
+        logger.info("ContentPipeline initialized with %d start URLs", len(start_urls))
+
 
     def process_webpage(self, page_data: Dict) -> Dict:
         """Process webpage data, summarize, and assign content_type."""
@@ -143,13 +154,11 @@ class ContentPipeline:
             logger.error(f"Error scraping {url}: {str(e)}")
             return {}
 
-    
 
     async def run(self) -> Dict:
         """
         Run the scraping pipeline, saving experts, publications, and navigation data every 10 pages.
         Stores navigation text in webpages.navigation_text.
-        Returns a dictionary with processed pages and results.
         """
         results = {
             'processed_pages': 0,
@@ -165,17 +174,17 @@ class ContentPipeline:
             webpage_results = []
             current_batch = []
             processed_urls: Set[str] = set()
-            to_visit_urls: Set[str] = set(self.start_urls)  # Start with base URLs
-            max_pages = 500  # Reduced for resource constraints
-            max_depth = 3    # Limit recursion depth
-            depth_map = {url: 0 for url in to_visit_urls}  # Track depth
-            save_batch_size = 10  # Save every 10 pages
+            to_visit_urls: Set[str] = set(self.start_urls)
+            max_pages = 500
+            max_depth = 3
+            depth_map = {url: 0 for url in to_visit_urls}
+            save_batch_size = 10
             
             # Log initial memory usage
             process = psutil.Process()
             logger.debug(f"Initial memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
             
-            # Fetch existing URLs from database to skip re-scraping
+            # Fetch existing URLs
             try:
                 existing_urls = self.db.execute("""
                     SELECT doi FROM publications WHERE doi IS NOT NULL
@@ -188,6 +197,7 @@ class ContentPipeline:
                 logger.info(f"Loaded {len(processed_urls)} existing URLs from database")
             except Exception as e:
                 logger.error(f"Error loading existing URLs: {str(e)}", exc_info=True)
+                processed_urls = set()  # Proceed without skipping to avoid blocking
             
             # Fetch publications using WebsiteScraper
             try:
@@ -200,7 +210,7 @@ class ContentPipeline:
             except Exception as e:
                 logger.error(f"Error fetching publications from WebsiteScraper: {str(e)}", exc_info=True)
             
-            # Save initial scraper batch if >= 10 items
+            # Save initial batch if >= 10 items
             if len(current_batch) >= save_batch_size:
                 try:
                     self._save_batch(current_batch, results)
@@ -316,9 +326,9 @@ class ContentPipeline:
             
             results['processing_details']['webpage_results'] = webpage_results
             logger.info(f"Content pipeline completed: processed {results['processed_pages']} pages, "
-                    f"{results['processed_publications']} publications, "
-                    f"{results['processed_experts']} experts, "
-                    f"{results['processed_resources']} PDFs")
+                       f"{results['processed_publications']} publications, "
+                       f"{results['processed_experts']} experts, "
+                       f"{results['processed_resources']} PDFs")
             
             # Log final memory usage and scraper metrics
             logger.debug(f"Final memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
@@ -350,7 +360,7 @@ class ContentPipeline:
                             VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
                         """, (
                             url,
-                            item.get('content', '')[:10000],  # Limit content size
+                            item.get('content', '')[:10000],
                             item.get('navigation_text', '')[:1000],
                             content_hash
                         ))
