@@ -1,8 +1,6 @@
-
 import logging
 import asyncio
-import os
-from typing import Dict, List
+from typing import Dict
 from datetime import datetime
 from ai_services_api.services.centralized_repository.database_manager import DatabaseManager
 from ai_services_api.services.centralized_repository.web_content.services.content_pipeline import ContentPipeline
@@ -18,7 +16,7 @@ logger = logging.getLogger(__name__)
 class WebContentProcessor:
     """Processes web content by scraping and storing webpage data without embeddings."""
     
-    def __init__(self, max_workers: int = 4, batch_size: int = 50, processing_checkpoint_hours: int = 24):
+    def __init__(self, max_workers: int = 5, batch_size: int = 100, processing_checkpoint_hours: int = 24):
         """Initialize processor with database and pipeline."""
         self.db = DatabaseManager()
         self.content_pipeline = ContentPipeline()
@@ -41,18 +39,58 @@ class WebContentProcessor:
     async def insert_webpage(self, item: Dict) -> int:
         """Insert a webpage into the webpages table and return its ID."""
         try:
-            url = item.get('url')
+            url = item.get('url') or item.get('doi')
             title = item.get('title', 'Untitled')
-            content = item.get('content', '')
-            content_type = item.get('content_type', 'webpage')
+            content = item.get('content', '') or item.get('summary', '')
+            content_type = item.get('content_type', 'webpage') or item.get('type', 'webpage')
             navigation_text = item.get('navigation_text', '')
+            affiliation = item.get('affiliation')
+            contact_email = item.get('contact_email')
+            authors = item.get('authors', [])
+            domains = item.get('domains', [])
+            publication_year = item.get('publication_year')
             
             if not url:
                 logger.warning(f"Skipping webpage with missing URL: {item}")
                 return 0
             
             if content_type == 'expert':
-                logger.debug(f"Skipping webpage insertion for expert profile: {url}")
+                logger.debug(f"Inserting expert profile: {url}")
+                result = self.db.execute(
+                    """
+                    INSERT INTO experts (url, name, affiliation, contact_email)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (url) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        affiliation = EXCLUDED.affiliation,
+                        contact_email = EXCLUDED.contact_email
+                    RETURNING id
+                    """,
+                    (url, title, affiliation, contact_email)
+                )
+                expert_id = result[0][0]
+                logger.info(f"Inserted/updated expert {url} with ID {expert_id}")
+                return expert_id
+            
+            if content_type == 'publication':
+                exists = self.db.exists_publication(title=title, doi=url)
+                if exists:
+                    logger.debug(f"Publication already exists: {title}")
+                    return exists
+                success = self.db.add_publication(
+                    title=title,
+                    doi=url,
+                    authors=authors,
+                    domains=domains,
+                    publication_year=publication_year,
+                    summary=content,
+                    source='website'
+                )
+                if success:
+                    result = self.db.execute("SELECT id FROM publications WHERE doi = %s", (url,))
+                    publication_id = result[0][0]
+                    logger.info(f"Inserted publication {url} with ID {publication_id}")
+                    return publication_id
                 return 0
             
             # Generate content_hash
@@ -106,6 +144,7 @@ class WebContentProcessor:
                     'updated_pages': 0,
                     'processed_publications': 0,
                     'processed_experts': 0,
+                    'processed_resources': 0,
                     'processing_details': {'webpage_results': []}
                 }
             
@@ -119,28 +158,34 @@ class WebContentProcessor:
                     if not isinstance(item, dict):
                         logger.warning(f"Invalid item format: {item}")
                         continue
-                    logger.debug(f"Processing item: {item.get('url', 'unknown')}")
-                    webpage_id = await self.insert_webpage(item)
-                    if webpage_id:
+                    logger.debug(f"Processing item: {item.get('url', item.get('doi', 'unknown'))}")
+                    item_id = await self.insert_webpage(item)
+                    if item_id:
                         updated_pages += 1
             
             processed_publications = sum(
                 1 for batch in webpage_results
                 for item in batch.get('batch', [])
-                if isinstance(item, dict) and item.get('content_type') == 'publication'
+                if isinstance(item, dict) and item.get('content_type', item.get('type', '')) == 'publication'
             )
             processed_experts = sum(
                 1 for batch in webpage_results
                 for item in batch.get('batch', [])
-                if isinstance(item, dict) and item.get('content_type') == 'expert'
+                if isinstance(item, dict) and item.get('content_type', item.get('type', '')) == 'expert'
+            )
+            processed_resources = sum(
+                1 for batch in webpage_results
+                for item in batch.get('batch', [])
+                if isinstance(item, dict) and item.get('content_type', item.get('type', '')) == 'pdf'
             )
             
-            logger.info(f"Processed {processed_pages} pages, inserted/updated {updated_pages} webpages, "
-                       f"found {processed_publications} publications, {processed_experts} experts")
+            logger.info(f"Processed {processed_pages} pages, inserted/updated {updated_pages} items, "
+                       f"found {processed_publications} publications, {processed_experts} experts, {processed_resources} resources")
             
             results['updated_pages'] = updated_pages
             results['processed_publications'] = processed_publications
             results['processed_experts'] = processed_experts
+            results['processed_resources'] = processed_resources
             
             return results
         except Exception as e:
@@ -158,4 +203,3 @@ class WebContentProcessor:
                 logger.info("Database connection closed")
         except Exception as e:
             logger.error(f"Error during cleanup: {str(e)}")
-

@@ -1,14 +1,14 @@
-"""
-PDF processor for extracting content from PDFs.
-
-WARNING: Do not import ContentPipeline or WebContentProcessor in this module to avoid circular imports.
-"""
 import logging
 from typing import Dict, List
 import requests
 import PyPDF2
 from io import BytesIO
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 class PDFProcessor:
@@ -22,26 +22,27 @@ class PDFProcessor:
         results = []
         for url in urls:
             try:
-                if url.endswith('.pdf'):
-                    response = self.session.get(url)
-                    response.raise_for_status()
-                    pdf_file = BytesIO(response.content)
-                    pdf_reader = PyPDF2.PdfReader(pdf_file)
-                    
-                    # Extract text (simplified example)
-                    chunks = []
-                    chunk_ids = []
-                    for page_num in range(len(pdf_reader.pages)):
-                        text = pdf_reader.pages[page_num].extract_text()
-                        chunks.append(text)
-                        chunk_ids.append(page_num + 1)  # Simplified ID
-                    
-                    results.append({
-                        'url': url,
-                        'chunks': chunks,
-                        'chunk_ids': chunk_ids,
-                        'content_type': 'pdf'
-                    })
+                if not url.lower().endswith('.pdf'):
+                    logger.debug(f"Skipping non-PDF URL: {url}")
+                    continue
+                response = self.session.get(url, timeout=10)
+                response.raise_for_status()
+                pdf_file = BytesIO(response.content)
+                pdf_reader = PyPDF2.PdfReader(pdf_file)
+                
+                content = ""
+                for page_num in range(len(pdf_reader.pages)):
+                    text = pdf_reader.pages[page_num].extract_text()
+                    content += text + "\n"
+                
+                results.append({
+                    'doi': url,
+                    'title': 'PDF Document',
+                    'summary': content[:1000],
+                    'type': 'pdf',
+                    'source': 'website'
+                })
+                logger.info(f"Processed PDF: {url}")
             except Exception as e:
                 logger.error(f"Error processing PDF {url}: {str(e)}")
         return results

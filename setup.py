@@ -1,6 +1,3 @@
-"""
-System initialization and database setup module.
-"""
 import json
 import logging
 import asyncio
@@ -136,7 +133,7 @@ class SystemInitializer:
             self.config.max_workers = int(os.getenv('MAX_WORKERS', 4))
         
         if not hasattr(self.config, 'batch_size') or not self.config.batch_size:
-            self.config.batch_size = int(os.getenv('BATCH_SIZE', 50))
+            self.config.batch_size = int(os.getenv('BATCH_SIZE, 50))
             
         if not hasattr(self.config, 'checkpoint_hours') or not self.config.checkpoint_hours:
             self.config.checkpoint_hours = int(os.getenv('CHECKPOINT_HOURS', 24))
@@ -148,15 +145,17 @@ class SystemInitializer:
     async def initialize_web_content_processor(self):
         """Initialize the WebContentProcessor with configuration settings."""
         try:
+            # Use updated configuration to match WebsiteScraper defaults
             self.web_processor = WebContentProcessor(
-                max_workers=self.config.max_workers,
-                batch_size=self.config.batch_size,
-                processing_checkpoint_hours=self.config.checkpoint_hours
+                max_workers=max(self.config.max_workers, 5),  # Align with WebsiteScraper max_workers
+                batch_size=max(self.config.batch_size, 100),  # Align with WebsiteScraper batch_size
+                processing_checkpoint_hours=max(self.config.checkpoint_hours, 24)
             )
-            logger.info(f"Web content processor initialized with max_workers={self.config.max_workers}, "
-                       f"batch_size={self.config.batch_size}, checkpoint_hours={self.config.checkpoint_hours}")
+            logger.info(f"Web content processor initialized with max_workers={self.web_processor.max_workers}, "
+                       f"batch_size={self.web_processor.batch_size}, "
+                       f"checkpoint_hours={self.web_processor.processing_checkpoint_hours}")
         except Exception as e:
-            logger.error(f"Failed to initialize web content processor: {str(e)}")
+            logger.error(f"Failed to initialize web content processor: {str(e)}", exc_info=True)
             raise
 
     async def process_web_content(self) -> Dict:
@@ -178,51 +177,54 @@ class SystemInitializer:
                 logger.warning("No webpage results found in processing details")
                 return results
             
-            # Extract publications from webpage_results
-            publications = [
+            # Extract publications, experts, and PDFs from webpage_results
+            items = [
                 item for batch in results['processing_details']['webpage_results']
                 for item in batch.get('batch', [])
-                if item.get('content_type') == 'publication'
+                if isinstance(item, dict)
             ]
+            publications = [item for item in items if item.get('type') == 'publication']
+            experts = [item for item in items if item.get('type') == 'expert']
+            pdfs = [item for item in items if item.get('type') == 'pdf']
             
-            logger.info(f"Found {len(publications)} publications to map to resources_resource")
+            logger.info(f"Found {len(publications)} publications, {len(experts)} experts, "
+                       f"and {len(pdfs)} PDFs to process")
             
             # Map publications to resources_resource
             successful_mappings = 0
             for publication in publications:
                 try:
                     # Validate required fields
-                    url = publication.get('url')
+                    doi = publication.get('doi') or publication.get('url')
                     title = publication.get('title')
-                    if not url or not title:
-                        logger.warning(f"Skipping publication with missing url or title: {publication}")
+                    if not doi or not title:
+                        logger.warning(f"Skipping publication with missing doi or title: {publication}")
                         continue
                     
+                    # Map to resources_resource table
                     self.db.add_publication(
                         title=title or 'Untitled',
-                        summary=publication.get('content', ''),
-                        source=url,
-                        type=publication.get('content_type', 'webpage'),
-                        authors=publication.get('metadata', {}).get('authors', []) or [],
-                        domains=publication.get('metadata', {}).get('domains', []) or [],
-                        publication_year=publication.get('metadata', {}).get('year'),
-                        doi=publication.get('metadata', {}).get('doi')
+                        summary=publication.get('summary', publication.get('content', ''))[:1000],
+                        source=publication.get('source', 'website'),
+                        type=publication.get('type', 'publication'),
+                        authors=publication.get('authors', []),
+                        domains=publication.get('domains', []),
+                        publication_year=publication.get('publication_year'),
+                        doi=doi
                     )
                     successful_mappings += 1
-                    logger.debug(f"Mapped publication: {url}")
+                    logger.debug(f"Mapped publication: {doi}")
                 except Exception as e:
-                    logger.error(f"Failed to map publication {url or 'unknown'}: {str(e)}")
+                    logger.error(f"Failed to map publication {doi or 'unknown'}: {str(e)}")
             
+            # Log results
             logger.info(f"""Web Content Processing Results:
                 Pages Processed: {results.get('processed_pages', 0)}
                 Pages Updated: {results.get('updated_pages', 0)}
-                PDF Chunks Processed: {results.get('processed_chunks', 0)}
-                PDF Chunks Updated: {results.get('updated_chunks', 0)}
                 Publications Processed: {results.get('processed_publications', 0)}
-                Publications Updated: {results.get('updated_publications', 0)}
+                Experts Processed: {results.get('processed_experts', 0)}
+                PDFs Processed: {results.get('processed_resources', 0)}
                 Publications Mapped: {successful_mappings}
-                Retry Attempts: {results.get('retry_attempts', 0)}
-                Retry Successes: {results.get('retry_successes', 0)}
                 Processing Time: {processing_time:.2f} seconds
                 Average Time Per Page: {processing_time/max(results.get('processed_pages', 1), 1):.2f} seconds
             """)
@@ -581,8 +583,9 @@ class SystemInitializer:
                     logger.info("Processing Website publications...")
                     logger.info("="*50)
                     
+                    # Use the new WebsiteScraper with updated configuration
                     website_scraper = WebsiteScraper(summarizer=TextSummarizer())
-                    website_publications = website_scraper.fetch_content()
+                    website_publications = website_scraper.fetch_content(max_pages=10)
                     
                     if website_publications:
                         logger.info(f"\nProcessing {len(website_publications)} website publications")
@@ -595,7 +598,9 @@ class SystemInitializer:
                                 continue
                     else:
                         logger.warning("No website publications found")
-                        
+                    
+                    # Log scraper metrics
+                    logger.info(f"WebsiteScraper metrics: {website_scraper.get_metrics()}")
                     website_scraper.close()
                     logger.info("\nWebsite publications processing complete!")
                     
