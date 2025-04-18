@@ -630,13 +630,7 @@ async def health_check():
             "timestamp": datetime.now().isoformat()
         }
     
-from fastapi import APIRouter, HTTPException, Request, Depends
-from typing import Dict
-import logging
-from redis.asyncio import Redis
 
-# Add these endpoints to your existing router with minimal change to your existing code
-# You'll need to add the get_redis dependency function if it doesn't exist
 
 async def get_redis():
     """Establish Redis connection with detailed logging"""
