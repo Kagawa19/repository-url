@@ -7,11 +7,6 @@ from datetime import datetime, timedelta
 from urllib.parse import urlparse
 import psycopg2
 from psycopg2.extras import RealDictCursor
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from io import BytesIO
-import base64
 import csv
 import tempfile
 
@@ -528,7 +523,7 @@ class RecommendationMonitor:
         Args:
             start_date: Optional start date for analysis window
             end_date: Optional end date for analysis window
-            output_format: Format of the report ('json', 'csv', 'html', 'plot')
+            output_format: Format of the report ('json', 'csv', 'html')
             
         Returns:
             Report in the specified format
@@ -619,8 +614,6 @@ class RecommendationMonitor:
                     return self._report_to_csv(report)
                 elif output_format == 'html':
                     return self._report_to_html(report)
-                elif output_format == 'plot':
-                    return self._generate_adaptation_plots(report)
                 else:
                     return report
                 
@@ -876,103 +869,6 @@ class RecommendationMonitor:
         except Exception as e:
             self.logger.error(f"Error converting report to HTML: {e}")
             return f"<html><body><h1>Error</h1><p>{str(e)}</p></body></html>"
-    
-    def _generate_adaptation_plots(self, report: Dict) -> Dict[str, str]:
-        """Generate plots visualizing system adaptation"""
-        plots = {}
-        
-        try:
-            # Set up the style
-            plt.style.use('ggplot')
-            sns.set_palette("viridis")
-            
-            # Plot 1: Messaging Adoption Over Time
-            if report['daily_adaptation']:
-                plt.figure(figsize=(10, 6))
-                
-                # Convert data to pandas DataFrame
-                df = pd.DataFrame(report['daily_adaptation'])
-                
-                # Convert day strings to datetime if needed
-                if not isinstance(df['day'].iloc[0], datetime):
-                    df['day'] = pd.to_datetime(df['day'])
-                
-                # Calculate adoption percentage
-                df['messaging_pct'] = df['snapshots_using_messaging'] / df['snapshot_count'] * 100
-                
-                # Plot
-                ax = sns.lineplot(x='day', y='messaging_pct', data=df, marker='o', linewidth=2)
-                ax.set_title('Messaging-Based Recommendations Adoption Over Time', fontsize=14)
-                ax.set_xlabel('Date', fontsize=12)
-                ax.set_ylabel('Percentage of Recommendations (%)', fontsize=12)
-                ax.set_ylim(0, 100)
-                ax.grid(True, linestyle='--', alpha=0.7)
-                
-                # Save to BytesIO and convert to base64
-                buffer = BytesIO()
-                plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
-                buffer.seek(0)
-                image_png = buffer.getvalue()
-                buffer.close()
-                
-                # Convert to base64
-                encoded = base64.b64encode(image_png).decode('utf-8')
-                plots['messaging_adoption'] = f"data:image/png;base64,{encoded}"
-                
-                plt.close()
-            
-            # Plot 2: Top Domains and Fields
-            if 'top_domains' in report['domain_field_stats'] or 'top_fields' in report['domain_field_stats']:
-                plt.figure(figsize=(12, 10))
-                
-                # Create subplot for domains
-                if 'top_domains' in report['domain_field_stats'] and report['domain_field_stats']['top_domains']:
-                    ax1 = plt.subplot(2, 1, 1)
-                    domains_df = pd.DataFrame(report['domain_field_stats']['top_domains'])
-                    
-                    # Sort by count
-                    domains_df = domains_df.sort_values('mention_count', ascending=False)
-                    
-                    # Plot horizontal bar chart
-                    sns.barplot(x='mention_count', y='domain', data=domains_df.head(10), ax=ax1)
-                    ax1.set_title('Top Domains Mentioned in Messages', fontsize=14)
-                    ax1.set_xlabel('Mention Count', fontsize=12)
-                    ax1.set_ylabel('Domain', fontsize=12)
-                
-                # Create subplot for fields
-                if 'top_fields' in report['domain_field_stats'] and report['domain_field_stats']['top_fields']:
-                    ax2 = plt.subplot(2, 1, 2)
-                    fields_df = pd.DataFrame(report['domain_field_stats']['top_fields'])
-                    
-                    # Sort by count
-                    fields_df = fields_df.sort_values('mention_count', ascending=False)
-                    
-                    # Plot horizontal bar chart
-                    sns.barplot(x='mention_count', y='field', data=fields_df.head(10), ax=ax2)
-                    ax2.set_title('Top Fields Mentioned in Messages', fontsize=14)
-                    ax2.set_xlabel('Mention Count', fontsize=12)
-                    ax2.set_ylabel('Field', fontsize=12)
-                
-                plt.tight_layout()
-                
-                # Save to BytesIO and convert to base64
-                buffer = BytesIO()
-                plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
-                buffer.seek(0)
-                image_png = buffer.getvalue()
-                buffer.close()
-                
-                # Convert to base64
-                encoded = base64.b64encode(image_png).decode('utf-8')
-                plots['top_domains_fields'] = f"data:image/png;base64,{encoded}"
-                
-                plt.close()
-            
-            return plots
-            
-        except Exception as e:
-            self.logger.error(f"Error generating adaptation plots: {e}")
-            return {"error": str(e)}
     
     def monitor_recommendation_changes(self, user_id: str, 
                                        new_recommendations: List[Dict], 
