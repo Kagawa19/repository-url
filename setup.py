@@ -4,6 +4,8 @@ import asyncio
 import os
 import sys
 import argparse
+import psutil
+import gc
 import time
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
@@ -159,8 +161,10 @@ class SystemInitializer:
             logger.error(f"Failed to initialize web content processor: {str(e)}", exc_info=True)
             raise
 
+   
+
     async def process_web_content(self) -> Dict:
-        """Process web content and map publications and experts to database tables."""
+        """Process web content, relying on ContentPipeline's incremental saves to experts and publications."""
         try:
             logger.info("\n" + "="*50)
             logger.info("Processing web content...")
@@ -182,97 +186,33 @@ class SystemInitializer:
                 logger.warning("No webpage results found in processing details")
                 return results
             
-            # Extract and process items incrementally
-            items = [
-                item for batch in results['processing_details']['webpage_results']
-                for item in batch.get('batch', [])
-                if isinstance(item, dict)
-            ]
-            publications = [item for item in items if item.get('type') == 'publication']
-            experts = [item for item in items if item.get('type') == 'expert']
-            pdfs = [item for item in items if item.get('type') == 'pdf']
-            
-            logger.info(f"Found {len(publications)} publications, {len(experts)} experts, "
-                    f"and {len(pdfs)} PDFs to process")
-            
-            # Map publications to resources_resource
-            successful_pub_mappings = 0
-            for publication in publications:
-                try:
-                    doi = publication.get('doi') or publication.get('url')
-                    title = publication.get('title')
-                    if not doi or not title:
-                        logger.warning(f"Skipping publication with missing doi or title: {publication}")
-                        continue
-                    
-                    self.db.add_publication(
-                        title=title or 'Untitled',
-                        summary=publication.get('summary', publication.get('content', ''))[:1000],
-                        source=publication.get('source', 'website'),
-                        type=publication.get('type', 'publication'),
-                        authors=publication.get('authors', []),
-                        domains=publication.get('domains', []),
-                        publication_year=publication.get('publication_year'),
-                        doi=doi
-                    )
-                    successful_pub_mappings += 1
-                    logger.debug(f"Mapped publication: {doi}")
-                    # Clear memory after each publication
-                    gc.collect()
-                except Exception as e:
-                    logger.error(f"Failed to map publication {doi or 'unknown'}: {str(e)}")
-            
-            # Map experts to experts_expert
-            successful_exp_mappings = 0
-            for expert in experts:
-                try:
-                    url = expert.get('doi') or expert.get('url')
-                    name = expert.get('title')
-                    if not url or not name:
-                        logger.warning(f"Skipping expert with missing url or name: {expert}")
-                        continue
-                    
-                    existing = self.db.execute("""
-                        SELECT id FROM experts_expert WHERE url = %s
-                    """, (url,))
-                    
-                    if not existing:
-                        self.db.execute("""
-                            INSERT INTO experts_expert (name, affiliation, contact_email, url, is_active)
-                            VALUES (%s, %s, %s, %s, %s)
-                        """, (
-                            name or 'Unknown Expert',
-                            expert.get('affiliation', 'APHRC'),
-                            expert.get('contact_email'),
-                            url,
-                            True
-                        ))
-                        successful_exp_mappings += 1
-                        logger.debug(f"Mapped expert: {url}")
-                    # Clear memory after each expert
-                    gc.collect()
-                except Exception as e:
-                    logger.error(f"Failed to map expert {url or 'unknown'}: {str(e)}")
-            
-            # Log results and memory usage
+            # Log results (no storage needed since ContentPipeline saves incrementally)
             logger.info(f"""Web Content Processing Results:
                 Pages Processed: {results.get('processed_pages', 0)}
                 Pages Updated: {results.get('updated_pages', 0)}
                 Publications Processed: {results.get('processed_publications', 0)}
                 Experts Processed: {results.get('processed_experts', 0)}
                 PDFs Processed: {results.get('processed_resources', 0)}
-                Publications Mapped: {successful_pub_mappings}
-                Experts Mapped: {successful_exp_mappings}
                 Processing Time: {processing_time:.2f} seconds
                 Average Time Per Page: {processing_time/max(results.get('processed_pages', 1), 1):.2f} seconds
             """)
             logger.info(f"WebsiteScraper metrics: {self.web_processor.content_pipeline.scraper.get_metrics()}")
             logger.debug(f"Final memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
             
+            # Log database state
+            try:
+                pub_count = self.db.execute("SELECT COUNT(*) FROM publications")[0][0]
+                exp_count = self.db.execute("SELECT COUNT(*) FROM experts")[0][0]
+                logger.info(f"Database state: {pub_count} publications, {exp_count} experts")
+            except Exception as e:
+                logger.error(f"Error querying database state: {str(e)}")
+            
             return results
         except Exception as e:
             logger.error(f"Error processing web content: {str(e)}", exc_info=True)
             raise
+        finally:
+            gc.collect()
   
 
     async def match_experts_with_resources(self) -> None:

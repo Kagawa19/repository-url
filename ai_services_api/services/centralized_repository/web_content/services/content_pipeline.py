@@ -11,6 +11,8 @@ import re
 import warnings
 import psutil
 import gc
+from urllib.parse import urljoin
+from typing import Dict, List, Set
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
@@ -141,11 +143,11 @@ class ContentPipeline:
             logger.error(f"Error scraping {url}: {str(e)}")
             return {}
 
- 
 
     async def run(self) -> Dict:
         """
         Run the scraping pipeline with summarization and PDF processing, recursively fetching internal links.
+        Saves data to experts and publications tables every 10 pages for crash resilience.
         Returns a dictionary with processed pages and results.
         """
         results = {
@@ -161,34 +163,59 @@ class ContentPipeline:
             logger.info("Starting content pipeline...")
             webpage_results = []
             current_batch = []
-            processed_urls = set()
-            to_visit_urls = set(self.start_urls)  # Start with base URLs
-            max_pages = 500  # Reduced from 1000 to conserve resources
+            processed_urls: Set[str] = set()
+            to_visit_urls: Set[str] = set(self.start_urls)  # Start with base URLs
+            max_pages = 500  # Reduced for resource constraints
             max_depth = 3    # Limit recursion depth
-            depth_map = {url: 0 for url in to_visit_urls}  # Track depth of each URL
+            depth_map = {url: 0 for url in to_visit_urls}  # Track depth
+            save_batch_size = 10  # Save every 10 pages
             
             # Log initial memory usage
             process = psutil.Process()
             logger.debug(f"Initial memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
             
+            # Fetch existing URLs from database to skip re-scraping
+            try:
+                existing_urls = self.db.execute("""
+                    SELECT doi FROM publications WHERE doi IS NOT NULL
+                    UNION
+                    SELECT url FROM experts WHERE url IS NOT NULL
+                """)
+                processed_urls.update(row[0] for row in existing_urls)
+                logger.info(f"Loaded {len(processed_urls)} existing URLs from database")
+            except Exception as e:
+                logger.error(f"Error loading existing URLs: {str(e)}", exc_info=True)
+            
             # Fetch publications using WebsiteScraper
             try:
-                publications = self.scraper.fetch_content(max_pages=20)  # Reduced from 50
+                publications = self.scraper.fetch_content(max_pages=20)
                 logger.info(f"Fetched {len(publications)} publications from WebsiteScraper")
-                current_batch.extend(publications)
-                processed_urls.update(item.get('url') or item.get('doi', '') for item in publications)
+                current_batch.extend([p for p in publications if p.get('url') not in processed_urls])
                 results['processed_publications'] += len([p for p in publications if p.get('type') == 'publication'])
                 results['processed_experts'] += len([p for p in publications if p.get('type') == 'expert'])
                 results['processed_resources'] += len([p for p in publications if p.get('type') == 'pdf'])
             except Exception as e:
                 logger.error(f"Error fetching publications from WebsiteScraper: {str(e)}", exc_info=True)
             
+            # Save initial scraper batch if >= 10 items
+            if len(current_batch) >= save_batch_size:
+                try:
+                    self._save_batch(current_batch, results)
+                    webpage_results.append({'batch': current_batch})
+                    results['updated_pages'] += len(current_batch)
+                    processed_urls.update(item.get('url') or item.get('doi', '') for item in current_batch)
+                    current_batch = []
+                    gc.collect()
+                    logger.debug(f"Memory usage after saving batch: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+                except Exception as e:
+                    logger.error(f"Error saving initial batch: {str(e)}", exc_info=True)
+            
             # Recursively crawl additional pages
             while to_visit_urls and results['processed_pages'] < max_pages:
                 url = to_visit_urls.pop()
                 current_depth = depth_map.get(url, 0)
                 if url in processed_urls or url in self.visited_urls:
-                    logger.debug(f"Skipping already visited URL: {url}")
+                    logger.debug(f"Skipping already processed URL: {url}")
                     continue
                 if current_depth >= max_depth:
                     logger.debug(f"Skipping URL {url} at depth {current_depth} (max_depth={max_depth})")
@@ -206,11 +233,10 @@ class ContentPipeline:
                         continue
                     
                     current_batch.append(page_data)
-                    processed_urls.add(url)
                     self.visited_urls.add(url)
                     results['processed_pages'] += 1
                     
-                    # Extract internal links for recursive crawling
+                    # Extract internal links
                     try:
                         response = requests.get(url, timeout=10)
                         response.raise_for_status()
@@ -229,14 +255,18 @@ class ContentPipeline:
                     except Exception as e:
                         logger.error(f"Error fetching links from {url}: {str(e)}")
                     
-                    # Batch handling
-                    if len(current_batch) >= self.batch_size:
-                        webpage_results.append({'batch': current_batch})
-                        results['updated_pages'] += len(current_batch)
-                        current_batch = []
-                        # Clear memory
-                        gc.collect()
-                        logger.debug(f"Memory usage after batch: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+                    # Save batch every 10 pages
+                    if len(current_batch) >= save_batch_size:
+                        try:
+                            self._save_batch(current_batch, results)
+                            webpage_results.append({'batch': current_batch})
+                            results['updated_pages'] += len(current_batch)
+                            processed_urls.update(item.get('url') or item.get('doi', '') for item in current_batch)
+                            current_batch = []
+                            gc.collect()
+                            logger.debug(f"Memory usage after saving batch: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+                        except Exception as e:
+                            logger.error(f"Error saving batch: {str(e)}", exc_info=True)
                     
                     # Log progress
                     if results['processed_pages'] % 50 == 0:
@@ -246,16 +276,22 @@ class ContentPipeline:
                     logger.error(f"Error processing URL {url}: {str(e)}", exc_info=True)
                     continue
             
-            # Process remaining batch
+            # Save remaining batch
             if current_batch:
-                webpage_results.append({'batch': current_batch})
-                results['updated_pages'] += len(current_batch)
+                try:
+                    self._save_batch(current_batch, results)
+                    webpage_results.append({'batch': current_batch})
+                    results['updated_pages'] += len(current_batch)
+                    processed_urls.update(item.get('url') or item.get('doi', '') for item in current_batch)
+                except Exception as e:
+                    logger.error(f"Error saving final batch: {str(e)}", exc_info=True)
             
             # Process PDFs
-            pdf_urls = [item['url'] for item in current_batch if item.get('type') == 'pdf']
+            pdf_urls = [item['url'] for item in current_batch if item.get('type') == 'pdf' and item['url'] not in processed_urls]
             if pdf_urls:
                 try:
                     pdf_results = self.pdf_processor.process_pdfs(pdf_urls)
+                    self._save_batch(pdf_results, results)
                     webpage_results.append({'batch': pdf_results})
                     results['processed_resources'] += len(pdf_results)
                     results['updated_pages'] += len(pdf_results)
@@ -277,6 +313,64 @@ class ContentPipeline:
             logger.error(f"Critical error in content pipeline: {str(e)}", exc_info=True)
         
         return results
+
+    def _save_batch(self, batch: List[Dict], results: Dict) -> None:
+        """Save a batch of items to the experts and publications tables."""
+        for item in batch:
+            try:
+                content_type = item.get('type')
+                url = item.get('url') or item.get('doi')
+                title = item.get('title')
+                if not url or not title:
+                    logger.warning(f"Skipping item with missing url or title: {item}")
+                    continue
+                
+                if content_type == 'expert':
+                    existing = self.db.execute("""
+                        SELECT id FROM experts WHERE url = %s
+                    """, (url,))
+                    if not existing:
+                        self.db.execute("""
+                            INSERT INTO experts (name, affiliation, contact_email, url, is_active)
+                            VALUES (%s, %s, %s, %s, %s)
+                        """, (
+                            title or 'Unknown Expert',
+                            item.get('affiliation', 'APHRC'),
+                            item.get('contact_email'),
+                            url,
+                            True
+                        ))
+                        results['processed_experts'] += 1
+                        logger.debug(f"Saved expert to experts table: {url}")
+                
+                elif content_type in ['publication', 'pdf']:
+                    existing = self.db.execute("""
+                        SELECT id FROM publications WHERE doi = %s
+                    """, (url,))
+                    if not existing:
+                        self.db.execute("""
+                            INSERT INTO publications (title, summary, source, type, authors, domains, publication_year, doi, field, subfield)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (
+                            title or 'Untitled',
+                            item.get('summary', item.get('content', ''))[:1000],
+                            item.get('source', 'website'),
+                            content_type,
+                            item.get('authors', []),
+                            item.get('domains', []),
+                            item.get('publication_year'),
+                            url,
+                            item.get('field'),
+                            item.get('subfield')
+                        ))
+                        if content_type == 'publication':
+                            results['processed_publications'] += 1
+                        else:
+                            results['processed_resources'] += 1
+                        logger.debug(f"Saved {content_type} to publications table: {url}")
+                
+            except Exception as e:
+                logger.error(f"Error saving item {url or 'unknown'} to database: {str(e)}", exc_info=True)
 
 
     def cleanup(self):
