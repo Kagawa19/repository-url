@@ -2,6 +2,7 @@ import datetime
 from typing import Any, List, Dict, Optional
 from pydantic import BaseModel
 import logging
+import redis
 import uuid
 from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
 from fastapi import APIRouter, HTTPException, Request, Depends, Body
@@ -278,7 +279,7 @@ async def track_user_search(redis_client: Redis, user_id: str, query: str, categ
 @router.get("/experts/recent-searches")
 async def get_recent_searches(
     request: Request,
-    user_id: str = Depends(flexible_get_user_id),
+    user_id: str = Depends(get_user_id),
     limit: int = 5
 ):
     """
@@ -355,7 +356,7 @@ async def get_recent_searches(
 @router.delete("/experts/recent-searches")
 async def clear_recent_searches(
     request: Request,
-    user_id: str = Depends(flexible_get_user_id)
+    user_id: str = Depends(get_user_id)
 ):
     """
     Clear a user's recent search history.
