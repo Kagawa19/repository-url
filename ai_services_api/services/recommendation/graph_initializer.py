@@ -878,12 +878,12 @@ class GraphDatabaseInitializer:
                 
                 return domain_relationships, field_relationships, domain_field_relationships
                 
-            except Exception as e:
-                logger.error(f"Error fetching message domain/field patterns: {e}")
-                return [], [], []
-            finally:
-                if conn:
-                    conn.close()
+        except Exception as e:
+            logger.error(f"Error fetching message domain/field patterns: {e}")
+            return [], [], []
+        finally:
+            if conn:
+                conn.close()
 
     def _create_message_based_relationships(self, session, domain_relationships, field_relationships, domain_field_relationships):
         """
