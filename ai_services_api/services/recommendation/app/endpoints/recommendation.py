@@ -331,6 +331,247 @@ async def mark_user_data_changed(user_id: str, redis_client: Redis) -> bool:
         logger.error(f"Error marking user data changes: {e}")
         return False
 
+@router.get("/recommendations/based-on-messaging")
+async def get_messaging_based_recommendations(
+    request: Request,
+    user_id: str = Depends(get_user_id),
+    redis_client: Redis = Depends(get_redis)
+) -> Dict[str, Any]:
+    """
+    Get expert recommendations for a user specifically based on their messaging history.
+    This endpoint prioritizes domains and fields from message interactions.
+    
+    Args:
+        request: Request object
+        user_id: User ID to get recommendations for
+        redis_client: Redis client for caching
+        
+    Returns:
+        Dict containing recommended experts and metadata
+    """
+    logger.info(f"Getting messaging-based recommendations for user {user_id}")
+    
+    try:
+        start_time = datetime.utcnow()
+        
+        # Check cache first
+        cache_key = f"user_messaging_recommendations:{user_id}"
+        cached_response = await redis_client.get(cache_key)
+        
+        if cached_response:
+            logger.info(f"Cache hit for messaging-based recommendations: {cache_key}")
+            return json.loads(cached_response)
+        
+        conn = None
+        try:
+            conn = get_db_connection()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                
+                # Query to get top domains and fields from messaging interactions
+                cur.execute("""
+                    SELECT 
+                        unnest(domains) as domain,
+                        COUNT(*) as domain_count
+                    FROM message_expert_interactions
+                    WHERE user_id = %s
+                    AND created_at > NOW() - INTERVAL '90 days'
+                    GROUP BY domain
+                    ORDER BY domain_count DESC
+                    LIMIT 5
+                """, (user_id,))
+                
+                top_domains = [row['domain'] for row in cur.fetchall() if row['domain']]
+                
+                cur.execute("""
+                    SELECT 
+                        unnest(fields) as field,
+                        COUNT(*) as field_count
+                    FROM message_expert_interactions
+                    WHERE user_id = %s
+                    AND created_at > NOW() - INTERVAL '90 days'
+                    GROUP BY field
+                    ORDER BY field_count DESC
+                    LIMIT 5
+                """, (user_id,))
+                
+                top_fields = [row['field'] for row in cur.fetchall() if row['field']]
+                
+                logger.info(f"Found {len(top_domains)} top domains and {len(top_fields)} top fields from messaging history")
+                
+                # If no messaging history, fall back to regular recommendations
+                if not top_domains and not top_fields:
+                    logger.info(f"No messaging history found for user {user_id}, using regular recommendations")
+                    recommendations = await process_recommendations(user_id, redis_client)
+                    return recommendations
+                
+                # Fetch matching experts from Neo4j
+                expert_matching = ExpertMatchingService()
+                try:
+                    # Use the Neo4j driver directly to run a custom query
+                    with expert_matching._neo4j_driver.session() as session:
+                        query = """
+                        MATCH (e:Expert)
+                        WHERE e.is_active = true
+                        AND e.id <> $user_id
+                        
+                        // Match with messaging domains
+                        OPTIONAL MATCH (e)-[:WORKS_IN_DOMAIN]->(d:Domain)
+                        WHERE d.name IN $domains
+                        
+                        // Match with messaging fields
+                        OPTIONAL MATCH (e)-[:SPECIALIZES_IN]->(f:Field)
+                        WHERE f.name IN $fields
+                        
+                        // Count matches
+                        WITH e, 
+                            COLLECT(DISTINCT d.name) as matched_domains,
+                            COLLECT(DISTINCT f.name) as matched_fields,
+                            SIZE(COLLECT(DISTINCT d)) as domain_matches,
+                            SIZE(COLLECT(DISTINCT f)) as field_matches
+                        
+                        // Calculate score
+                        WITH e, 
+                            matched_domains,
+                            matched_fields,
+                            domain_matches * 0.6 + field_matches * 0.4 as messaging_score
+                        
+                        // Only include experts with some match
+                        WHERE messaging_score > 0
+                        
+                        // Also match on concepts, organization for the full profile
+                        OPTIONAL MATCH (e)-[:HAS_CONCEPT]->(c:Concept)
+                        OPTIONAL MATCH (e)-[:RESEARCHES_IN]->(ra:ResearchArea)
+                        
+                        // Return formatted results
+                        RETURN {
+                            id: e.id,
+                            name: e.name,
+                            designation: e.designation,
+                            theme: e.theme,
+                            unit: e.unit,
+                            match_details: {
+                                matched_domains: matched_domains,
+                                matched_fields: matched_fields,
+                                shared_concepts: COLLECT(DISTINCT c.name),
+                                shared_research_areas: COLLECT(DISTINCT ra.name)
+                            },
+                            match_reason: CASE
+                                WHEN SIZE(matched_domains) > 0 AND SIZE(matched_fields) > 0 
+                                    THEN 'Shares your interests in ' + matched_domains[0] + ' and ' + matched_fields[0]
+                                WHEN SIZE(matched_domains) > 0 
+                                    THEN 'Works in your area of interest: ' + matched_domains[0]
+                                WHEN SIZE(matched_fields) > 0 
+                                    THEN 'Specializes in your field of interest: ' + matched_fields[0]
+                                ELSE 'Matches your messaging interests'
+                            END,
+                            similarity_score: messaging_score
+                        } as result
+                        ORDER BY messaging_score DESC
+                        LIMIT 5
+                        """
+                        
+                        result = session.run(query, {
+                            "user_id": str(user_id),
+                            "domains": top_domains,
+                            "fields": top_fields
+                        })
+                        
+                        messaging_recommendations = [record["result"] for record in result]
+                        
+                        # If we don't have enough recommendations, get some regular ones to supplement
+                        if len(messaging_recommendations) < 5:
+                            logger.info(f"Only found {len(messaging_recommendations)} messaging-based recommendations, adding regular ones")
+                            
+                            # Get IDs of experts we already recommended
+                            existing_ids = {rec['id'] for rec in messaging_recommendations}
+                            
+                            # Get extra_needed regular recommendations
+                            extra_needed = 5 - len(messaging_recommendations)
+                            regular_recs = await expert_matching.get_recommendations_for_user(user_id, extra_needed + 5)
+                            
+                            # Filter out any that we already recommended and add up to extra_needed
+                            filtered_regular = [rec for rec in regular_recs if rec['id'] not in existing_ids]
+                            messaging_recommendations.extend(filtered_regular[:extra_needed])
+                
+                except Exception as matching_err:
+                    logger.error(f"Neo4j query error: {str(matching_err)}", exc_info=True)
+                    # Fall back to regular recommendations
+                    recommendations = await process_recommendations(user_id, redis_client)
+                    return recommendations
+                finally:
+                    expert_matching.close()
+                
+                end_time = datetime.utcnow()
+                process_time = (end_time - start_time).total_seconds()
+                
+                # Format the response
+                response_data = {
+                    "user_id": user_id,
+                    "recommendations": messaging_recommendations,
+                    "total_matches": len(messaging_recommendations),
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "response_time": process_time,
+                    "messaging_based": True,
+                    "top_domains": top_domains,
+                    "top_fields": top_fields,
+                    "data_version": await _get_current_data_version(redis_client) if '_get_current_data_version' in globals() else 1
+                }
+                
+                # Cache the response
+                try:
+                    await redis_client.setex(
+                        cache_key,
+                        1800,  # 30 minutes
+                        json.dumps(response_data)
+                    )
+                    logger.info(f"Cached messaging-based recommendations for user {user_id}")
+                except Exception as cache_err:
+                    logger.error(f"Failed to cache recommendations: {cache_err}")
+                
+                # Log this recommendation event
+                try:
+                    view_id = f"msg_rec_{int(time.time())}"
+                    experts_shown = [exp.get('id') for exp in messaging_recommendations]
+                    
+                    # Store for 24 hours
+                    await redis_client.setex(
+                        f"rec_view:{view_id}",
+                        86400,  # 24 hours
+                        json.dumps({
+                            'user_id': user_id,
+                            'experts': experts_shown,
+                            'timestamp': datetime.utcnow().isoformat(),
+                            'source': 'messaging'
+                        })
+                    )
+                    
+                    # Add view_id to response for frontend tracking
+                    response_data['view_id'] = view_id
+                    
+                    logger.info(f"Recorded messaging recommendation view {view_id} for user {user_id}")
+                    
+                    # Also log to user_interest_logs if that function exists
+                    if '_log_recommendation_event' in globals():
+                        await _log_recommendation_event(user_id, response_data, redis_client)
+                except Exception as log_err:
+                    logger.error(f"Error logging recommendation event: {log_err}")
+                
+                logger.info(f"Successfully returned {len(messaging_recommendations)} messaging-based recommendations for user {user_id}")
+                return response_data
+                
+        except Exception as db_error:
+            logger.error(f"Database error getting messaging history: {str(db_error)}")
+            # Fall back to regular recommendations
+            recommendations = await process_recommendations(user_id, redis_client)
+            return recommendations
+        finally:
+            if conn:
+                conn.close()
+        
+    except Exception as e:
+        logger.error(f"Error getting messaging-based recommendations for user {user_id}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error getting recommendations: {str(e)}")
+
 @router.delete("/cache/recommendations/{user_id}")
 async def clear_user_recommendations_cache(
     user_id: str,

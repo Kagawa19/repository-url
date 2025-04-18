@@ -148,33 +148,53 @@ class BrowserPool:
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
         options.add_argument('--window-size=1920,1080')
-        options.add_argument('--remote-debugging-port=9222')
         options.add_argument('--disable-setuid-sandbox')
         options.add_argument('--disable-extensions')
+        options.add_argument('--remote-debugging-port=0')  # Use dynamic port
+        options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
         return options
         
     def get_browser(self):
         with self._lock:
+            # First try to find an available browser
             for browser in self.browsers:
                 if browser not in self.browsers_in_use:
                     self.browsers_in_use[browser] = True
                     return browser
+            
+            # If no available browser and we can create more
             if len(self.browsers) < self.max_size:
                 try:
                     service = Service()
                     browser = webdriver.Chrome(service=service, options=self.chrome_options)
                     self.browsers.append(browser)
                     self.browsers_in_use[browser] = True
+                    logger.info(f"Created new browser, pool size: {len(self.browsers)}/{self.max_size}")
                     return browser
                 except Exception as e:
                     logger.error(f"Failed to create new browser: {e}")
-                    raise
+            else:
+                logger.warning(f"Browser pool maxed out ({self.max_size}), waiting for release")
+            
+            # If we reach here, all browsers are in use and we can't create more
+            # Wait for a browser to become available (up to 5 seconds)
+            for _ in range(10):  # Try 10 times with 0.5 sec delay
+                time.sleep(0.5)
+                for browser in self.browsers:
+                    if browser not in self.browsers_in_use:
+                        self.browsers_in_use[browser] = True
+                        return browser
+            
+            logger.warning("No browser available after waiting, returning None")
             return None
             
     def release_browser(self, browser):
         with self._lock:
             if browser in self.browsers_in_use:
                 del self.browsers_in_use[browser]
+                logger.debug(f"Released browser, {len(self.browsers_in_use)}/{len(self.browsers)} in use")
+            else:
+                logger.warning("Attempted to release browser that wasn't marked as in use")
                 
     def close_all(self):
         with self._lock:
@@ -185,6 +205,7 @@ class BrowserPool:
                     pass
             self.browsers = []
             self.browsers_in_use = {}
+            logger.info("Closed all browsers in pool")
 
 @dataclass
 class ScraperConfig:
@@ -240,7 +261,7 @@ class WebsiteScraper:
         self.seen_urls = set()
         self.metrics = ScraperMetrics()
         chrome_options = self._setup_chrome_options()
-        self.browser_pool = BrowserPool(max_size=2, chrome_options=chrome_options)  # Reduced from 5
+        self.browser_pool = BrowserPool(max_size=5, chrome_options=chrome_options)  # Reduced from 5
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.config.max_workers)
         try:
             self.driver = self.browser_pool.get_browser()
@@ -279,13 +300,14 @@ class WebsiteScraper:
 
     def _create_session(self) -> requests.Session:
         session = requests.Session()
-        retry_strategy = Retry(
-            total=self.config.max_retries,
-            backoff_factor=0.5,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "POST"]
+        
+        # Configure connection pooling
+        adapter = HTTPAdapter(
+            pool_connections=20,  # Increase from default
+            pool_maxsize=20,      # Increase from default
+            max_retries=self.config.max_retries
         )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
+        
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         return session
@@ -673,45 +695,93 @@ class WebsiteScraper:
         """Extract experts from an experts listing page"""
         experts = []
         try:
-            # Look for expert cards/profiles
+            # Try to find "View All" button for team/staff page
+            try:
+                view_all = self.driver.find_element(By.XPATH, "//a[contains(text(), 'View All')]")
+                if view_all:
+                    view_all.click()
+                    time.sleep(3)
+                    logger.info("Clicked 'View All' button for experts")
+            except:
+                pass
+                
+            # Cast a wider net with more selectors
             expert_elements = self._find_all_with_selectors(
                 self.driver, 
-                ['.team-member', '.person', '.staff-member', '.expert', 'article']
+                ['.team-member', '.person', '.staff-member', '.expert', 'article', '.team-block', 
+                '.col-md-4', '.team-item', '.profile-card', 'figure', '[class*="profile"]']
             )
             
             logger.info(f"Found {len(expert_elements)} expert elements")
             
-            for element in expert_elements:
+            # Try to directly find links to expert profiles
+            profile_links = []
+            try:
+                all_links = self.driver.find_elements(By.TAG_NAME, 'a')
+                for link in all_links:
+                    href = link.get_attribute('href')
+                    if href and '/person/' in href:
+                        profile_links.append(href)
+                
+                profile_links = list(set(profile_links))  # Remove duplicates
+                logger.info(f"Found {len(profile_links)} direct expert profile links")
+            except Exception as e:
+                logger.error(f"Error finding expert profile links: {e}")
+            
+            # Process profile links directly
+            for profile_url in profile_links:
+                if profile_url in self.seen_urls:
+                    continue
+                    
+                self.seen_urls.add(profile_url)
+                
+                expert_data = {
+                    'name': os.path.basename(profile_url).replace('-', ' ').title(),
+                    'url': profile_url,
+                    'type': 'expert',
+                    'source': 'website'
+                }
+                
+                # Visit the expert's profile page
                 try:
-                    url = self._extract_element_attribute(element, ['.name a', 'a', 'h3 a'], 'href')
-                    if not url or '/person/' not in url:
-                        continue
-                    
-                    name = self._extract_element_text(element, ['.name', 'h2', 'h3', 'h4'])
-                    title = self._extract_element_text(element, ['.title', '.position', '.role'])
-                    bio = self._extract_element_text(element, ['.bio', '.excerpt', '.summary', 'p'])
-                    
-                    # If we have a URL to the expert's profile, visit it to get more details
-                    expert_data = {
-                        'name': name or 'Unknown Expert',
-                        'title': title or 'Researcher',
-                        'url': url,
-                        'bio': bio or f"Expert profile for {name}",
-                        'type': 'expert',
-                        'source': 'website'
-                    }
-                    
-                    # Visit the expert's profile page to get more details
-                    try:
-                        expert_data = self._extract_expert_profile(url, expert_data)
-                    except Exception as e:
-                        logger.error(f"Error extracting expert profile for {url}: {e}")
-                    
-                    experts.append(expert_data)
-                    logger.info(f"Extracted expert: {name}")
-                    
+                    expert_data = self._extract_expert_profile(profile_url, expert_data)
+                    if expert_data.get('name') and expert_data.get('name') != 'Unknown Expert':
+                        experts.append(expert_data)
+                        logger.info(f"Extracted expert from direct link: {expert_data.get('name')}")
                 except Exception as e:
-                    logger.error(f"Error extracting expert details: {e}")
+                    logger.error(f"Error extracting expert profile for {profile_url}: {e}")
+            
+            # Process expert cards if no direct links worked
+            if not experts:
+                for element in expert_elements:
+                    try:
+                        url = self._extract_element_attribute(element, ['a'], 'href')
+                        if not url or '/person/' not in url or url in self.seen_urls:
+                            continue
+                        
+                        self.seen_urls.add(url)
+                        
+                        name = self._extract_element_text(element, ['.name', 'h2', 'h3', 'h4', 'figcaption', '.title'])
+                        title = self._extract_element_text(element, ['.position', '.role', '.designation', '.job-title', 'p'])
+                        
+                        expert_data = {
+                            'name': name or os.path.basename(url).replace('-', ' ').title(),
+                            'title': title or 'Researcher',
+                            'url': url,
+                            'type': 'expert',
+                            'source': 'website'
+                        }
+                        
+                        # Visit the expert's profile page
+                        try:
+                            expert_data = self._extract_expert_profile(url, expert_data)
+                            experts.append(expert_data)
+                            logger.info(f"Extracted expert: {name}")
+                        except Exception as e:
+                            logger.error(f"Error extracting expert profile for {url}: {e}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error extracting expert card details: {e}")
             
             return experts
             
@@ -724,50 +794,134 @@ class WebsiteScraper:
         try:
             browser = self.browser_pool.get_browser()
             if not browser:
-                logger.warning(f"No browser available for expert profile {url}")
-                return expert_data
+                logger.warning(f"No browser available for expert profile {url} - creating new browser")
+                try:
+                    service = Service()
+                    temp_browser = webdriver.Chrome(service=service, options=self._setup_chrome_options())
+                    browser = temp_browser
+                except Exception as e:
+                    logger.error(f"Failed to create new browser: {e}")
+                    return expert_data
                 
             try:
                 browser.get(url)
-                wait = WebDriverWait(browser, self.config.browser_timeout)
+                time.sleep(3)  # Allow page to load fully
                 
-                # Extract name if not already present
+                # Extract name - try multiple approaches
                 if not expert_data.get('name') or expert_data['name'] == 'Unknown Expert':
-                    name_elem = browser.find_element(By.CSS_SELECTOR, 'h1, .page-title, .entry-title')
-                    if name_elem:
-                        expert_data['name'] = name_elem.text.strip()
+                    try:
+                        name_elem = browser.find_element(By.CSS_SELECTOR, 'h1, .page-title, .entry-title, header h2, .bio-title')
+                        if name_elem and name_elem.text.strip():
+                            expert_data['name'] = name_elem.text.strip()
+                    except:
+                        # If still no name, extract from URL
+                        if not expert_data.get('name'):
+                            name_from_url = os.path.basename(url).replace('-', ' ').title()
+                            if name_from_url and len(name_from_url.split()) >= 2:
+                                expert_data['name'] = name_from_url
                 
                 # Extract contact email
                 try:
-                    email_elem = browser.find_element(By.CSS_SELECTOR, 'a[href^="mailto:"]')
-                    if email_elem:
-                        expert_data['contact_email'] = email_elem.get_attribute('href').replace('mailto:', '')
+                    email_elements = browser.find_elements(By.XPATH, "//a[contains(@href, 'mailto:')]")
+                    for email_elem in email_elements:
+                        email = email_elem.get_attribute('href').replace('mailto:', '')
+                        if email and '@' in email:
+                            expert_data['contact_email'] = email
+                            break
                 except:
                     pass
                     
                 # Extract affiliation
-                try:
-                    affiliation_elem = browser.find_element(By.CSS_SELECTOR, '.affiliation, .organization')
-                    if affiliation_elem:
-                        expert_data['affiliation'] = affiliation_elem.text.strip()
-                    else:
+                if not expert_data.get('affiliation'):
+                    try:
+                        affiliation_selectors = [
+                            '.affiliation', '.organization', '[class*="affiliation"]', 
+                            '[class*="organization"]', '.institution', '.department'
+                        ]
+                        for selector in affiliation_selectors:
+                            try:
+                                affiliation_elem = browser.find_element(By.CSS_SELECTOR, selector)
+                                if affiliation_elem and affiliation_elem.text.strip():
+                                    expert_data['affiliation'] = affiliation_elem.text.strip()
+                                    break
+                            except:
+                                continue
+                    except:
+                        pass
+                    
+                    if not expert_data.get('affiliation'):
                         expert_data['affiliation'] = 'APHRC'
-                except:
-                    expert_data['affiliation'] = 'APHRC'
                     
                 # Extract biography text
+                biography = ""
                 try:
-                    bio_elems = browser.find_elements(By.CSS_SELECTOR, '.bio, .biography, .content, .entry-content p')
-                    if bio_elems:
-                        expert_data['bio'] = '\n'.join([elem.text for elem in bio_elems if elem.text.strip()])
+                    # Try multiple approaches to find the biography
+                    bio_selectors = [
+                        '.bio', '.biography', '.content', '.entry-content p', '.about', 
+                        'article p', '.profile-content', '.description', '.team-bio'
+                    ]
+                    
+                    for selector in bio_selectors:
+                        try:
+                            bio_elems = browser.find_elements(By.CSS_SELECTOR, selector)
+                            if bio_elems:
+                                bio_text = '\n'.join([elem.text for elem in bio_elems if elem.text.strip()])
+                                if bio_text:
+                                    biography = bio_text
+                                    break
+                        except:
+                            continue
+                    
+                    # If biography is still empty, try getting all paragraphs
+                    if not biography:
+                        paragraphs = browser.find_elements(By.TAG_NAME, 'p')
+                        biography = '\n'.join([p.text for p in paragraphs if p.text.strip()])
+                    
+                    if biography:
+                        expert_data['bio'] = biography[:5000]  # Limit size
                 except:
                     pass
                     
-                # Extract areas of expertise
+                # Extract areas of expertise/research interests
                 try:
-                    expertise_elems = browser.find_elements(By.CSS_SELECTOR, '.expertise, .skills, .research-areas')
-                    if expertise_elems:
-                        expert_data['domains'] = [elem.text.strip() for elem in expertise_elems if elem.text.strip()]
+                    expertise_selectors = [
+                        '.expertise', '.skills', '.research-areas', '.interests', 
+                        '.specialties', '.keywords', '[class*="expertise"]', '[class*="research"]'
+                    ]
+                    
+                    for selector in expertise_selectors:
+                        try:
+                            expertise_elems = browser.find_elements(By.CSS_SELECTOR, selector)
+                            if expertise_elems:
+                                domains = []
+                                for elem in expertise_elems:
+                                    if elem.text.strip():
+                                        domains.extend([d.strip() for d in elem.text.strip().split(',')])
+                                
+                                if domains:
+                                    expert_data['domains'] = domains
+                                    break
+                        except:
+                            continue
+                    
+                    # If no explicit expertise found, extract from biography
+                    if biography and not expert_data.get('domains'):
+                        # Extract research keywords from biography
+                        research_terms = [
+                            "research", "expertise", "specialize", "focus", "interest",
+                            "field", "area", "study", "investigate", "work on"
+                        ]
+                        
+                        for term in research_terms:
+                            if term in biography.lower():
+                                # Extract sentence containing research term
+                                sentences = biography.split('.')
+                                for sentence in sentences:
+                                    if term in sentence.lower():
+                                        expert_data['domains'] = [sentence.strip()]
+                                        break
+                                if expert_data.get('domains'):
+                                    break
                 except:
                     pass
                     
@@ -778,8 +932,13 @@ class WebsiteScraper:
                 return expert_data
                 
             finally:
-                if browser:
+                if browser and browser in self.browser_pool.browsers:
                     self.browser_pool.release_browser(browser)
+                elif browser:
+                    try:
+                        browser.quit()
+                    except:
+                        pass
         except Exception as e:
             logger.error(f"Error in _extract_expert_profile for {url}: {e}")
             return expert_data

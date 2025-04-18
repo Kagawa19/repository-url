@@ -739,6 +739,255 @@ class GraphDatabaseInitializer:
             logger.error(f"Error creating interest relationships: {e}")
 
     # Non-async version for direct calls
+    # Add this to your GraphDatabaseInitializer class to integrate message domains and fields
+    def _fetch_message_domain_field_patterns(self):
+        """
+        Fetch domain and field relationships based on messaging patterns.
+        This helps build connections between domains and fields that are frequently mentioned together.
+        """
+        conn = None
+        try:
+            # Create connection parameters
+            database_url = os.getenv('DATABASE_URL')
+            if database_url:
+                parsed_url = urlparse(database_url)
+                conn_params = {
+                    'host': parsed_url.hostname,
+                    'port': parsed_url.port,
+                    'dbname': parsed_url.path[1:],
+                    'user': parsed_url.username,
+                    'password': parsed_url.password
+                }
+            else:
+                conn_params = {
+                    'host': os.getenv('POSTGRES_HOST', 'postgres'),
+                    'port': os.getenv('POSTGRES_PORT', '5432'),
+                    'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
+                    'user': os.getenv('POSTGRES_USER', 'postgres'),
+                    'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres')
+                }
+            
+            conn = psycopg2.connect(**conn_params)
+            with conn.cursor() as cur:
+                # Find domains that frequently appear together in messages
+                cur.execute("""
+                    WITH message_domains AS (
+                        -- Expand the domains array into rows
+                        SELECT 
+                            id, 
+                            user_id, 
+                            expert_id,
+                            UNNEST(domains) as domain
+                        FROM message_expert_interactions
+                        WHERE domains IS NOT NULL AND ARRAY_LENGTH(domains, 1) > 0
+                    ),
+                    domain_pairs AS (
+                        -- Create pairs of domains that appear in the same message
+                        SELECT 
+                            md1.domain as domain1,
+                            md2.domain as domain2,
+                            COUNT(*) as co_occurrence
+                        FROM message_domains md1
+                        JOIN message_domains md2 
+                            ON md1.id = md2.id AND md1.domain < md2.domain
+                        GROUP BY md1.domain, md2.domain
+                        HAVING COUNT(*) > 1
+                    )
+                    -- Return the domain relationships
+                    SELECT 
+                        domain1,
+                        domain2,
+                        co_occurrence,
+                        co_occurrence / 
+                            (SELECT COUNT(*) FROM message_expert_interactions WHERE domains @> ARRAY[domain1]) as confidence
+                    FROM domain_pairs
+                    ORDER BY co_occurrence DESC
+                    LIMIT 500
+                """)
+                
+                domain_relationships = cur.fetchall()
+                logger.info(f"Fetched {len(domain_relationships)} domain co-occurrence relationships")
+                
+                # Find fields that frequently appear together in messages
+                cur.execute("""
+                    WITH message_fields AS (
+                        -- Expand the fields array into rows
+                        SELECT 
+                            id, 
+                            user_id, 
+                            expert_id,
+                            UNNEST(fields) as field
+                        FROM message_expert_interactions
+                        WHERE fields IS NOT NULL AND ARRAY_LENGTH(fields, 1) > 0
+                    ),
+                    field_pairs AS (
+                        -- Create pairs of fields that appear in the same message
+                        SELECT 
+                            mf1.field as field1,
+                            mf2.field as field2,
+                            COUNT(*) as co_occurrence
+                        FROM message_fields mf1
+                        JOIN message_fields mf2 
+                            ON mf1.id = mf2.id AND mf1.field < mf2.field
+                        GROUP BY mf1.field, mf2.field
+                        HAVING COUNT(*) > 1
+                    )
+                    -- Return the field relationships
+                    SELECT 
+                        field1,
+                        field2,
+                        co_occurrence,
+                        co_occurrence / 
+                            (SELECT COUNT(*) FROM message_expert_interactions WHERE fields @> ARRAY[field1]) as confidence
+                    FROM field_pairs
+                    ORDER BY co_occurrence DESC
+                    LIMIT 500
+                """)
+                
+                field_relationships = cur.fetchall()
+                logger.info(f"Fetched {len(field_relationships)} field co-occurrence relationships")
+                
+                # Find domain-field connections
+                cur.execute("""
+                    WITH domain_field_pairs AS (
+                        -- Create domain-field pairs from messages
+                        SELECT 
+                            UNNEST(domains) as domain,
+                            UNNEST(fields) as field,
+                            COUNT(*) as co_occurrence
+                        FROM message_expert_interactions
+                        WHERE domains IS NOT NULL AND ARRAY_LENGTH(domains, 1) > 0
+                        AND fields IS NOT NULL AND ARRAY_LENGTH(fields, 1) > 0
+                        GROUP BY domain, field
+                        HAVING COUNT(*) > 1
+                    )
+                    -- Return the domain-field relationships
+                    SELECT 
+                        domain,
+                        field,
+                        co_occurrence,
+                        co_occurrence / 
+                            (SELECT COUNT(*) FROM message_expert_interactions WHERE domains @> ARRAY[domain]) as confidence
+                    FROM domain_field_pairs
+                    ORDER BY co_occurrence DESC
+                    LIMIT 500
+                """)
+                
+                domain_field_relationships = cur.fetchall()
+                logger.info(f"Fetched {len(domain_field_relationships)} domain-field relationships")
+                
+                return domain_relationships, field_relationships, domain_field_relationships
+                
+            except Exception as e:
+                logger.error(f"Error fetching message domain/field patterns: {e}")
+                return [], [], []
+            finally:
+                if conn:
+                    conn.close()
+
+    def _create_message_based_relationships(self, session, domain_relationships, field_relationships, domain_field_relationships):
+        """
+        Create relationships in Neo4j based on messaging domain and field patterns.
+        
+        Args:
+            session: Neo4j session
+            domain_relationships: List of domain co-occurrence tuples
+            field_relationships: List of field co-occurrence tuples
+            domain_field_relationships: List of domain-field relationship tuples
+        """
+        try:
+            # Create domain co-occurrence relationships
+            for domain1, domain2, co_occurrence, confidence in domain_relationships:
+                # Skip empty domains
+                if not domain1 or not domain2:
+                    continue
+                    
+                # Calculate weight based on co-occurrence and confidence
+                weight = min(confidence * 0.8, 0.9)  # Cap at 0.9 to avoid overriding direct relationships
+                
+                # Create bidirectional relationship
+                session.run("""
+                    MERGE (d1:Domain {name: $domain1})
+                    MERGE (d2:Domain {name: $domain2})
+                    MERGE (d1)-[r:RELATED_TO]-(d2)
+                    SET r.weight = $weight,
+                        r.co_occurrence = $co_occurrence,
+                        r.confidence = $confidence,
+                        r.source = 'messaging',
+                        r.last_updated = datetime()
+                """, {
+                    "domain1": domain1,
+                    "domain2": domain2,
+                    "weight": weight,
+                    "co_occurrence": co_occurrence,
+                    "confidence": confidence
+                })
+            
+            logger.info(f"Created {len(domain_relationships)} domain co-occurrence relationships")
+            
+            # Create field co-occurrence relationships
+            for field1, field2, co_occurrence, confidence in field_relationships:
+                # Skip empty fields
+                if not field1 or not field2:
+                    continue
+                    
+                # Calculate weight based on co-occurrence and confidence
+                weight = min(confidence * 0.8, 0.9)  # Cap at 0.9 to avoid overriding direct relationships
+                
+                # Create bidirectional relationship
+                session.run("""
+                    MERGE (f1:Field {name: $field1})
+                    MERGE (f2:Field {name: $field2})
+                    MERGE (f1)-[r:RELATED_TO]-(f2)
+                    SET r.weight = $weight,
+                        r.co_occurrence = $co_occurrence,
+                        r.confidence = $confidence,
+                        r.source = 'messaging',
+                        r.last_updated = datetime()
+                """, {
+                    "field1": field1,
+                    "field2": field2,
+                    "weight": weight,
+                    "co_occurrence": co_occurrence,
+                    "confidence": confidence
+                })
+            
+            logger.info(f"Created {len(field_relationships)} field co-occurrence relationships")
+            
+            # Create domain-field relationships
+            for domain, field, co_occurrence, confidence in domain_field_relationships:
+                # Skip empty values
+                if not domain or not field:
+                    continue
+                    
+                # Calculate weight based on co-occurrence and confidence
+                weight = min(confidence * 0.7, 0.85)  # Cap at 0.85 to avoid overriding direct relationships
+                
+                # Create relationship
+                session.run("""
+                    MERGE (d:Domain {name: $domain})
+                    MERGE (f:Field {name: $field})
+                    MERGE (d)-[r:RELATED_TO_FIELD]->(f)
+                    SET r.weight = $weight,
+                        r.co_occurrence = $co_occurrence,
+                        r.confidence = $confidence,
+                        r.source = 'messaging',
+                        r.last_updated = datetime()
+                """, {
+                    "domain": domain,
+                    "field": field,
+                    "weight": weight,
+                    "co_occurrence": co_occurrence,
+                    "confidence": confidence
+                })
+            
+            logger.info(f"Created {len(domain_field_relationships)} domain-field relationships")
+        
+        except Exception as e:
+            logger.error(f"Error creating message-based relationships: {e}")
+            raise
+
+    # Update the initialize_graph method to include message domain/field pattern analysis
     async def initialize_graph(self):
         """Initialize the graph with experts and their relationships"""
         try:
@@ -772,8 +1021,21 @@ class GraphDatabaseInitializer:
                     logger.info("Added interest-based relationships from user topic interactions")
                 except Exception as e:
                     logger.error(f"Error creating interest relationships: {e}")
+                
+                # NEW: Create relationships based on message domain/field patterns
+                try:
+                    domain_relationships, field_relationships, domain_field_relationships = self._fetch_message_domain_field_patterns()
+                    self._create_message_based_relationships(
+                        session, 
+                        domain_relationships, 
+                        field_relationships, 
+                        domain_field_relationships
+                    )
+                    logger.info("Added message-based domain and field relationships")
+                except Exception as e:
+                    logger.error(f"Error creating message-based relationships: {e}")
 
-            logger.info("Graph initialization complete with adaptive and interest-based relationships!")
+            logger.info("Graph initialization complete with adaptive, interest-based, and message-based relationships!")
             return True
 
         except Exception as e:
