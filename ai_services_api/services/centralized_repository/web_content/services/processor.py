@@ -2,6 +2,7 @@ import logging
 import asyncio
 from typing import Dict
 from datetime import datetime
+from ai_services_api.services.centralized_repository.web_content.services.web_scraper import WebsiteScraper, ScraperConfig
 from ai_services_api.services.centralized_repository.database_manager import DatabaseManager
 from ai_services_api.services.centralized_repository.web_content.services.content_pipeline import ContentPipeline
 import hashlib
@@ -28,10 +29,15 @@ class WebContentProcessor:
         self.config = config or {}
         self.skip_publications = self.config.get('skip_publications', False)
         max_workers = self.config.get('max_workers', int(os.getenv('WEBSITE_MAX_WORKERS', 5)))
+        
+        # Initialize ContentPipeline
+        start_urls = [os.getenv('WEBSITE_BASE_URL', 'https://aphrc.org')]
+        
+        # Create scraper config
         scraper_config = ScraperConfig()
-        scraper_config.max_browsers = 2
         scraper_config.max_workers = max_workers
-
+        
+        # Initialize components
         self.content_pipeline = ContentPipeline(
             start_urls=start_urls,
             scraper=WebsiteScraper(config=scraper_config),
@@ -39,10 +45,8 @@ class WebContentProcessor:
             db=self.db,
             batch_size=self.config.get('batch_size', int(os.getenv('WEBSITE_BATCH_SIZE', 100)))
         )
-        
-        # Initialize ContentPipeline
-        start_urls = [os.getenv('WEBSITE_BASE_URL', 'https://aphrc.org')]
-        
+        logger.info("WebContentProcessor initialized with start URLs: %s, max_workers: %d", start_urls, max_workers)
+            
     async def process_content(self) -> Dict:
         """Process web content using the content pipeline."""
         try:
