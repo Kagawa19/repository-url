@@ -222,6 +222,71 @@ class MessageHandler:
             sections.append(section)
         
         return sections
+    
+    def _clean_sitemap_url(self, url: str) -> str:
+        """
+        Clean URLs from sitemap or database to make them usable for display and navigation.
+        Enhanced to handle more URL formats and ensure proper domain structure.
+        
+        Args:
+            url: URL potentially from sitemap or database
+            
+        Returns:
+            Cleaned URL ready for use in links
+        """
+        if not url:
+            return ""
+            
+        import re
+        
+        # Remove XML tags often found in sitemap URLs
+        url = re.sub(r'<\?xml.*?\?>', '', url)
+        url = re.sub(r'<urlset.*?>', '', url)
+        url = re.sub(r'</urlset>', '', url)
+        url = re.sub(r'<url>', '', url)
+        url = re.sub(r'</url>', '', url)
+        url = re.sub(r'<loc>', '', url)
+        url = re.sub(r'</loc>', '', url)
+        
+        # Remove whitespace, newlines and excessive spaces
+        url = re.sub(r'\s+', ' ', url).strip()
+        
+        # Handle common sitemap URL issues
+        if url.startswith('http'):
+            # Extract just the URL if it's embedded in other text
+            url_match = re.search(r'(https?://[^\s<>"]+)', url)
+            if url_match:
+                url = url_match.group(1)
+                    
+        # Remove trailing XML or HTML invalid characters
+        url = re.sub(r'[<>"]', '', url)
+        
+        # Ensure URL has proper domain if it's a path
+        if url.startswith('/'):
+            url = f"https://aphrc.org{url}"
+        elif not url.startswith(('http://', 'https://')) and url:
+            # If it's not a relative path but also doesn't have a protocol
+            # Check if it looks like a domain
+            if re.match(r'^[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}', url):
+                url = f"https://{url}"
+            else:
+                # Assume it's a path on aphrc.org
+                url = f"https://aphrc.org/{url}"
+                
+        # Validate URL structure (basic check)
+        if url and not re.match(r'^https?://[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)$', url):
+            # If URL doesn't look valid but has some content, default to homepage
+            if len(url) > 5:
+                # Try to extract domain and make a best effort
+                domain_match = re.search(r'(https?://[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6})', url)
+                if domain_match:
+                    return domain_match.group(1)
+            
+            # Fallback to APHRC domain if all else fails
+            if not url.startswith(('http://', 'https://')):
+                return "https://aphrc.org"
+            
+        return url
 
     def clean_response(self, response: str) -> str:
         # Unchanged, kept for context

@@ -1708,10 +1708,24 @@ class GeminiLLMManager:
     def format_publication_context(self, publications: List[Dict[str, Any]]) -> str:
         """
         Format publication information into Markdown format with focused presentation.
-        Includes title, summary (trimmed), and DOI link with 'Check it out' text.
+        Enhanced to provide proper clickable links and additional navigation options.
+        
+        Args:
+            publications: List of publication dictionaries
+            
+        Returns:
+            Formatted Markdown with structured publication presentations including links
         """
         if not publications:
-            return "I couldn't find any publications matching your criteria. Would you like me to suggest some related research areas instead?"
+            # Enhanced with links to general publications areas
+            return """I couldn't find any publications matching your criteria. You might want to browse:
+            
+    - [All APHRC Publications](https://aphrc.org/publications/)
+    - [Journal Articles](https://aphrc.org/publications/journal-articles/)
+    - [Research Reports](https://aphrc.org/publications/research-reports/)
+    - [Policy Briefs](https://aphrc.org/publications/policy-briefs/)
+
+    Would you like me to suggest some related research areas instead?"""
 
         markdown_text = "# APHRC Publications\n\n"
 
@@ -1720,6 +1734,10 @@ class GeminiLLMManager:
                 # Add numbering before the title
                 title = publication.get('title', 'Untitled Publication').strip()
                 markdown_text += f"{idx + 1}. **{title}**\n"
+
+                # Add publication year if available - NEW
+                if publication.get('publication_year'):
+                    markdown_text += f"   **Year:** {publication['publication_year']}\n"
 
                 # Add summary/abstract (trimmed to 200 characters max, ending at word boundary)
                 summary = publication.get('abstract') or publication.get('summary') or ""
@@ -1730,20 +1748,68 @@ class GeminiLLMManager:
                         trimmed_summary = trimmed_summary[:200].rsplit(" ", 1)[0] + "..."
                     markdown_text += f"   **Summary:** {trimmed_summary}\n"
 
-                # Add DOI with consistent formatting
+                # Add DOI with better formatting - ENHANCED
                 if publication.get('doi'):
                     doi = publication['doi'].strip()
+                    # Clean up DOI format
+                    if doi.startswith('doi:'):
+                        doi = doi[4:].strip()
+                    
+                    # Create proper link
                     if not doi.startswith('http'):
-                        doi = f"https://doi.org/{doi}"
-                    markdown_text += f"   **DOI:** [Check it out]({doi})\n"
+                        doi_url = f"https://doi.org/{doi}"
+                    else:
+                        doi_url = doi
+                    markdown_text += f"   **DOI:** [{doi}]({doi_url})\n"
+                    
+                # Add authors info - NEW
+                authors = publication.get('authors', [])
+                if authors:
+                    if isinstance(authors, list):
+                        # Limit to first 3 authors + et al. for readability
+                        if len(authors) > 3:
+                            author_text = f"{', '.join(str(a) for a in authors[:3])} et al."
+                        else:
+                            author_text = f"{', '.join(str(a) for a in authors)}"
+                        markdown_text += f"   **Authors:** {author_text}\n"
+                    else:
+                        markdown_text += f"   **Authors:** {authors}\n"
+                
+                # Add topics if available - NEW
+                topics = publication.get('topics', {})
+                if topics and isinstance(topics, dict) and topics:
+                    # Convert topics dictionary to readable format
+                    topics_text = ', '.join(f"{k}: {v}" for k, v in list(topics.items())[:3])
+                    if topics_text:
+                        markdown_text += f"   **Topics:** {topics_text}\n"
+                
+                # Add direct URL if available - NEW
+                url = publication.get('url', '')
+                if url and not url.startswith('http'):
+                    url = f"https://aphrc.org/publications/{url}"
+                
+                if url:
+                    markdown_text += f"   **Link:** [View Full Publication]({url})\n"
 
                 if idx < len(publications) - 1:
                     markdown_text += "\n"
 
             except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
                 logger.error(f"Error formatting publication {idx + 1}: {e}")
 
-        markdown_text += "\nYou can ask for more details about any of these publications or request information about related research."
+        # Add helpful navigation footer - NEW
+        markdown_text += """
+        
+    ## Browse More APHRC Publications
+
+    - [All Publications](https://aphrc.org/publications/)
+    - [Journal Articles](https://aphrc.org/publications/journal-articles/)
+    - [Research Reports](https://aphrc.org/publications/research-reports/)
+    - [Policy Briefs](https://aphrc.org/publications/policy-briefs/)
+
+    You can ask for more details about any of these publications or request information about related research."""
         return markdown_text
 
     async def get_navigation(self, query: str, limit: int = 3) -> Tuple[List[Dict], Optional[str]]:
@@ -2091,17 +2157,125 @@ class GeminiLLMManager:
         except Exception as e:
             logger.error(f"Error fetching navigation sections: {e}")
             return [], str(e)
+
+    def get_common_aphrc_links(self) -> Dict[str, str]:
+        """
+        Returns a dictionary of common APHRC website sections with their URLs.
+        This method centralizes the link structure for consistent navigation assistance.
+        
+        Returns:
+            Dict[str, str]: Dictionary mapping section names to their URLs
+        """
+        # Core structure of APHRC website sections with their URLs
+        common_links = {
+            # Main sections
+            "home": "https://aphrc.org",
+            "about": "https://aphrc.org/about/",
+            "research": "https://aphrc.org/research/",
+            "publications": "https://aphrc.org/publications/",
+            "experts": "https://aphrc.org/experts/",
+            "resources": "https://aphrc.org/resources/",
+            "news": "https://aphrc.org/news/",
+            "events": "https://aphrc.org/events/",
+            "blogs": "https://aphrc.org/blogs/",
+            "contact": "https://aphrc.org/contact/",
+            
+            # Research themes
+            "health_and_wellbeing": "https://aphrc.org/research/health-and-wellbeing/",
+            "urban_health": "https://aphrc.org/research/urbanization/",
+            "srmncah": "https://aphrc.org/research/sexual-reproductive-maternal-newborn-child-and-adolescent-health/",
+            "education": "https://aphrc.org/research/education/",
+            "population_dynamics": "https://aphrc.org/research/population-dynamics/",
+            
+            # Publication types
+            "journal_articles": "https://aphrc.org/publications/journal-articles/",
+            "policy_briefs": "https://aphrc.org/publications/policy-briefs/",
+            "research_reports": "https://aphrc.org/publications/research-reports/",
+            
+            # Resource types
+            "datasets": "https://aphrc.org/resources/datasets/",
+            "tools": "https://aphrc.org/resources/tools/",
+            "multimedia": "https://aphrc.org/resources/multimedia/"
+        }
+        
+        return common_links
+
+
+    def _clean_sitemap_url(self, url: str) -> str:
+        """
+        Clean URLs from sitemap or database to make them usable for display and navigation.
+        Enhanced to handle more URL formats and ensure proper domain structure.
+        
+        Args:
+            url: URL potentially from sitemap or database
+            
+        Returns:
+            Cleaned URL ready for use in links
+        """
+        if not url:
+            return ""
+            
+        import re
+        
+        # Remove XML tags often found in sitemap URLs
+        url = re.sub(r'<\?xml.*?\?>', '', url)
+        url = re.sub(r'<urlset.*?>', '', url)
+        url = re.sub(r'</urlset>', '', url)
+        url = re.sub(r'<url>', '', url)
+        url = re.sub(r'</url>', '', url)
+        url = re.sub(r'<loc>', '', url)
+        url = re.sub(r'</loc>', '', url)
+        
+        # Remove whitespace, newlines and excessive spaces
+        url = re.sub(r'\s+', ' ', url).strip()
+        
+        # Handle common sitemap URL issues
+        if url.startswith('http'):
+            # Extract just the URL if it's embedded in other text
+            url_match = re.search(r'(https?://[^\s<>"]+)', url)
+            if url_match:
+                url = url_match.group(1)
+                    
+        # Remove trailing XML or HTML invalid characters
+        url = re.sub(r'[<>"]', '', url)
+        
+        # Ensure URL has proper domain if it's a path
+        if url.startswith('/'):
+            url = f"https://aphrc.org{url}"
+        elif not url.startswith(('http://', 'https://')) and url:
+            # If it's not a relative path but also doesn't have a protocol
+            # Check if it looks like a domain
+            if re.match(r'^[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}', url):
+                url = f"https://{url}"
+            else:
+                # Assume it's a path on aphrc.org
+                url = f"https://aphrc.org/{url}"
+                
+        # Validate URL structure (basic check)
+        if url and not re.match(r'^https?://[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)$', url):
+            # If URL doesn't look valid but has some content, default to homepage
+            if len(url) > 5:
+                # Try to extract domain and make a best effort
+                domain_match = re.search(r'(https?://[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6})', url)
+                if domain_match:
+                    return domain_match.group(1)
+            
+            # Fallback to APHRC domain if all else fails
+            if not url.startswith(('http://', 'https://')):
+                return "https://aphrc.org"
+            
+        return url
         
     def format_navigation_context(self, sections: List[Dict[str, Any]]) -> str:
         """
         Format navigation information into Markdown format for rendering in the frontend.
-        Updated to handle sitemap URLs better.
+        Enhanced to provide proper clickable links.
         
         Args:
             sections: List of navigation section dictionaries
             
         Returns:
-            Formatted Markdown string with structured navigation presentations
+            Formatted Markdown string with structured navigation presentations including links
         """
         if not sections:
             return "I couldn't find any navigation sections matching your criteria. Would you like me to suggest some website resources instead?"
@@ -2130,26 +2304,42 @@ class GeminiLLMManager:
                         content = content[:197] + '...'
                     markdown_text += f"    - Description: {content}\n\n"
                 
-                # URL - improved handling
+                # URL - improved handling with fallback domain
                 url = section.get('url', '')
                 if url:
                     # Clean up URL from sitemap format
                     cleaned_url = self._clean_sitemap_url(url)
                     
                     if cleaned_url:
-                        # Format URL as a proper link
+                        # Format URL as a proper markdown link
                         if not cleaned_url.startswith(('http://', 'https://')):
-                            display_url = cleaned_url
-                            cleaned_url = f"https://{cleaned_url}" if not cleaned_url.startswith(('www.', '/')) else f"https://aphrc.org{cleaned_url}" if cleaned_url.startswith('/') else f"https://{cleaned_url}"
+                            # Handle relative URLs by adding domain
+                            if cleaned_url.startswith('/'):
+                                display_url = cleaned_url
+                                cleaned_url = f"https://aphrc.org{cleaned_url}"
+                            else:
+                                display_url = cleaned_url
+                                cleaned_url = f"https://aphrc.org/{cleaned_url}"
                         else:
                             # Get domain for display
                             try:
+                                from urllib.parse import urlparse
                                 parsed_url = urlparse(cleaned_url)
                                 display_url = parsed_url.netloc + parsed_url.path
                             except:
                                 display_url = cleaned_url.replace('https://', '').replace('http://', '')
                         
-                        markdown_text += f"    - Link: [{display_url}]({cleaned_url})\n\n"
+                        # Always ensure it's a clickable link
+                        markdown_text += f"    - **Link**: [{display_url}]({cleaned_url})\n\n"
+                else:
+                    # Provide a fallback link to a relevant section
+                    section_type = section.get('content_type', '').lower()
+                    if 'publication' in section_type or 'research' in section_type:
+                        markdown_text += f"    - **Link**: [Publications Section](https://aphrc.org/publications/)\n\n"
+                    elif 'expert' in section_type or 'researcher' in section_type:
+                        markdown_text += f"    - **Link**: [Experts Section](https://aphrc.org/experts/)\n\n"
+                    elif 'about' in title.lower():
+                        markdown_text += f"    - **Link**: [About Section](https://aphrc.org/about/)\n\n"
                 
                 # Content Type
                 content_type = section.get('content_type', '')
@@ -2164,10 +2354,12 @@ class GeminiLLMManager:
                         if 'T' in last_updated:
                             # ISO format
                             date_part = last_updated.split('T')[0]
+                            from datetime import datetime
                             date_obj = datetime.strptime(date_part, '%Y-%m-%d')
                             formatted_date = date_obj.strftime('%B %d, %Y')
                         else:
                             # Try generic date parsing
+                            from datetime import datetime
                             date_obj = datetime.strptime(last_updated.split()[0], '%Y-%m-%d')
                             formatted_date = date_obj.strftime('%B %d, %Y')
                         
@@ -2179,6 +2371,7 @@ class GeminiLLMManager:
                 # Keywords/Tags
                 keywords = section.get('keywords', [])
                 if keywords:
+                    import json
                     if isinstance(keywords, str):
                         try:
                             keywords = json.loads(keywords)
@@ -2193,22 +2386,31 @@ class GeminiLLMManager:
                     markdown_text += "\n"
 
             except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
                 logger.error(f"Error formatting navigation section {idx + 1}: {e}")
                 continue
 
+        # Add helpful generic links at the end
+        markdown_text += "\n**Common APHRC Website Sections:**\n"
+        markdown_text += "- [Main Publications](https://aphrc.org/publications/)\n"
+        markdown_text += "- [Research Areas](https://aphrc.org/research/)\n"
+        markdown_text += "- [Expert Directory](https://aphrc.org/experts/)\n"
+        markdown_text += "- [Resources](https://aphrc.org/resources/)\n"
+        
         markdown_text += "\nWould you like more details about any of these sections or help navigating to a specific resource?"
         return markdown_text
     def _create_tailored_prompt(self, intent, context_type: str, message_style: str, user_interests: str = "") -> str:
         """
         Create a tailored system prompt based on detected intent, context type, message style,
-        and user interests when available. Enhanced for navigation context.
+        and user interests when available. Enhanced for navigation context with link requirements.
         
         Args:
             intent: The detected intent from QueryIntent enum
             context_type (str): The type of context being provided
             message_style (str): The communication style detected in the user's message
             user_interests (str): Optional string describing user's previous interests
-                
+                    
         Returns:
             str: A specialized system prompt for the LLM
         """
@@ -2250,6 +2452,8 @@ class GeminiLLMManager:
             - Connect publications to broader themes in APHRC's work
             - Use natural transitions between publications
             - Suggest related publications when appropriate
+            - ALWAYS include DOI links in markdown format when available: [DOI](https://doi.org/XXX)
+            - Include a footer with links to the main publications sections of the APHRC website
             """,
             
             QueryIntent.EXPERT: """
@@ -2259,11 +2463,15 @@ class GeminiLLMManager:
             - Provide context about their role at APHRC
             - Highlight notable publications or projects
             - Suggest how their expertise might be relevant to the user's interests
+            - Include ORCID links when available
+            - Link to any publications mentioned using DOI or direct URLs
             """,
             
-            # ENHANCED: Improved navigation guidance
+            # HEAVILY ENHANCED: Navigation guidance with strong link requirements
             QueryIntent.NAVIGATION: """
             When providing navigation assistance:
+            - ALWAYS include direct website links in markdown format: [Section Name](https://aphrc.org/section-path/)
+            - Every navigation reference MUST include a matching URL
             - Give clear, step-by-step guidance to find resources
             - Explain what the user will find in each section
             - Provide context about why certain resources might be useful
@@ -2272,6 +2480,7 @@ class GeminiLLMManager:
             - Mention related sections that might be helpful for their broader inquiry
             - Use specific section names and paths exactly as they appear on the website
             - For lists of sections, organize them in a logical order (importance/relevance)
+            - ALWAYS include a standard set of common APHRC website links at the end of your response
             """,
             
             QueryIntent.GENERAL: """
@@ -2281,6 +2490,7 @@ class GeminiLLMManager:
             - Connect information to broader themes in public health and population research
             - Anticipate follow-up questions
             - Provide examples and context to make information accessible
+            - When mentioning website sections, include links in markdown format
             """
         }
         
@@ -2299,14 +2509,27 @@ class GeminiLLMManager:
             about APHRC's research in the relevant domain. Suggest broader topics
             the user might explore and mention that you can help find specific publications
             if they provide more details about their interests.
+            
+            Include links to the main publications sections:
+            - [All Publications](https://aphrc.org/publications/)
+            - [Journal Articles](https://aphrc.org/publications/journal-articles/)
+            - [Research Reports](https://aphrc.org/publications/research-reports/)
             """
-        # ADDED: Navigation-specific empty results guidance
+        # ADDED: Navigation-specific empty results guidance with links
         elif context_type == "no_navigation":
             context_specific = """
             Although no specific navigation sections were found, provide helpful guidance
             about navigating the APHRC website. Suggest main sections they might want to
             explore based on their interests and offer to help them find specific resources
             if they provide more details about what they're looking for.
+            
+            ALWAYS include these standard website section links:
+            - [Home](https://aphrc.org/)
+            - [About](https://aphrc.org/about/)
+            - [Research](https://aphrc.org/research/)
+            - [Publications](https://aphrc.org/publications/)
+            - [Experts](https://aphrc.org/experts/)
+            - [Resources](https://aphrc.org/resources/)
             """
         
         # Add user interest guidance if provided
@@ -2322,12 +2545,26 @@ class GeminiLLMManager:
             their current question.
             """
         
+        # ADDED: Website link requirement for ALL responses
+        link_requirement = """
+        IMPORTANT: For ANY website section or resource you mention, ALWAYS include a proper link using markdown format:
+        [Section Name](https://aphrc.org/section-path/)
+        
+        Common APHRC website sections to reference:
+        - [Publications](https://aphrc.org/publications/)
+        - [Research](https://aphrc.org/research/)
+        - [Experts](https://aphrc.org/experts/)
+        - [Resources](https://aphrc.org/resources/)
+        - [About](https://aphrc.org/about/)
+        """
+        
         # Combine appropriate guidance elements
         selected_tone = tone_guidance.get(message_style, tone_guidance["conversational"])
         selected_intent = intent_guidance.get(intent, intent_guidance[QueryIntent.GENERAL])
         
-        full_prompt = f"{base_instructions}\n\n{selected_tone}\n\n{selected_intent}\n\n{context_specific}\n\n{user_interest_guidance}"
+        full_prompt = f"{base_instructions}\n\n{selected_tone}\n\n{selected_intent}\n\n{context_specific}\n\n{user_interest_guidance}\n\n{link_requirement}"
         
+        # Add guidance on structuring the response
         # Add guidance on structuring the response
         full_prompt += """
         Structure your response for clarity:
@@ -2335,11 +2572,11 @@ class GeminiLLMManager:
         - Provide context and details in a logical flow
         - Use natural transitions between topics
         - Include specific examples when helpful
-        - End with a courteous closing that invites further engagement
+        - ALWAYS include relevant website links in markdown format
+        - End with a courteous closing that invites further engagement and offers additional navigation assistance
         """
         
         return full_prompt.strip()
-  
         
     async def generate_async_response(self, message: str, user_interests: str = "") -> AsyncGenerator[str, None]:
         """
@@ -3062,6 +3299,7 @@ class GeminiLLMManager:
     def format_expert_with_publications(self, expert: Dict[str, Any]) -> str:
         """
         Format a single expert with their publications for presentation.
+        Enhanced to provide clickable links to publications.
         
         Args:
             expert: Expert dictionary with publications included
@@ -3084,12 +3322,12 @@ class GeminiLLMManager:
         position = expert.get('position', '')
         if position:
             expert_info.append(f"* Position: {position}")
-            
+                
         department = expert.get('department', '')
         if department:
             expert_info.append(f"* Department: {department}")
         
-        # MODIFIED: Add knowledge_expertise instead of email
+        # Add knowledge_expertise 
         knowledge_expertise = expert.get('knowledge_expertise', '')
         if knowledge_expertise:
             expert_info.append(f"* Knowledge Expertise: {knowledge_expertise}")
@@ -3110,7 +3348,10 @@ class GeminiLLMManager:
             for interest in research_interests:
                 expert_info.append(f"  * {interest}")
         
-        # REMOVED: Email contact information section
+        # Add ORCID if available - NEW
+        orcid = expert.get('orcid', '')
+        if orcid:
+            expert_info.append(f"* ORCID: [{orcid}](https://orcid.org/{orcid})")
         
         # Add expert bio if available
         bio = expert.get('bio', '')
@@ -3123,7 +3364,7 @@ class GeminiLLMManager:
         # Add the expert info section
         context_parts.append("\n".join(expert_info))
         
-        # Add publications section with clear formatting
+        # Add publications section with clear formatting and links
         publications = expert.get('publications', [])
         if publications:
             pub_section = [f"\nPublications by {full_name}:"]
@@ -3137,10 +3378,17 @@ class GeminiLLMManager:
                 if year:
                     pub_info.append(f"* Published: {year}")
                 
-                # DOI if available
+                # DOI with proper link formatting - ENHANCED
                 doi = pub.get('doi', '')
                 if doi:
-                    pub_info.append(f"* DOI: {doi}")
+                    # Clean and format DOI as a proper link
+                    doi = doi.strip()
+                    if not doi.startswith('http'):
+                        doi_url = f"https://doi.org/{doi}"
+                    else:
+                        doi_url = doi
+                    
+                    pub_info.append(f"* DOI: [{doi}]({doi_url})")
                 
                 # Authors
                 authors = pub.get('authors', [])
@@ -3163,16 +3411,24 @@ class GeminiLLMManager:
                         abstract = abstract[:247] + "..."
                     pub_info.append(f"* Abstract: {abstract}")
                 
+                # Add publication URL if available - NEW
+                pub_url = pub.get('url', '')
+                if pub_url and not doi:  # Only add if no DOI already provided
+                    pub_info.append(f"* Link: [View Publication]({pub_url})")
+                
                 pub_section.append("\n".join(pub_info))
             
             # Add all publications
             context_parts.append("\n\n".join(pub_section))
+            
+            # Add link to find more publications - NEW
+            context_parts.append(f"\nFind more publications at [APHRC Publications](https://aphrc.org/publications/)")
         else:
             context_parts.append(f"\nNo publications found for {full_name}.")
+            context_parts.append(f"You can search for related publications at [APHRC Publications](https://aphrc.org/publications/)")
         
         # Combine all parts
         return "\n\n".join(context_parts)
-
     
    
     async def analyze_quality(self, message: str, response: str = "") -> Dict:
