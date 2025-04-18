@@ -253,6 +253,74 @@ async def get_predictor():
         _predictor = GoogleAutocompletePredictor()
     return _predictor
 
+# Method: get_or_create_session
+# Location: ai_services_api/services/search/app/endpoints/process_functions.py
+# Changes: Fixed async cursor handling for PostgreSQL
+async def get_or_create_session(conn, user_id: str, max_retries: int = 3) -> int:
+    """Create session with proper async cursor handling"""
+    from asyncpg.exceptions import UniqueViolationError
+    import asyncpg
+    
+    logger = logging.getLogger(__name__)
+    
+    for attempt in range(1, max_retries+1):
+        try:
+            session_id = random.randint(10_000_000, 99_999_999)
+            
+            # Proper async cursor execution
+            async with conn.transaction():
+                result = await conn.fetchrow("""
+                    INSERT INTO search_sessions 
+                        (session_id, user_id, start_timestamp, is_active)
+                    VALUES ($1, $2, NOW(), true)
+                    ON CONFLICT (session_id) DO UPDATE
+                        SET last_active = NOW()
+                    RETURNING session_id
+                """, session_id, user_id)
+                
+                if result:
+                    return result['session_id']
+                
+        except UniqueViolationError:
+            logger.warning(f"Session ID collision {session_id}, retry {attempt}/{max_retries}")
+            continue
+            
+        except asyncpg.PostgresError as e:
+            logger.error(f"Database error: {str(e)}")
+            raise HTTPException(status_code=500, detail="Session creation failed")
+
+    raise HTTPException(status_code=500, detail="Failed to create session after retries")
+
+# Method: record_prediction
+# Location: ai_services_api/services/search/app/endpoints/process_functions.py
+# Changes: Fixed async database operations
+async def record_prediction(conn, session_id: int, user_id: str, query: str, 
+                          predictions: List[str], scores: List[float]):
+    """Record prediction with proper async execution"""
+    from asyncpg.exceptions import PostgresError
+    
+    try:
+        async with conn.transaction():
+            # Insert search entry
+            await conn.execute("""
+                INSERT INTO search_entries 
+                    (session_id, user_id, query_text, timestamp)
+                VALUES ($1, $2, $3, NOW())
+            """, session_id, user_id, query)
+
+            # Batch insert predictions
+            prediction_data = [(session_id, pred, score) 
+                              for pred, score in zip(predictions, scores)]
+            
+            await conn.executemany("""
+                INSERT INTO search_predictions
+                    (session_id, prediction_text, confidence_score)
+                VALUES ($1, $2, $3)
+            """, prediction_data)
+            
+    except PostgresError as e:
+        logger.error(f"Failed to record prediction: {str(e)}")
+        raise
 
 async def _record_prediction_async(conn, session_id: str, user_id: str, partial_query: str, predictions: List[str], confidence_scores: List[float]):
     """Asynchronous helper for recording predictions in the database."""
@@ -809,34 +877,7 @@ async def process_advanced_query_prediction(
             metadata={"error": str(e)}
         )
 
-async def get_or_create_session(conn, user_id: str, max_retries: int = 3) -> int:
-    """Session creation with collision retries"""
-    from psycopg2 import errors
 
-    logger = logging.getLogger(__name__)
-    for attempt in range(max_retries):
-        try:
-            session_id = random.randint(10_000_000, 99_999_999)  # 8-digit ID
-            async with conn.cursor() as cur:
-                await cur.execute("""
-                    INSERT INTO search_sessions 
-                        (session_id, user_id, start_timestamp, is_active)
-                    VALUES (%s, %s, CURRENT_TIMESTAMP, true)
-                    ON CONFLICT (session_id) DO UPDATE
-                        SET last_active = CURRENT_TIMESTAMP
-                    RETURNING session_id
-                """, (session_id, user_id))
-                result = await cur.fetchone()
-                if result:
-                    return result[0]
-        except errors.UniqueViolation:
-            logger.warning(f"Session ID collision {session_id}, retry {attempt+1}/{max_retries}")
-            continue
-        except Exception as e:
-            logger.error(f"Session error: {str(e)}")
-            raise HTTPException(status_code=500, detail="Session management failed")
-
-    raise HTTPException(status_code=500, detail="Failed to create unique session")
     
 async def get_search_categorizer():
     """
