@@ -316,6 +316,25 @@ async def get_or_create_session(user_id: str) -> int:
     finally:
         await release_connection(conn)
 
+
+async def record_prediction_analytics(user_id: str, query: str, predictions: List[str]):
+    """Record prediction analytics with correct session handling"""
+    try:
+        # Get session ID with corrected arguments
+        session_id = await get_or_create_session(user_id)  # Single argument
+        
+        # Record prediction data
+        await record_prediction(
+            session_id=session_id,
+            user_id=user_id,
+            query=query,
+            predictions=predictions,
+            scores=[p.get('score', 0.0) for p in predictions]
+        )
+        
+    except Exception as e:
+        logger.error(f"Analytics recording failed: {str(e)}", exc_info=True)
+
 async def record_prediction(session_id: int, user_id: str, query: str, 
                           predictions: List[str], scores: List[float]):
     """Async prediction recording with batch insert"""

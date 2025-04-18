@@ -1,4 +1,5 @@
 from ai_services_api.core.openapi import Contact
+from ai_services_api.services.search.core.personalization import create_pool
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -11,6 +12,7 @@ from ai_services_api.services.chatbot.utils.redis_connection import redis_pool
 from ai_services_api.controllers.publications_router import api_router as publications_router
 from ai_services_api.controllers.autocomplete_router import api_router as autocomplete_router
 from ai_services_api.controllers.analytics_router import api_router as analytics_router
+
 # Add this to your application's startup code (e.g., in your main.py or __init__.py)
 import logging
 
@@ -91,6 +93,11 @@ app.include_router(analytics_router, prefix="/analytics")
 async def read_index():
     with open("ai_services_api/templates/index.html") as f:
         return f.read()
+    
+
+@app.on_event("startup")
+async def startup():
+    await create_pool()
 
 @app.get("/chatbot", response_class=HTMLResponse)
 async def read_chatbot():
