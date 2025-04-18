@@ -63,7 +63,7 @@ try:
         
         # Test the configuration
         try:
-            model = genai.GenerativeModel('gemini-1.5-pro-latest')
+            model = genai.GenerativeModel('gemini-2.0-flash')
             logger.info("Gemini model initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize Gemini model: {e}")
