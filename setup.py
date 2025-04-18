@@ -120,6 +120,7 @@ class SystemInitializer:
         except Exception as e:
             logger.error(f"Failed to initialize DatabaseManager: {str(e)}")
             raise
+    
 
     def verify_environment(self) -> None:
         """Verify all required environment variables are set"""
@@ -133,7 +134,7 @@ class SystemInitializer:
             self.config.max_workers = int(os.getenv('MAX_WORKERS', 4))
         
         if not hasattr(self.config, 'batch_size') or not self.config.batch_size:
-            self.config.batch_size = int(os.getenv('BATCH_SIZE, 50))
+            self.config.batch_size = int(os.getenv('BATCH_SIZE', 50))
             
         if not hasattr(self.config, 'checkpoint_hours') or not self.config.checkpoint_hours:
             self.config.checkpoint_hours = int(os.getenv('CHECKPOINT_HOURS', 24))
