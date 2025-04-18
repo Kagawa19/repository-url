@@ -773,6 +773,130 @@ class ExpertMatchingService:
             except Exception:
                 return []
 
+    # This code would be added to the ExpertMatchingService class to enhance the recommendation
+# system with expert domains and fields data from message interactions
+
+    async def _analyze_messaging_interactions(self, user_id: str) -> Dict[str, List[str]]:
+        """
+        Analyze messaging interactions to extract domain and field preferences.
+        
+        Args:
+            user_id: The user's identifier
+                
+        Returns:
+            Dict containing preferred domains and fields based on messaging patterns
+        """
+        self.logger.info(f"Analyzing messaging interactions for user {user_id}")
+        
+        try:
+            # Define connection parameters
+            conn_params = {}
+            database_url = os.getenv('DATABASE_URL')
+            
+            if database_url:
+                parsed_url = urlparse(database_url)
+                conn_params = {
+                    'host': parsed_url.hostname,
+                    'port': parsed_url.port,
+                    'dbname': parsed_url.path[1:],
+                    'user': parsed_url.username,
+                    'password': parsed_url.password
+                }
+            else:
+                conn_params = {
+                    'host': os.getenv('POSTGRES_HOST', 'postgres'),
+                    'port': os.getenv('POSTGRES_PORT', '5432'),
+                    'dbname': os.getenv('POSTGRES_DB', 'aphrc'),
+                    'user': os.getenv('POSTGRES_USER', 'postgres'),
+                    'password': os.getenv('POSTGRES_PASSWORD', 'p0stgres')
+                }
+            
+            # Initialize results
+            messaging_preferences = {
+                'preferred_domains': [],
+                'preferred_fields': []
+            }
+            
+            # Connect to database
+            conn = None
+            try:
+                conn = psycopg2.connect(**conn_params)
+                with conn.cursor() as cur:
+                    # Find experts the user has messaged recently
+                    cur.execute("""
+                        SELECT DISTINCT receiver_id 
+                        FROM expert_messages
+                        WHERE sender_id = %s
+                        AND created_at > NOW() - INTERVAL '30 days'
+                        ORDER BY MAX(created_at) DESC
+                        LIMIT 10
+                    """, (user_id,))
+                    
+                    messaged_experts = [str(row[0]) for row in cur.fetchall()]
+                    
+                    if not messaged_experts:
+                        self.logger.info(f"No recent messaging activity found for user {user_id}")
+                        return messaging_preferences
+                    
+                    # Get the domains and fields of these experts
+                    placeholder = ','.join(['%s'] * len(messaged_experts))
+                    cur.execute(f"""
+                        SELECT domains, fields 
+                        FROM experts_expert
+                        WHERE id IN ({placeholder})
+                        AND is_active = true
+                    """, messaged_experts)
+                    
+                    # Collect all domains and fields
+                    all_domains = []
+                    all_fields = []
+                    
+                    for row in cur.fetchall():
+                        domains = row[0] if row[0] else []
+                        fields = row[1] if row[1] else []
+                        
+                        all_domains.extend(domains)
+                        all_fields.extend(fields)
+                    
+                    # Count frequencies
+                    domain_frequency = {}
+                    for domain in all_domains:
+                        domain_frequency[domain] = domain_frequency.get(domain, 0) + 1
+                    
+                    field_frequency = {}
+                    for field in all_fields:
+                        field_frequency[field] = field_frequency.get(field, 0) + 1
+                    
+                    # Sort by frequency and take top items
+                    preferred_domains = sorted(domain_frequency.items(), key=lambda x: x[1], reverse=True)
+                    preferred_fields = sorted(field_frequency.items(), key=lambda x: x[1], reverse=True)
+                    
+                    # Return top 5 domains and fields
+                    messaging_preferences['preferred_domains'] = [domain for domain, _ in preferred_domains[:5]]
+                    messaging_preferences['preferred_fields'] = [field for field, _ in preferred_fields[:5]]
+                    
+                    self.logger.info(
+                        f"Extracted {len(messaging_preferences['preferred_domains'])} domains and "
+                        f"{len(messaging_preferences['preferred_fields'])} fields from messaging patterns"
+                    )
+                    
+                    return messaging_preferences
+                    
+            except Exception as db_error:
+                self.logger.error(f"Database error analyzing messaging patterns: {str(db_error)}")
+                return messaging_preferences
+            finally:
+                if conn:
+                    conn.close()
+                        
+        except Exception as e:
+            self.logger.error(f"Error analyzing messaging patterns: {str(e)}")
+            return {
+                'preferred_domains': [],
+                'preferred_fields': []
+            }
+
+    # Modify the get_recommendations_for_user method to include messaging preferences
     async def get_recommendations_for_user(
         self, 
         user_id: str, 
@@ -780,7 +904,7 @@ class ExpertMatchingService:
     ) -> List[Dict[str, Any]]:
         """
         Find top similar experts using balanced multi-factor matching with adaptive patterns
-        based on search history, interactions, and user interests
+        based on search history, interactions, user interests, and messaging patterns
         
         :param user_id: ID of the expert to find recommendations for
         :param limit: Maximum number of recommendations to return
@@ -796,8 +920,19 @@ class ExpertMatchingService:
             user_interests = await self._get_user_interests(user_id)
             self.logger.info(f"Retrieved {sum(len(v) for v in user_interests.values())} interests for user {user_id}")
             
+            # Get messaging preferences - THIS IS NEW
+            messaging_preferences = await self._analyze_messaging_interactions(user_id)
+            self.logger.info(
+                f"Retrieved {len(messaging_preferences['preferred_domains'])} domains and "
+                f"{len(messaging_preferences['preferred_fields'])} fields from messaging patterns"
+            )
+            
             # Check if this is a new user (no interests and likely no history)
             is_new_user = all(len(interests) == 0 for interests in user_interests.values())
+            has_messaging_preferences = (
+                len(messaging_preferences['preferred_domains']) > 0 or 
+                len(messaging_preferences['preferred_fields']) > 0
+            )
             
             with self._neo4j_driver.session() as session:
                 # Verify expert exists and get baseline information
@@ -831,8 +966,9 @@ class ExpertMatchingService:
                 has_fields = debug_record.get("field_count", 0) > 0
                 has_domains = debug_record.get("domain_count", 0) > 0
                 
-                # For new users or users with minimal data, use the cold start approach
-                if is_new_user and not (has_concepts or has_fields or has_domains):
+                # For new users or users with minimal data, use the cold start approach,
+                # UNLESS they have messaging preferences
+                if is_new_user and not (has_concepts or has_fields or has_domains) and not has_messaging_preferences:
                     self.logger.info(f"New user with minimal data detected: {user_id}")
                     return await self._get_cold_start_recommendations(session, 5, theme=debug_record.get("theme"), unit=debug_record.get("unit"))
                 
@@ -841,30 +977,29 @@ class ExpertMatchingService:
                 concept_weight = 0.0
                 domain_weight = 0.0
                 field_weight = 0.0
-                org_weight = 0.3  # Reduced slightly to make room for other weights
-                search_weight = 0.2  # Add weight for search patterns
-                interest_weight = 0.3  # New weight for user interests
+                org_weight = 0.25  # Adjusted to make room for messaging weight
+                search_weight = 0.15  # Adjusted to make room for messaging weight
+                interest_weight = 0.2  # Adjusted to make room for messaging weight
+                messaging_weight = 0.2  # NEW: Weight for messaging preferences
                 
                 # Dynamic weights based on data availability
                 if has_concepts:
-                    concept_weight = 0.2
+                    concept_weight = 0.15
                 if has_domains:
-                    domain_weight = 0.2
+                    domain_weight = 0.15
                 if has_fields:
-                    field_weight = 0.2
+                    field_weight = 0.15
                 
-                # Calculate adjustment to ensure weights sum to a reasonable value
-                available_features = sum([1 if x else 0 for x in [has_concepts, has_domains, has_fields]])
-                
-                # If few features available, increase weight of organizational and behavioral factors
-                if available_features <= 1:
+                # Adjust weights if no messaging preferences
+                if not has_messaging_preferences:
+                    messaging_weight = 0.0
+                    # Redistribute weights
+                    concept_weight = concept_weight * 1.2 if has_concepts else 0.0
+                    domain_weight = domain_weight * 1.2 if has_domains else 0.0
+                    field_weight = field_weight * 1.2 if has_fields else 0.0
                     org_weight = 0.3
                     search_weight = 0.2
-                    interest_weight = 0.3
-                else:
-                    org_weight = 0.1
-                    search_weight = 0.1
-                    interest_weight = 0.2
+                    interest_weight = 0.25
                 
                 # Interest-based matching clauses
                 interest_clause = ""
@@ -915,6 +1050,40 @@ class ExpertMatchingService:
                             * $interest_weight as expertise_score,
                         """
                 
+                # NEW: Messaging-based preferences matching
+                messaging_clause = ""
+                messaging_match = ""
+                messaging_param = {}
+                
+                if has_messaging_preferences:
+                    # Build clause for messaging domain preferences
+                    if messaging_preferences.get('preferred_domains'):
+                        messaging_match += """
+                        // Match with user's messaging domain preferences
+                        OPTIONAL MATCH (e2)-[:WORKS_IN_DOMAIN]->(md:Domain)
+                        WHERE md.name IN $messaging_domains
+                        """
+                        messaging_param['messaging_domains'] = messaging_preferences.get('preferred_domains', [])
+                        messaging_clause += """
+                        // Calculate overlap with messaging domain preferences
+                        COUNT(DISTINCT CASE WHEN md.name IN $messaging_domains THEN md ELSE NULL END) 
+                            * $messaging_weight as messaging_domain_score,
+                        """
+                    
+                    # Build clause for messaging field preferences
+                    if messaging_preferences.get('preferred_fields'):
+                        messaging_match += """
+                        // Match with user's messaging field preferences
+                        OPTIONAL MATCH (e2)-[:SPECIALIZES_IN]->(mf:Field)
+                        WHERE mf.name IN $messaging_fields
+                        """
+                        messaging_param['messaging_fields'] = messaging_preferences.get('preferred_fields', [])
+                        messaging_clause += """
+                        // Calculate overlap with messaging field preferences
+                        COUNT(DISTINCT CASE WHEN mf.name IN $messaging_fields THEN mf ELSE NULL END) 
+                            * $messaging_weight as messaging_field_score,
+                        """
+                
                 # Combine interest score into final similarity calculation
                 interest_total_score = ""
                 if interest_clause:
@@ -925,7 +1094,16 @@ class ExpertMatchingService:
                     + expertise_score
                     """
                 
-                # Main recommendation query with interest integration
+                # NEW: Combine messaging score into final similarity calculation
+                messaging_total_score = ""
+                if messaging_clause:
+                    messaging_total_score = """
+                    // Add messaging-based scores to total
+                    + messaging_domain_score
+                    + messaging_field_score
+                    """
+                
+                # Main recommendation query with interest and messaging integration
                 query = f"""
                 MATCH (e1:Expert {{id: $expert_id}})
                 MATCH (e2:Expert)
@@ -953,10 +1131,13 @@ class ExpertMatchingService:
                 
                 {interest_match}
                 
+                {messaging_match}
+                
                 WITH e1, e2, c, d, f, ra, m, fsc, int,
                     CASE WHEN e1.theme IS NOT NULL AND e1.theme = e2.theme THEN 1.0 ELSE 0.0 END as same_theme,
                     CASE WHEN e1.unit IS NOT NULL AND e1.unit = e2.unit THEN 1.0 ELSE 0.0 END as same_unit
                     {", tc, td, te" if interest_match else ""}
+                    {", md, mf" if messaging_match else ""}
                 
                 // Collect all relevant data
                 WITH e1, e2, 
@@ -978,6 +1159,8 @@ class ExpertMatchingService:
                     
                     {interest_clause if interest_clause else ""}
                     
+                    {messaging_clause if messaging_clause else ""}
+                    
                     // Collect details for explanation
                     COLLECT(DISTINCT COALESCE(c.name, '')) as shared_concepts,
                     COLLECT(DISTINCT COALESCE(d.name, '')) as shared_domains,
@@ -996,7 +1179,8 @@ class ExpertMatchingService:
                     same_unit * $org_weight +
                     search_similarity +
                     interaction_similarity
-                    {interest_total_score}) as similarity_score,
+                    {interest_total_score}
+                    {messaging_total_score}) as similarity_score,
                     
                     // Include search pattern strength
                     search_similarity,
@@ -1071,7 +1255,9 @@ class ExpertMatchingService:
                     "org_weight": org_weight,
                     "search_weight": search_weight,
                     "interest_weight": interest_weight,
-                    **interests_param  # Add the interest parameters if they exist
+                    "messaging_weight": messaging_weight,  # NEW: Added messaging weight parameter
+                    **interests_param,  # Add the interest parameters if they exist
+                    **messaging_param  # NEW: Add the messaging parameters if they exist
                 }
                 
                 # Run recommendations with the appropriate parameters
@@ -1130,8 +1316,7 @@ class ExpertMatchingService:
                 self.logger.debug(
                     f"Match weights: concepts={concept_weight}, domains={domain_weight}, "
                     f"fields={field_weight}, org={org_weight}, search={search_weight}, "
-                    f"interest={interest_weight}, "
-                    f"available_features={available_features}"
+                    f"interest={interest_weight}, messaging={messaging_weight}"
                 )
                 
                 return final_experts

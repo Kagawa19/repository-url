@@ -345,6 +345,103 @@ class WebsiteScraper:
             except:
                 continue
         return None
+    
+    def fetch_content(self, search_term: Optional[str] = None, max_pages: Optional[int] = 50) -> List[Dict]:
+        cache_key = f"website_content_{search_term or 'all'}_{datetime.utcnow().strftime('%Y%m%d')}"
+        cached_content = self.cache.get(cache_key)
+        if cached_content:
+            logger.info(f"Retrieved {len(cached_content)} items from cache")
+            return cached_content
+        
+        items = []
+        visited = set()
+        try:
+            logger.info(f"Accessing URL: {self.base_url}")
+            self.rate_limiter.wait()
+            try:
+                self.driver.get(self.base_url)
+                self.rate_limiter.record_success()
+                time.sleep(5)
+            except Exception as e:
+                self.rate_limiter.record_failure()
+                logger.error(f"Error loading base URL: {e}")
+                return items
+            
+            # Add specific important URLs to check first
+            important_urls = [
+                f"{self.base_url}/publications/",
+                f"{self.base_url}/person/",
+                # Add more important sections here
+            ]
+            
+            for url in important_urls:
+                try:
+                    logger.info(f"Accessing important URL: {url}")
+                    self.rate_limiter.wait()
+                    self.driver.get(url)
+                    self.rate_limiter.record_success()
+                    time.sleep(5)
+                    
+                    # Process the page specifically based on its type
+                    if "/publications/" in url:
+                        publication_items = self._extract_publications_page()
+                        items.extend(publication_items)
+                    elif "/person/" in url:
+                        expert_items = self._extract_experts_page()
+                        items.extend(expert_items)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing important URL {url}: {e}")
+            
+            page_num = 1
+            while max_pages is None or page_num <= max_pages:
+                try:
+                    logger.info(f"Processing page {page_num}")
+                    # Process publication cards
+                    publication_cards = self._find_all_with_selectors(
+                        self.driver, self.config.css_selectors['publication_cards'], wait_time=5
+                    )
+                    expert_cards = self._find_all_with_selectors(
+                        self.driver, self.config.css_selectors['expert_cards'], wait_time=5
+                    )
+                    content_cards = self._find_all_with_selectors(
+                        self.driver, self.config.css_selectors['content_cards'], wait_time=5
+                    )
+                    
+                    logger.info(f"Found {len(publication_cards)} publication cards, "
+                            f"{len(expert_cards)} expert cards, {len(content_cards)} content cards")
+                    
+                    futures = []
+                    for card in publication_cards + expert_cards + content_cards:
+                        card_type = 'publication' if card in publication_cards else 'expert' if card in expert_cards else 'content'
+                        future = self.executor.submit(self._process_card, card, visited, card_type)
+                        futures.append(future)
+                    
+                    for future in concurrent.futures.as_completed(futures):
+                        try:
+                            item = future.result()
+                            if item:
+                                items.append(item)
+                        except Exception as e:
+                            logger.error(f"Error processing card: {e}")
+                    
+                    if not self._click_load_more():
+                        logger.info("No more content to load")
+                        break
+                    page_num += 1
+                except Exception as e:
+                    logger.error(f"Error processing page {page_num}: {e}")
+                    break
+            
+            if items:
+                self.cache.set(cache_key, items, expire=self.config.cache_ttl)
+            return items
+        except Exception as e:
+            logger.error(f"Error in fetch_content: {e}")
+            return items
+        finally:
+            if not items:
+                logger.warning("No items were found")
 
     def _extract_element_attribute(self, element, selectors, attribute) -> Optional[str]:
         for selector in selectors:
@@ -417,76 +514,174 @@ class WebsiteScraper:
         seen = set()
         return [k for k in keywords if not (k in seen or seen.add(k))]
 
-    def fetch_content(self, search_term: Optional[str] = None, max_pages: Optional[int] = 50) -> List[Dict]:
-        cache_key = f"website_content_{search_term or 'all'}_{datetime.utcnow().strftime('%Y%m%d')}"
-        cached_content = self.cache.get(cache_key)
-        if cached_content:
-            logger.info(f"Retrieved {len(cached_content)} items from cache")
-            return cached_content
+    def _extract_publications_page(self) -> List[Dict]:
+    """Extract publications from a publications listing page"""
+    publications = []
+    try:
+        # Look for publication cards/items
+        publication_elements = self._find_all_with_selectors(
+            self.driver, 
+            ['.publication-item', '.publication', '.resource-item', 'article', '.post']
+        )
         
-        items = []
-        visited = set()
-        try:
-            logger.info(f"Accessing URL: {self.base_url}")
-            self.rate_limiter.wait()
+        logger.info(f"Found {len(publication_elements)} publication elements")
+        
+        for element in publication_elements:
             try:
-                self.driver.get(self.base_url)
-                self.rate_limiter.record_success()
-                time.sleep(5)
+                url = self._extract_element_attribute(element, ['.title a', 'a'], 'href')
+                if not url:
+                    continue
+                
+                title = self._extract_element_text(element, ['.title', 'h2', 'h3'])
+                summary = self._extract_element_text(element, ['.excerpt', '.summary', '.content', 'p'])
+                date_text = self._extract_element_text(element, ['.date', '.meta', '.published'])
+                
+                # Try to extract year from date if available
+                year = None
+                if date_text:
+                    year_match = re.search(r'\b(19|20)\d{2}\b', date_text)
+                    if year_match:
+                        year = int(year_match.group(0))
+                
+                publication = {
+                    'title': title or 'Untitled Publication',
+                    'url': url,
+                    'doi': url,  # Use URL as DOI for website publications
+                    'summary': summary or f"Publication: {title}",
+                    'publication_year': year,
+                    'type': 'publication',
+                    'source': 'website'
+                }
+                
+                publications.append(publication)
+                logger.info(f"Extracted publication: {title}")
+                
             except Exception as e:
-                self.rate_limiter.record_failure()
-                logger.error(f"Error loading base URL: {e}")
-                return items
-            
-            page_num = 1
-            while max_pages is None or page_num <= max_pages:
+                logger.error(f"Error extracting publication details: {e}")
+        
+        # Check if there's pagination and process more pages if needed
+        # ... pagination code
+        
+        return publications
+        
+    except Exception as e:
+        logger.error(f"Error extracting publications page: {e}")
+        return []
+
+def _extract_experts_page(self) -> List[Dict]:
+    """Extract experts from an experts listing page"""
+    experts = []
+    try:
+        # Look for expert cards/profiles
+        expert_elements = self._find_all_with_selectors(
+            self.driver, 
+            ['.team-member', '.person', '.staff-member', '.expert', 'article']
+        )
+        
+        logger.info(f"Found {len(expert_elements)} expert elements")
+        
+        for element in expert_elements:
+            try:
+                url = self._extract_element_attribute(element, ['.name a', 'a', 'h3 a'], 'href')
+                if not url or '/person/' not in url:
+                    continue
+                
+                name = self._extract_element_text(element, ['.name', 'h2', 'h3', 'h4'])
+                title = self._extract_element_text(element, ['.title', '.position', '.role'])
+                bio = self._extract_element_text(element, ['.bio', '.excerpt', '.summary', 'p'])
+                
+                # If we have a URL to the expert's profile, visit it to get more details
+                expert_data = {
+                    'name': name or 'Unknown Expert',
+                    'title': title or 'Researcher',
+                    'url': url,
+                    'bio': bio or f"Expert profile for {name}",
+                    'type': 'expert',
+                    'source': 'website'
+                }
+                
+                # Visit the expert's profile page to get more details
                 try:
-                    logger.info(f"Processing page {page_num}")
-                    # Process publication cards
-                    publication_cards = self._find_all_with_selectors(
-                        self.driver, self.config.css_selectors['publication_cards'], wait_time=5
-                    )
-                    expert_cards = self._find_all_with_selectors(
-                        self.driver, self.config.css_selectors['expert_cards'], wait_time=5
-                    )
-                    content_cards = self._find_all_with_selectors(
-                        self.driver, self.config.css_selectors['content_cards'], wait_time=5
-                    )
-                    
-                    logger.info(f"Found {len(publication_cards)} publication cards, "
-                            f"{len(expert_cards)} expert cards, {len(content_cards)} content cards")
-                    
-                    futures = []
-                    for card in publication_cards + expert_cards + content_cards:
-                        card_type = 'publication' if card in publication_cards else 'expert' if card in expert_cards else 'content'
-                        future = self.executor.submit(self._process_card, card, visited, card_type)
-                        futures.append(future)
-                    
-                    for future in concurrent.futures.as_completed(futures):
-                        try:
-                            item = future.result()
-                            if item:
-                                items.append(item)
-                        except Exception as e:
-                            logger.error(f"Error processing card: {e}")
-                    
-                    if not self._click_load_more():
-                        logger.info("No more content to load")
-                        break
-                    page_num += 1
+                    expert_data = self._extract_expert_profile(url, expert_data)
                 except Exception as e:
-                    logger.error(f"Error processing page {page_num}: {e}")
-                    break
+                    logger.error(f"Error extracting expert profile for {url}: {e}")
+                
+                experts.append(expert_data)
+                logger.info(f"Extracted expert: {name}")
+                
+            except Exception as e:
+                logger.error(f"Error extracting expert details: {e}")
+        
+        return experts
+        
+    except Exception as e:
+        logger.error(f"Error extracting experts page: {e}")
+        return []
+
+def _extract_expert_profile(self, url: str, expert_data: Dict) -> Dict:
+    """Extract detailed information from an expert's profile page"""
+    try:
+        browser = self.browser_pool.get_browser()
+        if not browser:
+            logger.warning(f"No browser available for expert profile {url}")
+            return expert_data
             
-            if items:
-                self.cache.set(cache_key, items, expire=self.config.cache_ttl)
-            return items
+        try:
+            browser.get(url)
+            wait = WebDriverWait(browser, self.config.browser_timeout)
+            
+            # Extract name if not already present
+            if not expert_data.get('name') or expert_data['name'] == 'Unknown Expert':
+                name_elem = browser.find_element(By.CSS_SELECTOR, 'h1, .page-title, .entry-title')
+                if name_elem:
+                    expert_data['name'] = name_elem.text.strip()
+            
+            # Extract contact email
+            try:
+                email_elem = browser.find_element(By.CSS_SELECTOR, 'a[href^="mailto:"]')
+                if email_elem:
+                    expert_data['contact_email'] = email_elem.get_attribute('href').replace('mailto:', '')
+            except:
+                pass
+                
+            # Extract affiliation
+            try:
+                affiliation_elem = browser.find_element(By.CSS_SELECTOR, '.affiliation, .organization')
+                if affiliation_elem:
+                    expert_data['affiliation'] = affiliation_elem.text.strip()
+                else:
+                    expert_data['affiliation'] = 'APHRC'
+            except:
+                expert_data['affiliation'] = 'APHRC'
+                
+            # Extract biography text
+            try:
+                bio_elems = browser.find_elements(By.CSS_SELECTOR, '.bio, .biography, .content, .entry-content p')
+                if bio_elems:
+                    expert_data['bio'] = '\n'.join([elem.text for elem in bio_elems if elem.text.strip()])
+            except:
+                pass
+                
+            # Extract areas of expertise
+            try:
+                expertise_elems = browser.find_elements(By.CSS_SELECTOR, '.expertise, .skills, .research-areas')
+                if expertise_elems:
+                    expert_data['domains'] = [elem.text.strip() for elem in expertise_elems if elem.text.strip()]
+            except:
+                pass
+                
+            return expert_data
+            
         except Exception as e:
-            logger.error(f"Error in fetch_content: {e}")
-            return items
+            logger.error(f"Error extracting expert profile data for {url}: {e}")
+            return expert_data
+            
         finally:
-            if not items:
-                logger.warning("No items were found")
+            if browser:
+                self.browser_pool.release_browser(browser)
+    except Exception as e:
+        logger.error(f"Error in _extract_expert_profile for {url}: {e}")
+        return expert_data
 
     def _find_all_with_selectors(self, driver, selectors, wait_time=5):
         elements = []

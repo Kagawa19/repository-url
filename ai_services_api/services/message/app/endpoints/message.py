@@ -247,6 +247,119 @@ def validate_message_completeness(content, context, receiver_name, sender_name):
         content += f"\n\nBest regards,\n{sender_name}"
         
     return content
+# Add this function to your message handling code to track domain and field interactions
+async def track_message_domain_interaction(
+    sender_id: str,
+    receiver_id: str,
+    content: str,
+    receiver_domains: List[str],
+    receiver_fields: List[str],
+    interaction_type: str = 'draft_created',
+    conn = None,
+    cur = None
+):
+    """
+    Track when a user interacts with an expert's domains and fields through messaging.
+    
+    Args:
+        sender_id: The sender's ID
+        receiver_id: The receiver's ID
+        content: The message content
+        receiver_domains: List of the receiver's domains
+        receiver_fields: List of the receiver's fields
+        interaction_type: Type of interaction ('draft_created', 'sent_message', 'received_message')
+        conn: Optional database connection
+        cur: Optional database cursor
+    """
+    logger.info(f"Tracking message domain interaction - Sender: {sender_id}, Receiver: {receiver_id}")
+    
+    close_connection = False
+    if not conn or not cur:
+        try:
+            close_connection = True
+            conn = get_db_connection()
+            cur = conn.cursor()
+        except Exception as e:
+            logger.error(f"Failed to establish database connection for domain tracking: {str(e)}")
+            return
+    
+    try:
+        # Use the extract_mentioned_domains_fields function to identify which domains/fields
+        # were actually mentioned in the message content
+        mentioned = extract_mentioned_domains_fields(content, receiver_domains, receiver_fields)
+        
+        # Insert the interaction with domain and field data
+        cur.execute("""
+            INSERT INTO message_expert_interactions
+                (user_id, expert_id, interaction_type, domains, fields)
+            VALUES
+                (%s, %s, %s, %s, %s)
+        """, (
+            sender_id,
+            receiver_id,
+            interaction_type,
+            mentioned.get('mentioned_domains', []) if mentioned else [],
+            mentioned.get('mentioned_fields', []) if mentioned else []
+        ))
+        
+        conn.commit()
+        logger.info(f"Successfully tracked message domain interaction for sender {sender_id}")
+        
+    except Exception as e:
+        logger.error(f"Error tracking message domain interaction: {str(e)}", exc_info=True)
+        if conn:
+            conn.rollback()
+    finally:
+        if close_connection:
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
+
+def extract_mentioned_domains_fields(message_content: str, domains: list, fields: list) -> dict:
+    """
+    Extract which domains and fields are mentioned in the message content.
+    
+    Args:
+        message_content: The content of the message
+        domains: List of domains to check
+        fields: List of fields to check
+        
+    Returns:
+        dict: Containing lists of mentioned domains and fields
+    """
+    message_lower = message_content.lower()
+    
+    mentioned_domains = []
+    for domain in domains:
+        if domain and domain.lower() in message_lower:
+            mentioned_domains.append(domain)
+    
+    mentioned_fields = []
+    for field in fields:
+        if field and field.lower() in message_lower:
+            mentioned_fields.append(field)
+    
+    return {
+        "mentioned_domains": mentioned_domains,
+        "mentioned_fields": mentioned_fields
+    }
+
+# Add tracking call to the end of process_message_draft function
+# Just before returning response_data:
+
+# Track this interaction with domains and fields
+await track_message_domain_interaction(
+    sender_id=user_id,
+    receiver_id=receiver_id,
+    content=cleaned_content,
+    receiver_domains=receiver.get('domains', []),
+    receiver_fields=receiver.get('fields', []),
+    interaction_type='draft_created',
+    conn=conn,
+    cur=cur
+)
+
 
 async def process_message_draft(
     user_id: str,
@@ -444,12 +557,47 @@ African Population and Health Research Center (APHRC)"""
         new_message = cur.fetchone()
         logger.info(f"Created new draft message with ID: {new_message['id']}")
 
+        # NEW: Extract mentioned domains and fields from the message content
+        try:
+            mentioned = extract_mentioned_domains_fields(
+                cleaned_content, 
+                receiver.get('domains', []), 
+                receiver.get('fields', [])
+            )
+            
+            # Log which domains and fields were mentioned in the message
+            logger.info(
+                f"Message mentioned {len(mentioned.get('mentioned_domains', []))} domains and "
+                f"{len(mentioned.get('mentioned_fields', []))} fields"
+            )
+            
+            # NEW: Track the interaction with domains and fields
+            cur.execute("""
+                INSERT INTO message_expert_interactions
+                    (user_id, expert_id, interaction_type, domains, fields, created_at)
+                VALUES
+                    (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            """, (
+                user_id,
+                receiver_id,
+                'draft_created',
+                mentioned.get('mentioned_domains', []),
+                mentioned.get('mentioned_fields', [])
+            ))
+            
+            logger.info(f"Tracked domain/field interaction for message {new_message['id']}")
+            
+        except Exception as tracking_error:
+            # Continue even if tracking fails - this shouldn't affect the main functionality
+            logger.error(f"Error tracking domains/fields: {str(tracking_error)}")
+
         conn.commit()
         logger.info(f"Successfully committed transaction for message {new_message['id']}")
 
         # Convert datetime to string for JSON serialization
         created_at = new_message['created_at'].isoformat() if new_message['created_at'] else None
 
+        # NEW: Include domains and fields in response data
         response_data = {
             "id": str(new_message['id']),
             "content": cleaned_content,  # Use cleaned content in response
@@ -458,7 +606,13 @@ African Population and Health Research Center (APHRC)"""
             "created_at": created_at,
             "draft": True,
             "receiver_name": f"{receiver['first_name']} {receiver['last_name']}",
-            "sender_name": f"{sender['first_name']} {sender['last_name']}"
+            "sender_name": f"{sender['first_name']} {sender['last_name']}",
+            # Add receiver domains and fields
+            "receiver_domains": receiver.get('domains', []),
+            "receiver_fields": receiver.get('fields', []),
+            # Add which domains and fields were mentioned in the message
+            "mentioned_domains": mentioned.get('mentioned_domains', []) if 'mentioned' in locals() else [],
+            "mentioned_fields": mentioned.get('mentioned_fields', []) if 'mentioned' in locals() else []
         }
         
         # Cache the response if Redis client is provided
@@ -519,6 +673,39 @@ African Population and Health Research Center (APHRC)"""
         if conn:
             conn.close()
         logger.debug("Database connections closed")
+
+
+def extract_mentioned_domains_fields(message_content: str, domains: list, fields: list) -> dict:
+    """
+    Extract which domains and fields are mentioned in the message content.
+    
+    Args:
+        message_content: The content of the message
+        domains: List of domains to check
+        fields: List of fields to check
+        
+    Returns:
+        dict: Containing lists of mentioned domains and fields
+    """
+    if not message_content:
+        return {"mentioned_domains": [], "mentioned_fields": []}
+        
+    message_lower = message_content.lower()
+    
+    mentioned_domains = []
+    for domain in domains:
+        if domain and domain.lower() in message_lower:
+            mentioned_domains.append(domain)
+    
+    mentioned_fields = []
+    for field in fields:
+        if field and field.lower() in message_lower:
+            mentioned_fields.append(field)
+    
+    return {
+        "mentioned_domains": mentioned_domains,
+        "mentioned_fields": mentioned_fields
+    }
 
 def generate_expert_draft_prompt(receiver: dict, content: str, sender: dict) -> str:
     """
