@@ -1,3 +1,4 @@
+import hashlib
 import os
 import logging
 import requests
@@ -7,8 +8,7 @@ from datetime import datetime
 import re
 import os
 from dataclasses import dataclass, field, asdict
-from typing import Dict, L
-import hashlib
+from typing import Dict
 import time
 import threading
 import concurrent.futures
