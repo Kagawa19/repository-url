@@ -50,11 +50,11 @@ _categorizer = None
 
 
 class DecimalEncoder(json.JSONEncoder):
+    """Handle Decimal serialization throughout the application"""
     def default(self, obj):
         if isinstance(obj, Decimal):
             return float(obj)
         return super().default(obj)
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
