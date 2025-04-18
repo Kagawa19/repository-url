@@ -16,6 +16,7 @@ services:
       - ./scripts/init-script.sh:/app/scripts/init-script.sh:ro
       - /dev/shm:/dev/shm:rw
       - chrome_data:/tmp/chrome-data
+      - ./logs:/app/logs:rw
       - chrome_profile:/tmp/chrome-profile
       - chrome_run:/var/run/chrome
     environment: 

@@ -8,6 +8,9 @@ mkdir -p "$LOG_DIR"
 mkdir -p "/app/.initialization_complete" 
 mkdir -p /app/.model_cache
 
+mkdir -p /app/logs
+chmod -R 777 /app/logs
+
 # Logging setup
 exec 1> >(tee -a "${LOG_DIR}/init.log") 2>&1
 echo "[$(date)] Starting initialization..."
