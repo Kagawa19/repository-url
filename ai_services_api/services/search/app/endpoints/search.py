@@ -165,7 +165,7 @@ async def advanced_search(
 async def track_user_search(redis_client: Redis, user_id: str, query: str, category: str):
     try:
         key = f"user_search_history:{user_id}"
-        timestamp = datetime.now().timestamp()
+        timestamp = datetime.datetime.now().timestamp()
         detail_key = f"user_search_details:{user_id}:{timestamp}:{query}"
         
         await redis_client.zadd(key, {f"{timestamp}:{query}": timestamp})
@@ -267,12 +267,12 @@ async def health_check():
         
         return {
             "status": "ok",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.datetime.now().isoformat(),
             "components": components
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        return {"status": "error", "error": str(e), "timestamp": datetime.now().isoformat()}
+        return {"status": "error", "error": str(e), "timestamp": datetime.datetime.now().isoformat()}
 
 @router.delete("/cache/search/{user_id}")
 async def clear_user_search_cache(user_id: str, redis_client: Redis = Depends(get_redis)):
@@ -315,7 +315,7 @@ async def track_user_search(redis_client: Redis, user_id: str, query: str, categ
         key = f"user_search_history:{user_id}"
         
         # Current timestamp for sorting
-        timestamp = datetime.now().timestamp()
+        timestamp = datetime.datetime.now().timestamp()
         
         # Create a search record with timestamp and category
         search_record = {
