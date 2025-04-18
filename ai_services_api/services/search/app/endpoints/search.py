@@ -190,6 +190,19 @@ async def advanced_search(
             except Exception as category_error:
                 logger.warning(f"Error adding category to response: {category_error}")
         
+        # NEW: Record the search in user history
+        if effective_query:  # Only record non-empty queries
+            try:
+                redis_client = await get_redis()
+                await track_user_search(
+                    redis_client, 
+                    user_id, 
+                    effective_query, 
+                    search_type or "general"
+                )
+            except Exception as track_error:
+                logger.warning(f"Error tracking search history: {track_error}")
+        
         # Log search results
         logger.info(f"Search completed with {search_response.total_results} results")
         
@@ -202,7 +215,194 @@ async def advanced_search(
             detail="An error occurred while processing the advanced search"
         )
 
+async def track_user_search(redis_client: Redis, user_id: str, query: str, category: str = "general") -> None:
+    """
+    Track a user's search query in their history.
+    
+    Args:
+        redis_client: Redis client instance
+        user_id: User ID
+        query: The search query
+        category: Search category
+    """
+    try:
+        # Key for this user's search history
+        key = f"user_search_history:{user_id}"
+        
+        # Current timestamp for sorting
+        timestamp = datetime.now().timestamp()
+        
+        # Create a search record with timestamp and category
+        search_record = {
+            "query": query,
+            "timestamp": timestamp,
+            "category": category
+        }
+        
+        # Add to a list in Redis, limited to most recent 20 searches
+        # Using Redis sorted set for automatic timestamp-based ordering
+        await redis_client.zadd(
+            key,
+            {
+                # Store as JSON string with timestamp as score for sorting
+                # Timestamp in score ensures chronological order
+                f"{timestamp}:{query}": timestamp
+            }
+        )
+        
+        # Store search details in a hash
+        detail_key = f"user_search_details:{user_id}:{timestamp}:{query}"
+        await redis_client.hset(
+            detail_key,
+            mapping={
+                "query": query,
+                "timestamp": str(timestamp),
+                "category": category
+            }
+        )
+        
+        # Set expiration for the detail record (7 days)
+        await redis_client.expire(detail_key, 60 * 60 * 24 * 7)
+        
+        # Trim to keep only the latest 20 searches
+        await redis_client.zremrangebyrank(key, 0, -21)
+        
+        # Set expiration for the search history (30 days)
+        await redis_client.expire(key, 60 * 60 * 24 * 30)
+        
+        logger.debug(f"Tracked search for user {user_id}: {query}")
+    except Exception as e:
+        logger.error(f"Error tracking search history: {e}")
+        # Don't raise exception - this should not affect the main search functionality
 
+@router.get("/experts/recent-searches")
+async def get_recent_searches(
+    request: Request,
+    user_id: str = Depends(flexible_get_user_id),
+    limit: int = 5
+):
+    """
+    Get the user's most recent searches.
+    
+    Args:
+        user_id: User ID to get searches for
+        limit: Maximum number of searches to return (default: 5)
+    
+    Returns:
+        List of recent searches with timestamps and categories
+    """
+    logger.info(f"Fetching recent searches for user: {user_id}")
+    
+    try:
+        redis_client = await get_redis()
+        
+        # Get recent searches from Redis sorted set
+        key = f"user_search_history:{user_id}"
+        
+        # Get the latest entries (highest scores) with their scores
+        # ZREVRANGE returns newest first (highest score)
+        recent_searches = await redis_client.zrevrange(
+            key, 
+            0, 
+            limit - 1,  # Zero-indexed, so -1 for limit
+            withscores=True
+        )
+        
+        # Format results
+        result = []
+        for search_key, score in recent_searches:
+            # Parse the search key (timestamp:query)
+            parts = search_key.split(':', 1)
+            if len(parts) != 2:
+                continue
+                
+            timestamp, query = parts
+            
+            # Get detailed information
+            detail_key = f"user_search_details:{user_id}:{timestamp}:{query}"
+            details = await redis_client.hgetall(detail_key)
+            
+            if not details:
+                # Fall back to just the basic info if details not found
+                details = {
+                    "query": query,
+                    "timestamp": str(score),
+                    "category": "general"
+                }
+            
+            # Add to results
+            result.append({
+                "query": query,
+                "timestamp": float(details.get("timestamp", score)),
+                "category": details.get("category", "general"),
+                "formatted_time": datetime.fromtimestamp(float(details.get("timestamp", score))).strftime("%Y-%m-%d %H:%M:%S")
+            })
+        
+        return {
+            "status": "success",
+            "user_id": user_id,
+            "recent_searches": result,
+            "total": len(result)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching recent searches: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"An error occurred while fetching recent searches: {str(e)}"
+        )
+    
+@router.delete("/experts/recent-searches")
+async def clear_recent_searches(
+    request: Request,
+    user_id: str = Depends(flexible_get_user_id)
+):
+    """
+    Clear a user's recent search history.
+    
+    Args:
+        user_id: User ID to clear searches for
+    """
+    logger.info(f"Clearing recent searches for user: {user_id}")
+    
+    try:
+        redis_client = await get_redis()
+        
+        # Get recent searches from Redis sorted set to find detail keys
+        key = f"user_search_history:{user_id}"
+        recent_searches = await redis_client.zrange(key, 0, -1, withscores=True)
+        
+        # Delete detail records
+        pipeline = redis_client.pipeline()
+        for search_key, _ in recent_searches:
+            # Parse the search key (timestamp:query)
+            parts = search_key.split(':', 1)
+            if len(parts) != 2:
+                continue
+                
+            timestamp, query = parts
+            
+            # Delete the detail key
+            detail_key = f"user_search_details:{user_id}:{timestamp}:{query}"
+            pipeline.delete(detail_key)
+        
+        # Delete the history key itself
+        pipeline.delete(key)
+        
+        # Execute all delete operations
+        await pipeline.execute()
+        
+        return {
+            "status": "success",
+            "message": f"Search history cleared for user {user_id}"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error clearing recent searches: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"An error occurred while clearing recent searches: {str(e)}"
+        )
 # Replace the advanced_predict endpoint with the simpler 'predict' path
 @router.get("/experts/predict/{partial_query}")
 async def predict_query(
@@ -214,8 +414,39 @@ async def predict_query(
 ):
     """
     Generate query predictions based on partial input.
+    If partial_query is empty or just whitespace, returns recent searches instead.
     """
-    logger.info(f"Received query prediction request - Partial query: {partial_query}, Search Type: {search_type}")
+    # Clean the partial query
+    cleaned_query = partial_query.strip()
+    
+    logger.info(f"Received query prediction request - Partial query: '{cleaned_query}', Search Type: {search_type}")
+    
+    # If query is empty or just whitespace, return recent searches
+    if not cleaned_query:
+        try:
+            # Get recent searches
+            redis_client = await get_redis()
+            recent_searches = await get_user_recent_searches(redis_client, user_id, limit)
+            
+            # Format as prediction response
+            predictions = []
+            for search in recent_searches:
+                predictions.append({
+                    "text": search["query"],
+                    "category": search["category"],
+                    "source": "history",
+                    "score": 1.0  # Give high score to prioritize history items
+                })
+            
+            return PredictionResponse(
+                query=partial_query,
+                predictions=predictions,
+                total_results=len(predictions),
+                metadata={"source": "history"}
+            )
+        except Exception as e:
+            logger.warning(f"Error getting recent searches: {e}")
+            # If there's an error, continue with normal prediction
     
     # Validate search type
     valid_search_types = ["name", "theme", "designation", "publication", None]
@@ -226,7 +457,7 @@ async def predict_query(
         )
     
     try:
-        # Process advanced query prediction
+        # Process advanced query prediction (original logic)
         return await process_advanced_query_prediction(
             partial_query, 
             user_id, 
@@ -240,7 +471,60 @@ async def predict_query(
             status_code=500, 
             detail=f"An error occurred while generating predictions: {str(e)}"
         )
-
+    
+async def get_user_recent_searches(redis_client: Redis, user_id: str, limit: int = 5) -> list:
+    """
+    Get a user's recent searches from Redis.
+    
+    Args:
+        redis_client: Redis client instance
+        user_id: User ID
+        limit: Maximum number of searches to return
+        
+    Returns:
+        List of recent search objects
+    """
+    # Key for this user's search history
+    key = f"user_search_history:{user_id}"
+    
+    # Get the latest entries (highest scores) with their scores
+    recent_searches = await redis_client.zrevrange(
+        key, 
+        0, 
+        limit - 1,
+        withscores=True
+    )
+    
+    # Format results
+    result = []
+    for search_key, score in recent_searches:
+        # Parse the search key (timestamp:query)
+        parts = search_key.split(':', 1)
+        if len(parts) != 2:
+            continue
+            
+        timestamp, query = parts
+        
+        # Get detailed information
+        detail_key = f"user_search_details:{user_id}:{timestamp}:{query}"
+        details = await redis_client.hgetall(detail_key)
+        
+        if not details:
+            # Fall back to just the basic info if details not found
+            details = {
+                "query": query,
+                "timestamp": str(score),
+                "category": "general"
+            }
+        
+        # Add to results
+        result.append({
+            "query": query,
+            "timestamp": float(details.get("timestamp", score)),
+            "category": details.get("category", "general")
+        })
+    
+    return result
 
 @router.post("/experts/track-suggestion")
 async def track_suggestion(
