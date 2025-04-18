@@ -5,7 +5,7 @@ from typing import Dict, List
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from urllib.parse import urljoin
 from ai_services_api.services.centralized_repository.ai_summarizer import TextSummarizer
-from ai_services_api.services.centralized_repository.web_content.services.website_scraper import WebsiteScraper, ScraperConfig
+from ai_services_api.services.centralized_repository.web_content.services.web_scraper import WebsiteScraper, ScraperConfig
 from ai_services_api.services.centralized_repository.web_content.services.pdf_processor import PDFProcessor
 import re
 import warnings
