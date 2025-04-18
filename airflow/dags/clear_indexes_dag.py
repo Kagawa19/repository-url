@@ -83,6 +83,7 @@ def clear_faiss_index_task():
 def clear_redis_index_task():
     """
     Task to clear Redis indexes using ExpertRedisIndexManager.
+    Updated to clear navigation indexes as well.
     """
     try:
         # Set environment variables for offline mode
@@ -111,8 +112,12 @@ def clear_redis_index_task():
             # If the clear_redis_indexes method doesn't exist, attempt to clear manually
             logger.info("clear_redis_indexes method not found, attempting manual clearing")
             
-            # Clear expert indexes
-            expert_patterns = ['text:expert:*', 'emb:expert:*', 'meta:expert:*']
+            # Clear expert indexes - including both old and new patterns
+            expert_patterns = [
+                'text:expert:*', 'emb:expert:*', 'meta:expert:*',
+                'text:aphrc_expert:*', 'emb:aphrc_expert:*', 'meta:aphrc_expert:*',
+                'links:expert:*'
+            ]
             for pattern in expert_patterns:
                 cursor = 0
                 while True:
@@ -125,7 +130,9 @@ def clear_redis_index_task():
             # Clear resource/publication indexes
             resource_patterns = [
                 'text:resource:*', 'emb:resource:*', 'meta:resource:*',
-                'text:publication:*', 'emb:publication:*', 'meta:publication:*'
+                'text:publication:*', 'emb:publication:*', 'meta:publication:*',
+                'text:expert_resource:*', 'emb:expert_resource:*', 'meta:expert_resource:*',
+                'links:resource:*'
             ]
             for pattern in resource_patterns:
                 cursor = 0
@@ -136,13 +143,28 @@ def clear_redis_index_task():
                     if cursor == 0:
                         break
             
+            # Clear navigation indexes
+            navigation_patterns = [
+                'text:navigation:*', 'emb:navigation:*', 'meta:navigation:*'
+            ]
+            for pattern in navigation_patterns:
+                cursor = 0
+                count_deleted = 0
+                while True:
+                    cursor, keys = redis_manager.redis_text.scan(cursor, match=pattern, count=100)
+                    if keys:
+                        redis_manager.redis_text.delete(*keys)
+                        count_deleted += len(keys)
+                    if cursor == 0:
+                        break
+                logger.info(f"Deleted {count_deleted} keys matching pattern '{pattern}'")
+            
             logger.info("Manual clearing of Redis indexes completed")
             return "Redis indexes cleared manually"
         
     except Exception as e:
         logger.error(f"Error in clear_redis_index_task: {e}", exc_info=True)
         raise
-
 # Define the FAISS index clearing task
 clear_faiss_task = PythonOperator(
     task_id='clear_faiss_search_index',
