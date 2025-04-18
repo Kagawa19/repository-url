@@ -52,6 +52,71 @@ class ContentPipeline:
         # Add this line to initialize the summarizer
         self.summarizer = TextSummarizer()
         logger.info("ContentPipeline initialized with %d start URLs", len(start_urls))
+
+
+
+    def process_webpage(self, page_data: Dict) -> Dict:
+        """Process webpage data, summarize, and assign content_type."""
+        url = page_data.get('url', page_data.get('doi', '')).lower()
+        title = page_data.get('title', '').lower()
+        content = page_data.get('summary', page_data.get('content', ''))
+
+        if not url:
+            logger.warning(f"Skipping page with no URL: {page_data}")
+            return {}
+
+        # Assign content_type
+        content_type = 'webpage'
+        if url.endswith('.pdf'):
+            content_type = 'pdf'
+        elif any(keyword in url for keyword in ['/person/', '/staff/', '/team/', '/researcher/']):
+            content_type = 'expert'
+        elif any(keyword in url or keyword in title for keyword in ['publication', 'report', 'research', 'project', 'article']):
+            content_type = 'publication'
+
+        # Heuristic-based expert detection using content
+        if content_type == 'webpage' and any(
+            keyword in content.lower() for keyword in ['researcher profile', 'staff profile', 'team member', 'expert bio']
+        ):
+            content_type = 'expert'
+
+        # Extract additional data for experts
+        affiliation = None
+        contact_email = None
+        if content_type == 'expert':
+            soup = BeautifulSoup(page_data.get('raw_html', ''), 'html.parser')
+            aff_elem = soup.find(class_=re.compile('affiliation|organization|institute', re.I)) or \
+                    soup.find('div', string=re.compile('affiliation|organization|institute', re.I))
+            affiliation = aff_elem.get_text(strip=True) if aff_elem else 'APHRC'
+            email_elem = soup.find('a', href=re.compile(r'^mailto:'))
+            contact_email = email_elem.get('href').replace('mailto:', '') if email_elem else None
+
+        # Summarize content for non-PDFs
+        if content_type != 'pdf':
+            try:
+                summary, gemini_content_type = self.summarizer.summarize(title, content)
+                if summary and not summary.startswith("Failed") and not summary.startswith("Cannot"):
+                    page_data['summary'] = summary
+                    if gemini_content_type and content_type != 'expert':
+                        content_type = gemini_content_type
+                else:
+                    logger.warning(f"Failed to summarize {url}: {summary}")
+            except Exception as e:
+                logger.error(f"Error summarizing {url}: {str(e)}")
+
+        page_data['type'] = content_type
+        if content_type == 'expert':
+            page_data['affiliation'] = affiliation
+            page_data['contact_email'] = contact_email
+
+        # Add validation before returning expert data
+        if page_data['type'] == 'expert' and not self.validate_expert(page_data):
+            logger.warning(f"Skipping invalid expert data: {page_data.get('url')}")
+            return None
+
+        logger.debug(f"Processed page: url={url}, type={content_type}, title={title[:50]}...")
+        return page_data
+
     async def run(self, exclude_publications: bool = False) -> Dict:
         """
         Run the scraping pipeline, saving experts, webpages, and optionally publications every 10 pages.
@@ -317,60 +382,7 @@ class ContentPipeline:
                 
             except Exception as e:
                 logger.error(f"Error saving item {url or 'unknown'} to database: {str(e)}", exc_info=True)
-    def process_webpage(self, page_data: Dict) -> Dict:
-        """Process webpage data, summarize, and assign content_type."""
-        url = page_data.get('url', page_data.get('doi', '')).lower()
-        title = page_data.get('title', '').lower()
-        content = page_data.get('summary', page_data.get('content', ''))
-
-        if not url:
-            logger.warning(f"Skipping page with no URL: {page_data}")
-            return {}
-
-        # Assign content_type
-        content_type = 'webpage'
-        if url.endswith('.pdf'):
-            content_type = 'pdf'
-        elif any(keyword in url for keyword in ['/person/', '/staff/', '/team/', '/researcher/']):
-            content_type = 'expert'
-        elif any(keyword in url or keyword in title for keyword in ['publication', 'report', 'research', 'project', 'article']):
-            content_type = 'publication'
-
-        # Heuristic-based expert detection using content
-        if content_type == 'webpage' and any(keyword in content.lower() for keyword in ['researcher profile', 'staff profile', 'team member', 'expert bio']):
-            content_type = 'expert'
-
-        # Extract additional data for experts
-        affiliation = None
-        contact_email = None
-        if content_type == 'expert':
-            soup = BeautifulSoup(page_data.get('raw_html', ''), 'html.parser')
-            aff_elem = soup.find(class_=re.compile('affiliation|organization|institute', re.I)) or \
-                    soup.find('div', string=re.compile('affiliation|organization|institute', re.I))
-            affiliation = aff_elem.get_text(strip=True) if aff_elem else 'APHRC'
-            email_elem = soup.find('a', href=re.compile(r'^mailto:'))
-            contact_email = email_elem.get('href').replace('mailto:', '') if email_elem else None
-
-        # Summarize content for non-PDFs
-        if content_type != 'pdf':
-            try:
-                summary, gemini_content_type = self.summarizer.summarize(title, content)
-                if summary and not summary.startswith("Failed") and not summary.startswith("Cannot"):
-                    page_data['summary'] = summary
-                    if gemini_content_type and content_type != 'expert':
-                        content_type = gemini_content_type
-                else:
-                    logger.warning(f"Failed to summarize {url}: {summary}")
-            except Exception as e:
-                logger.error(f"Error summarizing {url}: {str(e)}")
-
-        page_data['type'] = content_type
-        if content_type == 'expert':
-            page_data['affiliation'] = affiliation
-            page_data['contact_email'] = contact_email
-        logger.debug(f"Processed page: url={url}, type={content_type}, title={title[:50]}...")
-        return page_data
-
+    
     def scrape_page(self, url: str) -> Dict:
         """Scrape a single webpage using requests and return its data."""
         if url in self.visited_urls:

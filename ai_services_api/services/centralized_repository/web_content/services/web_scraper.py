@@ -5,6 +5,9 @@ from bs4 import BeautifulSoup
 from typing import List, Dict, Optional, Set
 from datetime import datetime
 import re
+import os
+from dataclasses import dataclass, field, asdict
+from typing import Dict, L
 import hashlib
 import time
 import threading
@@ -12,7 +15,8 @@ import concurrent.futures
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import diskcache
 from dataclasses import dataclass, field, asdict
-
+import re
+from typing import List
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -198,6 +202,7 @@ class ScraperConfig:
     max_retries: int = int(os.getenv('WEBSITE_MAX_RETRIES', '3'))
     initial_rate_limit_delay: float = float(os.getenv('WEBSITE_INITIAL_RATE_LIMIT', '2.0'))
     batch_size: int = int(os.getenv('WEBSITE_BATCH_SIZE', '100'))
+
     css_selectors: Dict[str, List[str]] = field(default_factory=lambda: {
         'publication_cards': [
             '.publication-card', '.card', 'article', '.post', '.item', '[class*="publication"]'
@@ -209,11 +214,33 @@ class ScraperConfig:
         'load_more': [
             '.alm-load-more-btn', '.load-more', 'a.next', '.pagination a', 
             'button[class*="load"]', '.nav-links .next'
+        ],
+        'expert_cards': [
+            # Original selectors
+            '.staff-card', '.team-member', '.researcher-profile', '.person',
+            '[class*="staff"]', '[class*="team"]',
+            # New APHRC-specific selectors
+            'div.person-item', '.profile-card', 
+            '[itemtype="http://schema.org/Person"]'
+        ],
+        'expert_details': [
+            # New APHRC-specific detail selectors
+            '.profile-content', '.bio-section',
+            'div[class*="description"]',
+            # Original fallback selectors
+            '.content', '.description', '.abstract'
         ]
     })
 
+    aphrc_domains: List[str] = field(default_factory=lambda: [
+        'Urbanization', 'Population Dynamics', 'Reproductive Health',
+        'Education', 'Non-communicable Diseases', 'Aging'
+    ])
+
     def to_dict(self) -> Dict:
         return asdict(self)
+
+
 
 class WebsiteScraper:
     def __init__(self, summarizer: Optional[TextSummarizer] = None, config: Optional[ScraperConfig] = None):
@@ -387,7 +414,21 @@ class WebsiteScraper:
         seen = set()
         return [a for a in normalized_authors if not (a in seen or seen.add(a))]
 
+ 
+
     def _extract_keywords(self, content: str) -> List[str]:
+        """Enhanced keyword extraction with APHRC focus"""
+        
+        # Step 1: Check APHRC domains first
+        aphrc_keywords = [
+            domain for domain in self.config.aphrc_domains
+            if domain.lower() in content.lower()
+        ]
+        
+        if aphrc_keywords:
+            return aphrc_keywords
+
+        # Step 2: Fallback to keyword patterns
         keywords = []
         keyword_patterns = [
             r'keywords?:?\s+([\w\s,]+)(?:\.|$)',
@@ -395,11 +436,14 @@ class WebsiteScraper:
             r'topics?:?\s+([\w\s,]+)(?:\.|$)',
             r'categories?:?\s+([\w\s,]+)(?:\.|$)'
         ]
+        
         for pattern in keyword_patterns:
             matches = re.finditer(pattern, content, re.IGNORECASE)
             for match in matches:
                 parts = re.split(r',\s*|\s+and\s+|\s+&\s+', match.group(1).strip())
                 keywords.extend(p.strip().lower() for p in parts if p.strip())
+
+        # Step 3: If still empty, infer from domain list in content
         if not keywords:
             domains = [
                 'health', 'education', 'poverty', 'nutrition', 'policy', 
@@ -410,8 +454,11 @@ class WebsiteScraper:
             ]
             content_lower = content.lower()
             keywords.extend(domain for domain in domains if domain in content_lower)
+
+        # Step 4: Deduplicate keywords
         seen = set()
         return [k for k in keywords if not (k in seen or seen.add(k))]
+
 
     def fetch_content(self, search_term: Optional[str] = None, max_pages: Optional[int] = 50) -> List[Dict]:
         cache_key = f"website_content_{search_term or 'all'}_{datetime.utcnow().strftime('%Y%m%d')}"
@@ -570,7 +617,12 @@ class WebsiteScraper:
             visited.add(url)
             self.seen_urls.add(url)
             logger.info(f"Processing {card_type} URL: {url}")
-            
+
+            # Validation for expert cards
+            if card_type == 'expert' and not self.validate_expert(details):
+                logger.warning(f"Invalid expert card at {url}")
+                return None
+
             if url.lower().endswith('.pdf'):
                 item = {
                     'title': details['title'],
@@ -585,7 +637,7 @@ class WebsiteScraper:
                 logger.info(f"Processed PDF: {details['title'][:100]}...")
                 self.metrics.record_item_processed(True, time.time() - start_time)
                 return item
-            
+
             browser = self.browser_pool.get_browser()
             if not browser:
                 logger.warning(f"No browser available for {card_type} - falling back to basic details")
@@ -604,14 +656,14 @@ class WebsiteScraper:
                     item['contact_email'] = details.get('contact_email')
                 self.metrics.record_item_processed(True, time.time() - start_time)
                 return item
-            
+
             cache_key = f"{card_type}_{hashlib.md5(url.encode()).hexdigest()}"
             cached_item = self.cache.get(cache_key)
             if cached_item:
                 logger.debug(f"Retrieved {card_type} from cache: {url}")
                 self.browser_pool.release_browser(browser)
                 return cached_item
-            
+
             try:
                 logger.debug(f"Navigating to {card_type} URL: {url}")
                 browser.get(url)
@@ -627,14 +679,14 @@ class WebsiteScraper:
                             break
                     except:
                         continue
-                
+
                 if not details['authors']:
                     details['authors'] = self._extract_authors(content_text)
                 if not details['domains']:
                     details['domains'] = self._extract_keywords(content_text)
                 if not details['year']:
                     details['year'] = self._extract_year(url, content_text)
-                
+
                 item = {
                     'title': details['title'],
                     'doi': url,
@@ -648,7 +700,7 @@ class WebsiteScraper:
                 if card_type == 'expert':
                     item['affiliation'] = details.get('affiliation', 'APHRC')
                     item['contact_email'] = details.get('contact_email')
-                
+
                 self.cache.set(cache_key, item, expire=self.config.cache_ttl)
                 logger.info(f"Processed {card_type.capitalize()}: {details['title'][:100]}...")
                 self.metrics.record_item_processed(True, time.time() - start_time)
@@ -678,7 +730,55 @@ class WebsiteScraper:
             if browser:
                 self.browser_pool.release_browser(browser)
 
+
+    
+
+    def validate_expert(self, data: Dict) -> bool:
+        """Enhanced expert data validation"""
+        required_fields = {
+            'name': (str, 2, 100),
+            'affiliation': (str, 3, 50),
+            'bio': (str, 50, 2000)
+        }
+        
+        for field, (dtype, min_len, max_len) in required_fields.items():
+            value = data.get(field, '')
+            if not isinstance(value, dtype) or not (min_len <= len(str(value)) <= max_len):
+                logger.warning(f"Invalid {field}: {value}")
+                return False
+                
+        # New APHRC-specific validation
+        if 'affiliation' in data and 'APHRC' not in data['affiliation']:
+            logger.warning(f"Non-APHRC affiliation detected: {data['affiliation']}")
+            
+        return True
+
     def _click_load_more(self) -> bool:
+        """Enhanced pagination handling with APHRC-specific patterns"""
+        # New XPath patterns tried first
+        pagination_patterns = [
+            ("//a[contains(., 'Next')]", "Next link"),
+            ("//li[@class='page-item next']", "Bootstrap next"),
+            ("//link[@rel='next']", "SEO next link")
+        ]
+
+        for xpath, desc in pagination_patterns:
+            try:
+                next_btn = WebDriverWait(self.driver, 3).until(
+                    EC.element_to_be_clickable((By.XPATH, xpath))
+                )
+                if next_btn.is_displayed():
+                    self.driver.execute_script("arguments[0].scrollIntoView(true);", next_btn)
+                    time.sleep(1)
+                    self.driver.execute_script("arguments[0].click();", next_btn)
+                    time.sleep(3)
+                    logger.info(f"Clicked pagination via {desc}")
+                    return True
+            except Exception as e:
+                logger.debug(f"XPath {xpath} failed: {e}")
+                continue
+
+        # Original CSS selector logic preserved as fallback
         for selector in self.config.css_selectors['load_more']:
             try:
                 load_more = WebDriverWait(self.driver, 5).until(
@@ -690,9 +790,12 @@ class WebsiteScraper:
                     load_more.click()
                     time.sleep(3)
                     return True
-            except:
+            except Exception as e:
+                logger.debug(f"CSS selector {selector} failed: {e}")
                 continue
+
         return False
+
 
     def _process_publication_card(self, card, visited: Set[str]) -> Optional[Dict]:
         start_time = time.time()
