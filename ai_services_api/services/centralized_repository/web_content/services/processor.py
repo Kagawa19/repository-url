@@ -25,17 +25,18 @@ class WebContentProcessor:
         self.db = db
         self.config = config or {}
         self.skip_publications = self.config.get('skip_publications', False)
+        max_workers = self.config.get('max_workers', int(os.getenv('WEBSITE_MAX_WORKERS', 5)))
         
-        # Initialize ContentPipeline with required arguments
+        # Initialize ContentPipeline
         start_urls = [os.getenv('WEBSITE_BASE_URL', 'https://aphrc.org')]
         self.content_pipeline = ContentPipeline(
             start_urls=start_urls,
-            scraper=WebsiteScraper(max_browsers=2),  # Reduced for OOM prevention
+            scraper=WebsiteScraper(max_browsers=2, max_workers=max_workers),  # Pass max_workers
             pdf_processor=PDFProcessor(),
             db=self.db,
-            batch_size=self.config.get('batch_size', 100)
+            batch_size=self.config.get('batch_size', int(os.getenv('WEBSITE_BATCH_SIZE', 100)))
         )
-        logger.info("WebContentProcessor initialized with start URLs: %s", start_urls)
+        logger.info("WebContentProcessor initialized with start URLs: %s, max_workers: %d", start_urls, max_workers)
 
     async def process_content(self) -> Dict:
         """Process web content using the content pipeline."""
@@ -43,7 +44,6 @@ class WebContentProcessor:
             logger.info("Starting web content processing...")
             if self.skip_publications:
                 logger.warning("Skipping publication processing due to --skip-publications flag")
-                # Optionally process only experts and webpages
                 results = await self.content_pipeline.run(exclude_publications=True)
             else:
                 results = await self.content_pipeline.run()

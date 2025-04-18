@@ -90,15 +90,22 @@ class SystemInitializer:
     def __init__(self, config: Optional[SetupConfig] = None):
         """Initialize system components and set up environment."""
         load_dotenv()
+
+       
+        self.web_processor = None
+        self.config = config or {}
+        # Add environment variables to config
+        self.config.update({
+            'max_workers': int(os.getenv('MAX_WORKERS', 5)),
+            'batch_size': int(os.getenv('BATCH_SIZE', 100)),
+            'checkpoint_hours': int(os.getenv('CHECKPOINT_HOURS', 24))
+        })
+        logger.info("SystemInitializer initialized with config: %s", self.config)
         
-        # Set default config if none provided
-        if config is None:
-            self.config = SetupConfig()
-        else:
-            self.config = config
+        
             
         # Initialize database connection
-        self.db = None
+        
         self.web_processor = None
         self.required_env_vars = [
             'DATABASE_URL',
@@ -147,22 +154,14 @@ class SystemInitializer:
             raise ValueError("Invalid configuration: MAX_WORKERS, BATCH_SIZE, and CHECKPOINT_HOURS must be positive")
 
     async def initialize_web_content_processor(self):
-        """Initialize the WebContentProcessor with configuration settings."""
+        """Initialize the web content processor."""
         try:
-            # Use updated configuration to match WebsiteScraper defaults
-            self.web_processor = WebContentProcessor(
-                max_workers=max(self.config.max_workers, 5),  # Align with WebsiteScraper max_workers
-                batch_size=max(self.config.batch_size, 100),  # Align with WebsiteScraper batch_size
-                processing_checkpoint_hours=max(self.config.checkpoint_hours, 24)
-            )
-            logger.info(f"Web content processor initialized with max_workers={self.web_processor.max_workers}, "
-                       f"batch_size={self.web_processor.batch_size}, "
-                       f"checkpoint_hours={self.web_processor.processing_checkpoint_hours}")
+            self.web_processor = WebContentProcessor(db=self.db, config=self.config)
+            logger.info("Web content processor initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize web content processor: {str(e)}", exc_info=True)
             raise
 
-  
     async def process_web_content(self) -> Dict:
         """Process web content, relying on ContentPipeline's incremental saves."""
         try:

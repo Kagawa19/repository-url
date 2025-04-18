@@ -31,6 +31,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+
+
 class ContentPipeline:
     def __init__(
         self,
@@ -313,7 +315,6 @@ class ContentPipeline:
                 
             except Exception as e:
                 logger.error(f"Error saving item {url or 'unknown'} to database: {str(e)}", exc_info=True)
-
     def process_webpage(self, page_data: Dict) -> Dict:
         """Process webpage data, summarize, and assign content_type."""
         url = page_data.get('url', page_data.get('doi', '')).lower()
