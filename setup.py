@@ -63,7 +63,7 @@ class SetupConfig:
     skip_classification: bool = False
     expertise_csv: str = ''
     max_workers: int = 4
-    batch_size: int = 50
+    batch_size: int = 200
     checkpoint_hours: int = 24
 
     @classmethod
