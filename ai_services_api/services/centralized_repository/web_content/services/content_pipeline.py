@@ -19,6 +19,7 @@ from ai_services_api.services.centralized_repository.database_manager import Dat
 from ai_services_api.services.centralized_repository.web_content.services.web_scraper import WebsiteScraper
 from ai_services_api.services.centralized_repository.web_content.services.pdf_processor import PDFProcessor
 import requests
+from ai_services_api.services.centralized_repository.ai_summarizer import TextSummarizer
 from bs4 import BeautifulSoup
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -48,8 +49,9 @@ class ContentPipeline:
         self.db = db
         self.batch_size = batch_size
         self.visited_urls: Set[str] = set()
+        # Add this line to initialize the summarizer
+        self.summarizer = TextSummarizer()
         logger.info("ContentPipeline initialized with %d start URLs", len(start_urls))
-
     async def run(self, exclude_publications: bool = False) -> Dict:
         """
         Run the scraping pipeline, saving experts, webpages, and optionally publications every 10 pages.
