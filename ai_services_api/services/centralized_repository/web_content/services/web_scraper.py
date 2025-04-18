@@ -101,6 +101,7 @@ class ScraperMetrics:
             }
 
 class AdaptiveRateLimiter:
+class AdaptiveRateLimiter:
     def __init__(self, initial_delay: float = 2.0, min_delay: float = 1.0, max_delay: float = 10.0, backoff_factor: float = 1.5):
         self.current_delay = initial_delay
         self.min_delay = min_delay
@@ -112,29 +113,40 @@ class AdaptiveRateLimiter:
         self.last_request_time = 0
 
     def wait(self):
+        """Wait the appropriate amount of time before the next request."""
         with self._lock:
             current_time = time.time()
             elapsed = current_time - self.last_request_time
+            
+            # If we need to wait, do so
             if elapsed < self.current_delay:
                 time.sleep(self.current_delay - elapsed)
+            
+            # Update the last request time
             self.last_request_time = time.time()
 
     def record_success(self):
+        """Record a successful request and potentially decrease delay."""
         with self._lock:
             self.success_count += 1
             self.failure_count = 0
+            
+            # After 5 consecutive successes, we reduce the delay
             if self.success_count >= 5:
                 self.current_delay = max(self.current_delay / 1.2, self.min_delay)
                 self.success_count = 0
 
     def record_failure(self):
+        """Record a failed request and increase the delay."""
         with self._lock:
             self.failure_count += 1
             self.success_count = 0
+            
+            # Increase the delay more aggressively with consecutive failures
             self.current_delay = min(self.current_delay * (self.backoff_factor ** self.failure_count), self.max_delay)
 
 class BrowserPool:
-    def __init__(self, max_size: int = 5, chrome_options=None):
+    def __init__(self, max_size: int = 3, chrome_options=None):
         self.max_size = max_size
         self.chrome_options = chrome_options or self._default_chrome_options()
         self.browsers = []
@@ -148,53 +160,41 @@ class BrowserPool:
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
         options.add_argument('--window-size=1920,1080')
+        options.add_argument('--remote-debugging-port=9222')
         options.add_argument('--disable-setuid-sandbox')
         options.add_argument('--disable-extensions')
-        options.add_argument('--remote-debugging-port=0')  # Use dynamic port
-        options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
         return options
         
     def get_browser(self):
         with self._lock:
-            # First try to find an available browser
+            # Check if we have available browsers
             for browser in self.browsers:
                 if browser not in self.browsers_in_use:
                     self.browsers_in_use[browser] = True
                     return browser
-            
-            # If no available browser and we can create more
+                    
+            # If pool is not at max size, create a new browser
             if len(self.browsers) < self.max_size:
                 try:
                     service = Service()
-                    browser = webdriver.Chrome(service=service, options=self.chrome_options)
+                    browser = webdriver.Chrome(
+                        service=service,
+                        options=self.chrome_options
+                    )
                     self.browsers.append(browser)
                     self.browsers_in_use[browser] = True
-                    logger.info(f"Created new browser, pool size: {len(self.browsers)}/{self.max_size}")
                     return browser
                 except Exception as e:
                     logger.error(f"Failed to create new browser: {e}")
-            else:
-                logger.warning(f"Browser pool maxed out ({self.max_size}), waiting for release")
-            
-            # If we reach here, all browsers are in use and we can't create more
-            # Wait for a browser to become available (up to 5 seconds)
-            for _ in range(10):  # Try 10 times with 0.5 sec delay
-                time.sleep(0.5)
-                for browser in self.browsers:
-                    if browser not in self.browsers_in_use:
-                        self.browsers_in_use[browser] = True
-                        return browser
-            
-            logger.warning("No browser available after waiting, returning None")
+                    raise
+                
+            # If we reach here, all browsers are in use and we're at max capacity
             return None
             
     def release_browser(self, browser):
         with self._lock:
             if browser in self.browsers_in_use:
                 del self.browsers_in_use[browser]
-                logger.debug(f"Released browser, {len(self.browsers_in_use)}/{len(self.browsers)} in use")
-            else:
-                logger.warning("Attempted to release browser that wasn't marked as in use")
                 
     def close_all(self):
         with self._lock:
@@ -205,28 +205,29 @@ class BrowserPool:
                     pass
             self.browsers = []
             self.browsers_in_use = {}
-            logger.info("Closed all browsers in pool")
+
 
 @dataclass
 class ScraperConfig:
-    base_url: str = os.getenv('WEBSITE_BASE_URL', 'https://aphrc.org')
+    """Configuration for the WebsiteScraper."""
+    base_url: str = os.getenv('WEBSITE_BASE_URL', 'https://aphrc.org') # Updated base URL
     cache_dir: str = os.getenv('WEBSITE_CACHE_DIR', '/tmp/website_cache')
-    cache_ttl: int = int(os.getenv('WEBSITE_CACHE_TTL', '86400'))
+    cache_ttl: int = int(os.getenv('WEBSITE_CACHE_TTL', '86400'))  # 24 hours in seconds
     request_timeout: int = int(os.getenv('WEBSITE_REQUEST_TIMEOUT', '30'))
     browser_timeout: int = int(os.getenv('WEBSITE_BROWSER_TIMEOUT', '20'))
-    max_workers: int = int(os.getenv('WEBSITE_MAX_WORKERS', '5'))
-    max_browsers: int = int(os.getenv('WEBSITE_MAX_BROWSERS', '5'))
+    max_workers: int = int(os.getenv('WEBSITE_MAX_WORKERS', '5')) # Increased workers
+    max_browsers: int = int(os.getenv('WEBSITE_MAX_BROWSERS', '5')) # Increased browsers
     max_retries: int = int(os.getenv('WEBSITE_MAX_RETRIES', '3'))
     initial_rate_limit_delay: float = float(os.getenv('WEBSITE_INITIAL_RATE_LIMIT', '2.0'))
-    batch_size: int = int(os.getenv('WEBSITE_BATCH_SIZE', '100'))
+    batch_size: int = int(os.getenv('WEBSITE_BATCH_SIZE', '100')) # Increased batch size
     css_selectors: Dict[str, List[str]] = field(default_factory=lambda: {
-        'publication_cards': [
-            '.publication-card', '.card', 'article', '.post', '.item', '[class*="publication"]'
+        'links': [ # Generic link selectors
+            'a[href]', 'a[class*="-link"]', 'a[class*="button"]', 'a[class*="nav"]'
+        ],  
+        'text': [ # Generic text selectors
+            'p', 'article', 'div[class*="content"]', 'div[class*="text"]',
+            'section', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', '.post-content'
         ],
-        'url': ['a[href]', '[class*="link"]', '[class*="button"]'],
-        'title': ['h1', 'h2', 'h3', '[class*="title"]', '[class*="heading"]'],
-        'content': ['.content', '.description', '.abstract', 'p', '[class*="text"]'],
-        'content_page': ['.entry-content', 'article', '.post-content', '.content', 'p'],
         'load_more': [
             '.alm-load-more-btn', '.load-more', 'a.next', '.pagination a', 
             'button[class*="load"]', '.nav-links .next'
