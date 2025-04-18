@@ -10,7 +10,7 @@ _pool: asyncpg.pool.Pool = None
 
 # Read credentials from environment
 DB_CONFIG = {
-    "host": os.getenv("POSTGRES_HOST", "postgres"),
+    "host": os.getenv("POSTGRES_HOST", "localhost"),
     "port": int(os.getenv("POSTGRES_PORT", 5432)),
     "user": os.getenv("POSTGRES_USER", "postgres"),
     "password": os.getenv("POSTGRES_PASSWORD", "p0stgres"),
