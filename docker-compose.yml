@@ -254,6 +254,7 @@ services:
       - AIRFLOW__CORE__LOAD_EXAMPLES=false
       - AIRFLOW_HOME=/opt/airflow
       - PYTHONPATH=/app
+      - AIRFLOW__LOGGING__LOGGING_LEVEL=WARNING
       - GEMINI_API_KEY=${GEMINI_API_KEY}
     volumes:
       - ./airflow/dags:/opt/airflow/dags
