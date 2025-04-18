@@ -142,9 +142,14 @@ class ContentPipeline:
     async def run(self) -> Dict:
         """
         Run the scraping pipeline with summarization and PDF processing, recursively fetching all internal links.
+        Returns a dictionary with processed pages and results.
         """
         results = {
             'processed_pages': 0,
+            'updated_pages': 0,
+            'processed_publications': 0,
+            'processed_experts': 0,
+            'processed_resources': 0,
             'processing_details': {'webpage_results': []}
         }
         
@@ -152,89 +157,102 @@ class ContentPipeline:
             logger.info("Starting content pipeline...")
             webpage_results = []
             current_batch = []
-            processed_pages = 0
-            self.visited_urls.clear()
+            processed_urls = set()
             to_visit_urls = set(self.start_urls)  # Start with base URLs
-            max_pages = 1000  # Increased limit for recursive crawling
+            max_pages = 1000  # Limit for recursive crawling
             
             # Fetch publications using WebsiteScraper
-            publications = self.scraper.fetch_content(max_pages=50)  # Increased max_pages
-            processed_pages += len(publications)
-            current_batch.extend(publications)
+            try:
+                publications = self.scraper.fetch_content(max_pages=50)
+                logger.info(f"Fetched {len(publications)} publications from WebsiteScraper")
+                current_batch.extend(publications)
+                processed_urls.update(item.get('url') or item.get('doi', '') for item in publications)
+                results['processed_publications'] += len([p for p in publications if p.get('type') == 'publication'])
+                results['processed_experts'] += len([p for p in publications if p.get('type') == 'expert'])
+                results['processed_resources'] += len([p for p in publications if p.get('type') == 'pdf'])
+            except Exception as e:
+                logger.error(f"Error fetching publications from WebsiteScraper: {str(e)}", exc_info=True)
             
-            # Fetch additional pages recursively
-            while to_visit_urls and processed_pages < max_pages:
+            # Recursively crawl additional pages
+            while to_visit_urls and results['processed_pages'] < max_pages:
                 url = to_visit_urls.pop()
-                if url in self.visited_urls:
+                if url in processed_urls or url in self.visited_urls:
+                    logger.debug(f"Skipping already visited URL: {url}")
                     continue
                 
-                page_data = self.scrape_page(url)
-                if not page_data:
-                    continue
-                
-                page_data = self.process_webpage(page_data)
-                if not page_data.get('url'):
-                    continue
-                
-                current_batch.append(page_data)
-                processed_pages += 1
-                
-                # Extract internal links for recursive crawling
                 try:
-                    response = requests.get(url, timeout=10)
-                    response.raise_for_status()
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    links = set(
-                        urljoin(url, a.get('href'))
-                        for a in soup.find_all('a', href=True)
-                        if urljoin(url, a.get('href')).startswith('https://aphrc.org')
-                        and not any(ext in a.get('href') for ext in ['.xml', '.jpg', '.png', '.css', '.js'])
-                    )
-                    logger.debug(f"Found {len(links)} internal links on {url}")
+                    page_data = self.scrape_page(url)
+                    if not page_data or not page_data.get('url'):
+                        logger.debug(f"No valid data scraped for URL: {url}")
+                        continue
                     
-                    to_visit_urls.update(links - self.visited_urls)
+                    page_data = self.process_webpage(page_data)
+                    if not page_data.get('url'):
+                        logger.debug(f"No valid processed data for URL: {url}")
+                        continue
                     
-                    for link in list(links)[:10]:  # Limit links per page to avoid overwhelming
-                        if link in self.visited_urls or processed_pages >= max_pages:
-                            continue
-                        link_data = self.scrape_page(link)
-                        if not link_data:
-                            continue
-                        link_data = self.process_webpage(link_data)
-                        if not link_data.get('url'):
-                            continue
-                        current_batch.append(link_data)
-                        processed_pages += 1
+                    current_batch.append(page_data)
+                    processed_urls.add(url)
+                    self.visited_urls.add(url)
+                    results['processed_pages'] += 1
+                    
+                    # Extract internal links for recursive crawling
+                    try:
+                        response = requests.get(url, timeout=10)
+                        response.raise_for_status()
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        links = set(
+                            urljoin(url, a.get('href'))
+                            for a in soup.find_all('a', href=True)
+                            if urljoin(url, a.get('href')).startswith('https://aphrc.org')
+                            and not any(ext in a.get('href').lower() for ext in ['.xml', '.jpg', '.png', '.css', '.js'])
+                        )
+                        logger.debug(f"Found {len(links)} internal links on {url}")
+                        to_visit_urls.update(links - processed_urls - self.visited_urls)
+                    except Exception as e:
+                        logger.error(f"Error fetching links from {url}: {str(e)}")
+                    
+                    # Batch handling
+                    if len(current_batch) >= self.batch_size:
+                        webpage_results.append({'batch': current_batch})
+                        results['updated_pages'] += len(current_batch)
+                        current_batch = []
+                    
+                    # Log progress
+                    if results['processed_pages'] % 100 == 0:
+                        logger.info(f"Processed {results['processed_pages']} pages, {len(to_visit_urls)} URLs remaining")
                 except Exception as e:
-                    logger.error(f"Error fetching links from {url}: {str(e)}")
-                
-                if len(current_batch) >= self.batch_size:
-                    webpage_results.append({'batch': current_batch})
-                    current_batch = []
-                
-                # Log progress
-                if processed_pages % 100 == 0:
-                    logger.info(f"Processed {processed_pages} pages, {len(to_visit_urls)} URLs remaining")
+                    logger.error(f"Error processing URL {url}: {str(e)}", exc_info=True)
+                    continue
             
-            # Process PDFs from collected URLs
-            pdf_urls = [item['url'] for item in current_batch if item.get('type') == 'pdf']
-            if pdf_urls:
-                pdf_results = self.pdf_processor.process_pdfs(pdf_urls)
-                current_batch.extend(pdf_results)
-                processed_pages += len(pdf_results)
-            
+            # Process remaining batch
             if current_batch:
                 webpage_results.append({'batch': current_batch})
+                results['updated_pages'] += len(current_batch)
             
-            results['processed_pages'] = processed_pages
+            # Process PDFs
+            pdf_urls = [item['url'] for item in current_batch if item.get('type') == 'pdf']
+            if pdf_urls:
+                try:
+                    pdf_results = self.pdf_processor.process_pdfs(pdf_urls)
+                    webpage_results.append({'batch': pdf_results})
+                    results['processed_resources'] += len(pdf_results)
+                    results['updated_pages'] += len(pdf_results)
+                    logger.info(f"Processed {len(pdf_results)} PDFs")
+                except Exception as e:
+                    logger.error(f"Error processing PDFs: {str(e)}", exc_info=True)
+            
             results['processing_details']['webpage_results'] = webpage_results
-            logger.info(f"Content pipeline completed: processed {processed_pages} pages")
+            logger.info(f"Content pipeline completed: processed {results['processed_pages']} pages, "
+                    f"{results['processed_publications']} publications, "
+                    f"{results['processed_experts']} experts, "
+                    f"{results['processed_resources']} PDFs")
             
             # Log scraper metrics
             logger.info(f"WebsiteScraper metrics: {self.scraper.get_metrics()}")
             
         except Exception as e:
-            logger.error(f"Error running content pipeline: {str(e)}", exc_info=True)
+            logger.error(f"Critical error in content pipeline: {str(e)}", exc_info=True)
         
         return results
 

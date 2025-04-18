@@ -889,36 +889,66 @@ class WebsiteScraper:
         return self.metrics.get_summary()
 
     def close(self):
+        """Clean up all resources used by the scraper."""
         try:
             logger.debug("Shutting down thread pool...")
-            if hasattr(self, 'executor'):
+            if hasattr(self, 'executor') and self.executor:
                 self.executor.shutdown(wait=True)
+                logger.debug("Thread pool shut down")
+            
             logger.debug("Closing browser pool...")
-            if hasattr(self, 'browser_pool'):
+            if hasattr(self, 'browser_pool') and self.browser_pool:
                 try:
                     self.browser_pool.close_all()
+                    logger.debug("Browser pool closed")
                 except Exception as e:
-                    logger.warning(f"Error closing browser pool: {e}")
+                    logger.warning(f"Error closing browser pool: {str(e)}")
+            
             logger.debug("Closing main driver...")
-            if hasattr(self, 'driver'):
+            if hasattr(self, 'driver') and self.driver:
                 try:
                     self.driver.quit()
+                    logger.debug("Main driver closed")
                 except Exception as e:
-                    logger.warning(f"Error closing main driver: {e}")
+                    logger.warning(f"Error closing main driver: {str(e)}")
+            
             logger.debug("Closing cache...")
-            if hasattr(self, 'cache'):
-                self.cache.close()
+            if hasattr(self, 'cache') and self.cache:
+                try:
+                    self.cache.close()
+                    logger.debug("Cache closed")
+                except Exception as e:
+                    logger.warning(f"Error closing cache: {str(e)}")
+            
             logger.debug("Closing HTTP session...")
-            if hasattr(self, 'session'):
-                self.session.close()
+            if hasattr(self, 'session') and self.session:
+                try:
+                    self.session.close()
+                    logger.debug("HTTP session closed")
+                except Exception as e:
+                    logger.warning(f"Error closing HTTP session: {str(e)}")
+            
             logger.debug("Closing summarizer...")
             if self._summarizer and hasattr(self._summarizer, 'close'):
-                self._summarizer.close()
+                try:
+                    self._summarizer.close()
+                    logger.debug("Summarizer closed")
+                except Exception as e:
+                    logger.warning(f"Error closing summarizer: {str(e)}")
+            
             self.seen_urls.clear()
             logger.info("WebsiteScraper resources cleaned up")
-            logger.info("Final metrics: %s", self.get_metrics())
+            logger.info(f"Final metrics: {self.get_metrics()}")
         except Exception as e:
-            logger.error(f"Error closing WebsiteScraper: {e}")
+            logger.error(f"Error during WebsiteScraper cleanup: {str(e)}", exc_info=True)
+        finally:
+            # Ensure attributes are reset to prevent reuse of closed resources
+            self.executor = None
+            self.browser_pool = None
+            self.driver = None
+            self.cache = None
+            self.session = None
+            logger.info("WebsiteScraper cleaned up")
 
     def __enter__(self):
         return self

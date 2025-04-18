@@ -122,76 +122,46 @@ class WebContentProcessor:
             return 0
 
     async def process_content(self) -> Dict:
-        """
-        Process web content and store scraped data in the webpages table.
-        """
+        """Process web content using the content pipeline."""
         try:
             logger.info("Starting web content processing...")
+            # Ensure ContentPipeline.run() is awaited
+            pipeline_results = await self.content_pipeline.run()
             
-            results = self.content_pipeline.run()
-            
-            if not isinstance(results, dict):
+            # Validate results
+            if not isinstance(pipeline_results, dict):
                 logger.error("ContentPipeline.run() did not return a dictionary")
                 raise ValueError("Invalid pipeline results format")
             
-            processed_pages = results.get('processed_pages', 0)
-            webpage_results = results.get('processing_details', {}).get('webpage_results', [])
+            required_keys = ['processed_pages', 'processing_details']
+            if not all(key in pipeline_results for key in required_keys):
+                logger.error(f"Pipeline results missing required keys: {pipeline_results}")
+                raise ValueError("Invalid pipeline results format")
             
-            if not webpage_results:
-                logger.warning("No webpage results received from pipeline")
-                return {
-                    'processed_pages': processed_pages,
-                    'updated_pages': 0,
-                    'processed_publications': 0,
-                    'processed_experts': 0,
-                    'processed_resources': 0,
-                    'processing_details': {'webpage_results': []}
-                }
+            if 'webpage_results' not in pipeline_results['processing_details']:
+                logger.error("Pipeline results missing webpage_results")
+                raise ValueError("Invalid pipeline results format")
             
-            updated_pages = 0
-            for batch in webpage_results:
-                batch_items = batch.get('batch', [])
-                if not isinstance(batch_items, list):
-                    logger.warning(f"Invalid batch format: {batch}")
-                    continue
-                for item in batch_items:
-                    if not isinstance(item, dict):
-                        logger.warning(f"Invalid item format: {item}")
-                        continue
-                    logger.debug(f"Processing item: {item.get('url', item.get('doi', 'unknown'))}")
-                    item_id = await self.insert_webpage(item)
-                    if item_id:
-                        updated_pages += 1
+            # Aggregate metrics
+            results = {
+                'processed_pages': pipeline_results.get('processed_pages', 0),
+                'updated_pages': pipeline_results.get('updated_pages', 0),
+                'processed_publications': pipeline_results.get('processed_publications', 0),
+                'processed_experts': pipeline_results.get('processed_experts', 0),
+                'processed_resources': pipeline_results.get('processed_resources', 0),
+                'processing_details': pipeline_results['processing_details']
+            }
             
-            processed_publications = sum(
-                1 for batch in webpage_results
-                for item in batch.get('batch', [])
-                if isinstance(item, dict) and item.get('content_type', item.get('type', '')) == 'publication'
-            )
-            processed_experts = sum(
-                1 for batch in webpage_results
-                for item in batch.get('batch', [])
-                if isinstance(item, dict) and item.get('content_type', item.get('type', '')) == 'expert'
-            )
-            processed_resources = sum(
-                1 for batch in webpage_results
-                for item in batch.get('batch', [])
-                if isinstance(item, dict) and item.get('content_type', item.get('type', '')) == 'pdf'
-            )
-            
-            logger.info(f"Processed {processed_pages} pages, inserted/updated {updated_pages} items, "
-                       f"found {processed_publications} publications, {processed_experts} experts, {processed_resources} resources")
-            
-            results['updated_pages'] = updated_pages
-            results['processed_publications'] = processed_publications
-            results['processed_experts'] = processed_experts
-            results['processed_resources'] = processed_resources
+            logger.info(f"Processed {results['processed_pages']} pages, "
+                    f"inserted/updated {results['updated_pages']} items, "
+                    f"found {results['processed_publications']} publications, "
+                    f"{results['processed_experts']} experts, "
+                    f"{results['processed_resources']} resources")
             
             return results
         except Exception as e:
             logger.error(f"Error processing web content: {str(e)}", exc_info=True)
             raise
-
     def cleanup(self):
         """Clean up resources."""
         try:

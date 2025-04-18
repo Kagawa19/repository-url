@@ -160,7 +160,7 @@ class SystemInitializer:
             raise
 
     async def process_web_content(self) -> Dict:
-        """Process web content and map publications to resources_resource table."""
+        """Process web content and map publications and experts to database tables."""
         try:
             logger.info("\n" + "="*50)
             logger.info("Processing web content...")
@@ -192,17 +192,15 @@ class SystemInitializer:
                     f"and {len(pdfs)} PDFs to process")
             
             # Map publications to resources_resource
-            successful_mappings = 0
+            successful_pub_mappings = 0
             for publication in publications:
                 try:
-                    # Validate required fields
                     doi = publication.get('doi') or publication.get('url')
                     title = publication.get('title')
                     if not doi or not title:
                         logger.warning(f"Skipping publication with missing doi or title: {publication}")
                         continue
                     
-                    # Map to resources_resource table
                     self.db.add_publication(
                         title=title or 'Untitled',
                         summary=publication.get('summary', publication.get('content', ''))[:1000],
@@ -213,10 +211,41 @@ class SystemInitializer:
                         publication_year=publication.get('publication_year'),
                         doi=doi
                     )
-                    successful_mappings += 1
+                    successful_pub_mappings += 1
                     logger.debug(f"Mapped publication: {doi}")
                 except Exception as e:
                     logger.error(f"Failed to map publication {doi or 'unknown'}: {str(e)}")
+            
+            # Map experts to experts_expert
+            successful_exp_mappings = 0
+            for expert in experts:
+                try:
+                    url = expert.get('doi') or expert.get('url')
+                    name = expert.get('title')
+                    if not url or not name:
+                        logger.warning(f"Skipping expert with missing url or name: {expert}")
+                        continue
+                    
+                    # Check if expert already exists
+                    existing = self.db.execute("""
+                        SELECT id FROM experts_expert WHERE url = %s
+                    """, (url,))
+                    
+                    if not existing:
+                        self.db.execute("""
+                            INSERT INTO experts_expert (name, affiliation, contact_email, url, is_active)
+                            VALUES (%s, %s, %s, %s, %s)
+                        """, (
+                            name or 'Unknown Expert',
+                            expert.get('affiliation', 'APHRC'),
+                            expert.get('contact_email'),
+                            url,
+                            True
+                        ))
+                        successful_exp_mappings += 1
+                        logger.debug(f"Mapped expert: {url}")
+                except Exception as e:
+                    logger.error(f"Failed to map expert {url or 'unknown'}: {str(e)}")
             
             # Log results and scraper metrics
             logger.info(f"""Web Content Processing Results:
@@ -225,7 +254,8 @@ class SystemInitializer:
                 Publications Processed: {results.get('processed_publications', 0)}
                 Experts Processed: {results.get('processed_experts', 0)}
                 PDFs Processed: {results.get('processed_resources', 0)}
-                Publications Mapped: {successful_mappings}
+                Publications Mapped: {successful_pub_mappings}
+                Experts Mapped: {successful_exp_mappings}
                 Processing Time: {processing_time:.2f} seconds
                 Average Time Per Page: {processing_time/max(results.get('processed_pages', 1), 1):.2f} seconds
             """)
