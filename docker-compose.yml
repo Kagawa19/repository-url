@@ -45,6 +45,12 @@ services:
       - SKIP_CLASSIFICATION=${SKIP_CLASSIFICATION:-false}
       - SKIP_REDIS=${SKIP_REDIS:-false}
       - CHROME_BIN=/usr/bin/chromium
+      - WEBSITE_URL=https://aphrc.org
+      - WEBSITE_MAX_WORKERS=5
+      - WEBSITE_MAX_BROWSERS=2
+      - WEBSITE_BATCH_SIZE=100
+      - MAX_WORKERS=5
+      - BATCH_SIZE=100
       - CHROME_BINARY=/usr/bin/chromium
       - CHROMEDRIVER_PATH=/usr/bin/chromedriver
       - CHROME_TMPDIR=/tmp/chrome-data
