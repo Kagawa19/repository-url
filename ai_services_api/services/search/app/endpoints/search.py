@@ -2,6 +2,10 @@ import datetime
 from typing import Any, List, Dict, Optional
 from pydantic import BaseModel
 import logging
+from datetime import datetime
+
+import json
+from decimal import Decimal
 import redis
 from redis.asyncio import Redis
 import uuid
@@ -39,22 +43,45 @@ router = APIRouter()
 
 # Constants
 TEST_USER_ID = "123"
-
+REDIS_CACHE_EXPIRATION = 900
 # Initialize global categorizer instance (will be lazily initialized when needed)
 _categorizer = None
 
-# Helper functions for user ID extraction
+
+
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return float(obj)
+        return super().default(obj)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+TEST_USER_ID = "123"
+
+async def get_redis():
+    try:
+        redis_client = Redis(host='redis', port=6379, db=2, decode_responses=True)
+        logger.info("Redis connection established")
+        return redis_client
+    except Exception as e:
+        logger.error(f"Redis connection failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Redis connection failed")
+
 async def get_user_id(request: Request) -> str:
-    logger.debug("Extracting user ID from request headers")
     user_id = request.headers.get("X-User-ID")
     if not user_id:
-        logger.error("Missing required X-User-ID header in request")
-        raise HTTPException(status_code=400, detail="X-User-ID header is required")
-    logger.info(f"User ID extracted successfully: {user_id}")
+        logger.error("Missing X-User-ID header")
+        raise HTTPException(status_code=400, detail="X-User-ID header required")
+    logger.info(f"Extracted user ID: {user_id}")
     return user_id
 
 async def get_test_user_id(request: Request) -> str:
-    logger.debug("Using test user ID")
     return TEST_USER_ID
 
 @router.get("/test/experts/search/{query}")
@@ -70,153 +97,209 @@ async def advanced_search(
     designation: Optional[str] = None,
     publication: Optional[str] = None
 ):
-    """
-    Advanced search endpoint to search experts and resources based on multiple criteria.
+    logger.info(f"Advanced search - User: {user_id}")
     
-    Allows searching by:
-    - Experts (name, theme, designation)
-    - Publications
-    - Flexible combination of search parameters
-    """
-    logger.info(f"Advanced search request - User: {user_id}")
-    
-    # Validate search parameters
     search_params = [query, name, theme, designation, publication]
     if all(param is None for param in search_params):
-        raise HTTPException(
-            status_code=400, 
-            detail="At least one search parameter must be provided"
-        )
-    
-    # Determine search type priority
-    if search_type:
-        valid_search_types = ["name", "theme", "designation", "publication", "general"]
-        if search_type not in valid_search_types:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Invalid search type. Must be one of: {', '.join(valid_search_types)}"
-            )
-    
+        raise HTTPException(status_code=400, detail="Need at least one search param")
+
+    valid_search_types = ["name", "theme", "designation", "publication", "general"]
+    if search_type and search_type not in valid_search_types:
+        raise HTTPException(status_code=400, detail="Invalid search type")
+
     try:
-        # Construct effective query based on parameters
         effective_query = query or ""
-        
-        # Add structured fields to the query if provided
         if name and (not search_type or search_type == "name"):
             effective_query = f"{effective_query} {name}".strip()
-        
         if theme and (not search_type or search_type == "theme"):
             effective_query = f"{effective_query} theme:{theme}".strip()
-        
         if designation and (not search_type or search_type == "designation"):
             effective_query = f"{effective_query} designation:{designation}".strip()
-        
         if publication and (not search_type or search_type == "publication"):
             effective_query = f"{effective_query} publication:{publication}".strip()
-        
-        # If no effective query was constructed but we have a search type,
-        # use that search type as the query itself
-        if not effective_query and search_type and search_type != "general":
-            effective_query = search_type
-        
-        logger.info(f"Constructed effective query: '{effective_query}'")
-        
-        # Try to categorize the query if not already specified in search_type
+
+        logger.info(f"Effective query: '{effective_query}'")
+
         if effective_query and not search_type:
             try:
-                # Get categorizer
                 categorizer = await get_search_categorizer()
-                
                 if categorizer:
-                    # Categorize the query
                     category_info = await categorizer.categorize_query(effective_query, user_id)
                     detected_category = category_info.get("category")
-                    
-                    # Use detected category as search type if it's one of our valid types
                     if detected_category in ["name", "theme", "designation", "publication"]:
                         search_type = detected_category
-                        logger.info(f"Query '{effective_query}' categorized as '{search_type}'")
-            except Exception as category_error:
-                logger.warning(f"Error categorizing query: {category_error}")
-        
-        # Select the appropriate search method based on search type
+                        logger.info(f"Detected category: {search_type}")
+            except Exception as e:
+                logger.warning(f"Categorization error: {e}")
+
         if search_type == "name" and name:
             search_response = await process_expert_name_search(
-                name=name,
-                user_id=user_id,
-                active_only=active_only,
-                k=k
-            )
+                name=name, user_id=user_id, active_only=active_only, k=k)
         elif search_type == "theme" and theme:
             search_response = await process_expert_theme_search(
-                theme=theme,
-                user_id=user_id,
-                active_only=active_only,
-                k=k
-            )
+                theme=theme, user_id=user_id, active_only=active_only, k=k)
         elif search_type == "designation" and designation:
             search_response = await process_expert_designation_search(
-                designation=designation,
-                user_id=user_id,
-                active_only=active_only,
-                k=k
-            )
+                designation=designation, user_id=user_id, active_only=active_only, k=k)
         elif search_type == "publication" and publication:
             search_response = await process_publication_search(
-                publication=publication,
-                user_id=user_id,
-                k=k
-            )
+                publication=publication, user_id=user_id, k=k)
         else:
-            # Use the unified process_expert_search function for general search
-            # This now includes direct name matching for suggestion clicks
             search_response = await process_expert_search(
-                query=effective_query,
-                user_id=user_id,
-                active_only=active_only,
-                k=k
-            )
-        
-        # Add category information to response if available
+                query=effective_query, user_id=user_id, active_only=active_only, k=k)
+
         if effective_query:
             try:
-                categorizer = await get_search_categorizer()
-                if categorizer:
-                    category_info = await categorizer.categorize_query(effective_query, user_id)
-                    
-                    # Add category information to response metadata
-                    if hasattr(search_response, "metadata"):
-                        search_response.metadata = search_response.metadata or {}
-                        search_response.metadata["category"] = category_info.get("category", "general")
-                        search_response.metadata["category_confidence"] = category_info.get("confidence", 0.0)
-            except Exception as category_error:
-                logger.warning(f"Error adding category to response: {category_error}")
-        
-        # NEW: Record the search in user history
-        if effective_query:  # Only record non-empty queries
-            try:
                 redis_client = await get_redis()
-                await track_user_search(
-                    redis_client, 
-                    user_id, 
-                    effective_query, 
-                    search_type or "general"
-                )
-            except Exception as track_error:
-                logger.warning(f"Error tracking search history: {track_error}")
-        
-        # Log search results
-        logger.info(f"Search completed with {search_response.total_results} results")
-        
+                await track_user_search(redis_client, user_id, effective_query, search_type or "general")
+            except Exception as e:
+                logger.warning(f"Search tracking failed: {e}")
+
+        logger.info(f"Found {search_response.total_results} results")
         return search_response
+
+    except Exception as e:
+        logger.error(f"Search error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Search processing failed")
+
+async def track_user_search(redis_client: Redis, user_id: str, query: str, category: str):
+    try:
+        key = f"user_search_history:{user_id}"
+        timestamp = datetime.now().timestamp()
+        detail_key = f"user_search_details:{user_id}:{timestamp}:{query}"
+        
+        await redis_client.zadd(key, {f"{timestamp}:{query}": timestamp})
+        await redis_client.hset(detail_key, mapping={
+            "query": query,
+            "timestamp": str(timestamp),
+            "category": category
+        })
+        await redis_client.expire(detail_key, 604800)
+        await redis_client.zremrangebyrank(key, 0, -21)
+        await redis_client.expire(key, 2592000)
+        
+    except Exception as e:
+        logger.error(f"Search tracking error: {e}")
+
+@router.get("/experts/predict/{partial_query}")
+async def predict_query(
+    partial_query: str,
+    request: Request,
+    user_id: str = Depends(get_user_id),
+    search_type: Optional[str] = None,
+    limit: int = 10
+):
+    cleaned_query = partial_query.strip()
+    logger.info(f"Prediction request: '{cleaned_query}'")
+
+    if not cleaned_query:
+        try:
+            redis_client = await get_redis()
+            recent_searches = await get_user_recent_searches(redis_client, user_id, limit)
+            predictions = [{
+                "text": s["query"],
+                "category": s["category"],
+                "source": "history",
+                "score": 1.0
+            } for s in recent_searches]
+            return PredictionResponse(
+                query=partial_query,
+                predictions=predictions,
+                total_results=len(predictions),
+                metadata={"source": "history"}
+            )
+        except Exception as e:
+            logger.warning(f"Recent searches failed: {e}")
+
+    valid_search_types = ["name", "theme", "designation", "publication", None]
+    if search_type and search_type not in valid_search_types[:-1]:
+        raise HTTPException(status_code=400, detail="Invalid search type")
+
+    try:
+        return await process_advanced_query_prediction(
+            partial_query, 
+            user_id, 
+            search_type, 
+            limit
+        )
+    except Exception as e:
+        logger.error(f"Prediction error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Prediction failed")
+
+async def get_user_recent_searches(redis_client: Redis, user_id: str, limit: int) -> list:
+    key = f"user_search_history:{user_id}"
+    recent_searches = await redis_client.zrevrange(key, 0, limit-1, withscores=True)
+    
+    results = []
+    for search_key, score in recent_searches:
+        parts = search_key.split(':', 1)
+        if len(parts) != 2:
+            continue
+            
+        timestamp, query = parts
+        detail_key = f"user_search_details:{user_id}:{timestamp}:{query}"
+        details = await redis_client.hgetall(detail_key)
+        
+        if not details:
+            details = {"query": query, "timestamp": str(score), "category": "general"}
+            
+        results.append({
+            "query": query,
+            "timestamp": float(details.get("timestamp", score)),
+            "category": details.get("category", "general")
+        })
+    
+    return results
+
+@router.get("/health")
+async def health_check():
+    try:
+        components = {"database": "healthy", "redis": "healthy", "categorizer": "not_configured"}
+        
+        redis_client = await get_redis()
+        await redis_client.ping()
+        
+        try:
+            categorizer = await get_search_categorizer()
+            components["categorizer"] = "healthy" if categorizer else "not_loaded"
+        except Exception as e:
+            components["categorizer"] = f"error: {str(e)}"
+        
+        return {
+            "status": "ok",
+            "timestamp": datetime.now().isoformat(),
+            "components": components
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {"status": "error", "error": str(e), "timestamp": datetime.now().isoformat()}
+
+@router.delete("/cache/search/{user_id}")
+async def clear_user_search_cache(user_id: str, redis_client: Redis = Depends(get_redis)):
+    try:
+        patterns = [
+            f"user_search:{user_id}:*",
+            f"query_prediction:{user_id}:*",
+            f"expert_search:{user_id}:*",
+            f"personalization:{user_id}:*",
+            f"category:{user_id}:*"
+        ]
+        
+        total_deleted = 0
+        for pattern in patterns:
+            async for key in redis_client.scan_iter(match=pattern):
+                await redis_client.delete(key)
+                total_deleted += 1
+        
+        logger.info(f"Cleared cache for {user_id}")
+        return {"status": "success", "total_deleted": total_deleted}
     
     except Exception as e:
-        logger.error(f"Error in advanced search: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500, 
-            detail="An error occurred while processing the advanced search"
-        )
+        logger.error(f"Cache clear failed: {e}")
+        raise HTTPException(status_code=500, detail="Cache clearance failed")
 
+# All other endpoints from original code with identical implementations
+# [Include any remaining endpoints from your original code here]
 async def track_user_search(redis_client: Redis, user_id: str, query: str, category: str = "general") -> None:
     """
     Track a user's search query in their history.
@@ -405,128 +488,7 @@ async def clear_recent_searches(
             status_code=500,
             detail=f"An error occurred while clearing recent searches: {str(e)}"
         )
-# Replace the advanced_predict endpoint with the simpler 'predict' path
-@router.get("/experts/predict/{partial_query}")
-async def predict_query(
-    partial_query: str,
-    request: Request,
-    user_id: str = Depends(get_user_id),
-    search_type: Optional[str] = None,
-    limit: int = 10
-):
-    """
-    Generate query predictions based on partial input.
-    If partial_query is empty or just whitespace, returns recent searches instead.
-    """
-    # Clean the partial query
-    cleaned_query = partial_query.strip()
-    
-    logger.info(f"Received query prediction request - Partial query: '{cleaned_query}', Search Type: {search_type}")
-    
-    # If query is empty or just whitespace, return recent searches
-    if not cleaned_query:
-        try:
-            # Get recent searches
-            redis_client = await get_redis()
-            recent_searches = await get_user_recent_searches(redis_client, user_id, limit)
-            
-            # Format as prediction response
-            predictions = []
-            for search in recent_searches:
-                predictions.append({
-                    "text": search["query"],
-                    "category": search["category"],
-                    "source": "history",
-                    "score": 1.0  # Give high score to prioritize history items
-                })
-            
-            return PredictionResponse(
-                query=partial_query,
-                predictions=predictions,
-                total_results=len(predictions),
-                metadata={"source": "history"}
-            )
-        except Exception as e:
-            logger.warning(f"Error getting recent searches: {e}")
-            # If there's an error, continue with normal prediction
-    
-    # Validate search type
-    valid_search_types = ["name", "theme", "designation", "publication", None]
-    if search_type and search_type not in valid_search_types[:-1]:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Invalid search type. Must be one of: {', '.join(valid_search_types[:-1])}"
-        )
-    
-    try:
-        # Process advanced query prediction (original logic)
-        return await process_advanced_query_prediction(
-            partial_query, 
-            user_id, 
-            search_type, 
-            limit
-        )
-    
-    except Exception as e:
-        logger.error(f"Error in query prediction: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500, 
-            detail=f"An error occurred while generating predictions: {str(e)}"
-        )
-    
-async def get_user_recent_searches(redis_client: Redis, user_id: str, limit: int = 5) -> list:
-    """
-    Get a user's recent searches from Redis.
-    
-    Args:
-        redis_client: Redis client instance
-        user_id: User ID
-        limit: Maximum number of searches to return
-        
-    Returns:
-        List of recent search objects
-    """
-    # Key for this user's search history
-    key = f"user_search_history:{user_id}"
-    
-    # Get the latest entries (highest scores) with their scores
-    recent_searches = await redis_client.zrevrange(
-        key, 
-        0, 
-        limit - 1,
-        withscores=True
-    )
-    
-    # Format results
-    result = []
-    for search_key, score in recent_searches:
-        # Parse the search key (timestamp:query)
-        parts = search_key.split(':', 1)
-        if len(parts) != 2:
-            continue
-            
-        timestamp, query = parts
-        
-        # Get detailed information
-        detail_key = f"user_search_details:{user_id}:{timestamp}:{query}"
-        details = await redis_client.hgetall(detail_key)
-        
-        if not details:
-            # Fall back to just the basic info if details not found
-            details = {
-                "query": query,
-                "timestamp": str(score),
-                "category": "general"
-            }
-        
-        # Add to results
-        result.append({
-            "query": query,
-            "timestamp": float(details.get("timestamp", score)),
-            "category": details.get("category", "general")
-        })
-    
-    return result
+
 
 @router.post("/experts/track-suggestion")
 async def track_suggestion(
@@ -591,45 +553,6 @@ async def track_suggestion(
             "error": str(track_error)
         }
 
-# Health check endpoint with categorizer status
-@router.get("/health")
-async def health_check():
-    """API health check endpoint."""
-    try:
-        components = {
-            "database": "healthy",  # Assuming database is healthy
-            "categorizer": "not_configured"
-        }
-        
-        # Check Gemini API connectivity
-        from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
-        predictor = GoogleAutocompletePredictor()
-        components["gemini"] = "healthy"
-        
-        # Check categorizer status
-        try:
-            categorizer = await get_search_categorizer()
-            if categorizer:
-                if categorizer.gemini_model:
-                    components["categorizer"] = "healthy"
-                else:
-                    components["categorizer"] = "no_gemini_api"
-        except Exception as cat_error:
-            components["categorizer"] = f"error: {str(cat_error)}"
-        
-        return {
-            "status": "ok",
-            "timestamp": datetime.now().isoformat(),
-            "components": components
-        }
-    except Exception as e:
-        logger.error(f"Health check failed: {e}", exc_info=True)
-        return {
-            "status": "error",
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
-        }
-    
 
 
 async def get_redis():
@@ -642,41 +565,7 @@ async def get_redis():
         logging.error(f"Failed to establish Redis connection: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Redis connection failed")
 
-# Add these to your existing router
-@router.delete("/cache/search/{user_id}")
-async def clear_user_search_cache(
-    user_id: str,
-    redis_client: Redis = Depends(get_redis)
-) -> Dict:
-    """Clear search cache for a specific user"""
-    try:
-        # Common patterns for search-related caches
-        patterns = [
-            f"user_search:{user_id}:*",        # Search results
-            f"query_prediction:{user_id}:*",    # Query predictions
-            f"expert_search:{user_id}:*",       # Expert search results
-            f"personalization:{user_id}:*",     # User personalization data
-            f"category:{user_id}:*"             # Category cache for user queries
-        ]
-        
-        total_deleted = 0
-        for pattern in patterns:
-            # Use scan_iter to get all matching keys for this pattern
-            async for key in redis_client.scan_iter(match=pattern):
-                await redis_client.delete(key)
-                total_deleted += 1
-        
-        logging.info(f"Search cache cleared for user {user_id}. Total keys deleted: {total_deleted}")
-        
-        return {
-            "status": "success", 
-            "message": f"Search cache cleared for user {user_id}", 
-            "total_deleted": total_deleted
-        }
-    
-    except Exception as e:
-        logging.error(f"Failed to clear search cache for user {user_id}: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Cache clearing error: {str(e)}")
+
 
 @router.delete("/cache/search")
 async def clear_all_search_cache(
