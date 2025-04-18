@@ -3,6 +3,13 @@ import redis
 from fastapi import HTTPException
 from typing import Any, List, Dict, Optional, Tuple
 import logging
+import asyncpg
+from asyncpg import Pool, Connection
+from fastapi import HTTPException
+import logging
+import random
+import time
+
 from datetime import datetime
 import json
 import uuid
@@ -256,49 +263,63 @@ async def get_predictor():
 # Method: get_or_create_session
 # Location: ai_services_api/services/search/app/endpoints/process_functions.py
 # Changes: Fixed async cursor handling for PostgreSQL
-async def get_or_create_session(conn, user_id: str, max_retries: int = 3) -> int:
-    """Create session with proper async cursor handling"""
-    from asyncpg.exceptions import UniqueViolationError
-    import asyncpg
-    
-    logger = logging.getLogger(__name__)
-    
-    for attempt in range(1, max_retries+1):
-        try:
-            session_id = random.randint(10_000_000, 99_999_999)
-            
-            # Proper async cursor execution
-            async with conn.transaction():
-                result = await conn.fetchrow("""
-                    INSERT INTO search_sessions 
-                        (session_id, user_id, start_timestamp, is_active)
-                    VALUES ($1, $2, NOW(), true)
-                    ON CONFLICT (session_id) DO UPDATE
-                        SET last_active = NOW()
-                    RETURNING session_id
-                """, session_id, user_id)
-                
-                if result:
+# Method: Database Operations
+# Location: ai_services_api/services/search/core/database.py
+# Changes: Full asyncpg implementation with connection pooling
+
+
+# Database connection pool
+_pool: Optional[Pool] = None
+
+async def create_pool():
+    global _pool
+    _pool = await asyncpg.create_pool(
+        host='postgres',
+        user='your_user',
+        password='your_password',
+        database='aphrc',
+        min_size=5,
+        max_size=20
+    )
+
+async def get_connection() -> Connection:
+    if not _pool:
+        await create_pool()
+    return await _pool.acquire()
+
+async def release_connection(conn: Connection):
+    await _pool.release(conn)
+
+async def get_or_create_session(user_id: str) -> int:
+    """Create session with proper asyncpg transaction handling"""
+    conn = await get_connection()
+    try:
+        for attempt in range(3):
+            try:
+                session_id = int(f"{int(time.time())}{random.randint(1000,9999)}")
+                async with conn.transaction():
+                    result = await conn.fetchrow("""
+                        INSERT INTO search_sessions 
+                            (session_id, user_id, start_timestamp, is_active)
+                        VALUES ($1, $2, NOW(), true)
+                        ON CONFLICT (session_id) DO UPDATE
+                            SET last_active = NOW()
+                        RETURNING session_id
+                    """, session_id, user_id)
                     return result['session_id']
-                
-        except UniqueViolationError:
-            logger.warning(f"Session ID collision {session_id}, retry {attempt}/{max_retries}")
-            continue
-            
-        except asyncpg.PostgresError as e:
-            logger.error(f"Database error: {str(e)}")
-            raise HTTPException(status_code=500, detail="Session creation failed")
+            except asyncpg.UniqueViolationError:
+                logger.warning(f"Session ID collision {session_id}, retry {attempt+1}")
+                continue
+            except asyncpg.PostgresError as e:
+                logger.error(f"Database error: {e}")
+                raise HTTPException(status_code=500, detail="Session creation failed")
+    finally:
+        await release_connection(conn)
 
-    raise HTTPException(status_code=500, detail="Failed to create session after retries")
-
-# Method: record_prediction
-# Location: ai_services_api/services/search/app/endpoints/process_functions.py
-# Changes: Fixed async database operations
-async def record_prediction(conn, session_id: int, user_id: str, query: str, 
+async def record_prediction(session_id: int, user_id: str, query: str, 
                           predictions: List[str], scores: List[float]):
-    """Record prediction with proper async execution"""
-    from asyncpg.exceptions import PostgresError
-    
+    """Async prediction recording with batch insert"""
+    conn = await get_connection()
     try:
         async with conn.transaction():
             # Insert search entry
@@ -309,18 +330,16 @@ async def record_prediction(conn, session_id: int, user_id: str, query: str,
             """, session_id, user_id, query)
 
             # Batch insert predictions
-            prediction_data = [(session_id, pred, score) 
-                              for pred, score in zip(predictions, scores)]
-            
-            await conn.executemany("""
-                INSERT INTO search_predictions
-                    (session_id, prediction_text, confidence_score)
-                VALUES ($1, $2, $3)
-            """, prediction_data)
-            
-    except PostgresError as e:
-        logger.error(f"Failed to record prediction: {str(e)}")
-        raise
+            if predictions:
+                await conn.executemany("""
+                    INSERT INTO search_predictions
+                        (session_id, prediction_text, confidence_score)
+                    VALUES ($1, $2, $3)
+                """, [(session_id, pred, score) for pred, score in zip(predictions, scores)])
+    except asyncpg.PostgresError as e:
+        logger.error(f"Prediction recording failed: {e}")
+    finally:
+        await release_connection(conn)
 
 async def _record_prediction_async(conn, session_id: str, user_id: str, partial_query: str, predictions: List[str], confidence_scores: List[float]):
     """Asynchronous helper for recording predictions in the database."""
