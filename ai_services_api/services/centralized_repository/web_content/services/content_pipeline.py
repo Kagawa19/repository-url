@@ -43,21 +43,25 @@ class ContentPipeline:
             return {}
 
         # Assign content_type
-        if '/person/' in url:
-            content_type = 'expert'
-        elif url.endswith('.pdf'):
+        content_type = 'webpage'
+        if url.endswith('.pdf'):
             content_type = 'pdf'
-        else:
-            content_type = 'webpage'
-            if any(keyword in url or keyword in title for keyword in ['publication', 'report', 'research', 'project']):
-                content_type = 'publication'
+        elif any(keyword in url for keyword in ['/person/', '/staff/', '/team/', '/researcher/']):
+            content_type = 'expert'
+        elif any(keyword in url or keyword in title for keyword in ['publication', 'report', 'research', 'project', 'article']):
+            content_type = 'publication'
+
+        # Heuristic-based expert detection using content
+        if content_type == 'webpage' and any(keyword in content.lower() for keyword in ['researcher profile', 'staff profile', 'team member', 'expert bio']):
+            content_type = 'expert'
 
         # Extract additional data for experts
         affiliation = None
         contact_email = None
         if content_type == 'expert':
             soup = BeautifulSoup(page_data.get('raw_html', ''), 'html.parser')
-            aff_elem = soup.find(class_='affiliation') or soup.find('div', string=re.compile('affiliation|organization', re.I))
+            aff_elem = soup.find(class_=re.compile('affiliation|organization|institute', re.I)) or \
+                    soup.find('div', string=re.compile('affiliation|organization|institute', re.I))
             affiliation = aff_elem.get_text(strip=True) if aff_elem else 'APHRC'
             email_elem = soup.find('a', href=re.compile(r'^mailto:'))
             contact_email = email_elem.get('href').replace('mailto:', '') if email_elem else None
@@ -79,7 +83,7 @@ class ContentPipeline:
         if content_type == 'expert':
             page_data['affiliation'] = affiliation
             page_data['contact_email'] = contact_email
-        logger.debug(f"Processed page: url={url}, content_type={content_type}, title={title[:50]}...")
+        logger.debug(f"Processed page: url={url}, type={content_type}, title={title[:50]}...")
         return page_data
 
     def scrape_page(self, url: str) -> Dict:
@@ -94,16 +98,23 @@ class ContentPipeline:
             response = requests.get(url, timeout=10)
             response.raise_for_status()
             
-            parser = 'xml' if url.endswith('.xml') else 'html.parser'
+            # Skip non-HTML pages for navigation and content extraction
+            if any(ext in url.lower() for ext in ['.xml', '.json']):
+                logger.debug(f"Skipping content extraction for non-HTML URL: {url}")
+                return {'url': url, 'title': 'Non-HTML', 'content': '', 'type': 'webpage', 'raw_html': ''}
+
+            parser = 'html.parser'
             soup = BeautifulSoup(response.text, parser)
             
             title = soup.title.string if soup.title else 'Untitled'
             content = ' '.join(p.get_text(strip=True) for p in soup.find_all('p'))
             
             nav_text = ''
-            nav_elements = (soup.find_all('nav') or 
-                           soup.find_all('ul', class_=re.compile('menu|nav|navigation|main-menu|primary-menu', re.I)) or
-                           soup.find_all(class_=re.compile('menu|nav|navigation', re.I)))
+            nav_elements = (
+                soup.find_all('nav') or 
+                soup.find_all('ul', class_=re.compile('menu|nav|navigation|main-menu|primary-menu|footer-menu', re.I)) or
+                soup.find_all(class_=re.compile('menu|nav|navigation|site-nav|header-nav', re.I))
+            )
             if nav_elements:
                 nav_links = []
                 for nav in nav_elements:
@@ -112,7 +123,7 @@ class ContentPipeline:
                 nav_text = ' | '.join(set(nav_links))[:1000]
                 logger.debug(f"Extracted navigation text for {url}: {nav_text[:100]}...")
             else:
-                logger.warning(f"No navigation elements found for {url}")
+                logger.debug(f"No navigation elements found for {url}")
             
             page_data = {
                 'url': url,
@@ -128,9 +139,9 @@ class ContentPipeline:
             logger.error(f"Error scraping {url}: {str(e)}")
             return {}
 
-    def run(self) -> Dict:
+    async def run(self) -> Dict:
         """
-        Run the scraping pipeline with summarization and PDF processing.
+        Run the scraping pipeline with summarization and PDF processing, recursively fetching all internal links.
         """
         results = {
             'processed_pages': 0,
@@ -143,59 +154,56 @@ class ContentPipeline:
             current_batch = []
             processed_pages = 0
             self.visited_urls.clear()
+            to_visit_urls = set(self.start_urls)  # Start with base URLs
+            max_pages = 1000  # Increased limit for recursive crawling
             
             # Fetch publications using WebsiteScraper
-            publications = self.scraper.fetch_content(max_pages=10)
+            publications = self.scraper.fetch_content(max_pages=50)  # Increased max_pages
             processed_pages += len(publications)
             current_batch.extend(publications)
             
-            # Fetch additional pages from sitemap
-            sitemap_url = 'https://aphrc.org/sitemap.xml'
-            urls = []
-            try:
-                logger.info(f"Fetching sitemap: {sitemap_url}")
-                response = requests.get(sitemap_url, timeout=10)
-                response.raise_for_status()
-                soup = BeautifulSoup(response.text, 'xml')
-                urls = [loc.text for loc in soup.find_all('loc') if loc.text.startswith('https://aphrc.org')]
-                logger.info(f"Fetched {len(urls)} URLs from sitemap")
-            except Exception as e:
-                logger.warning(f"Failed to fetch sitemap: {str(e)}. Falling back to start_urls.")
-                urls = self.start_urls
-            
-            # Scrape additional pages and extract links
-            for url in urls[:100]:
+            # Fetch additional pages recursively
+            while to_visit_urls and processed_pages < max_pages:
+                url = to_visit_urls.pop()
                 if url in self.visited_urls:
                     continue
+                
                 page_data = self.scrape_page(url)
                 if not page_data:
                     continue
+                
                 page_data = self.process_webpage(page_data)
                 if not page_data.get('url'):
                     continue
+                
                 current_batch.append(page_data)
                 processed_pages += 1
                 
+                # Extract internal links for recursive crawling
                 try:
                     response = requests.get(url, timeout=10)
+                    response.raise_for_status()
                     soup = BeautifulSoup(response.text, 'html.parser')
                     links = set(
                         urljoin(url, a.get('href'))
                         for a in soup.find_all('a', href=True)
                         if urljoin(url, a.get('href')).startswith('https://aphrc.org')
+                        and not any(ext in a.get('href') for ext in ['.xml', '.jpg', '.png', '.css', '.js'])
                     )
-                    logger.debug(f"Found {len(links)} links on {url}")
+                    logger.debug(f"Found {len(links)} internal links on {url}")
                     
-                    for link in list(links)[:5]:
-                        if link in self.visited_urls:
+                    to_visit_urls.update(links - self.visited_urls)
+                    
+                    for link in list(links)[:10]:  # Limit links per page to avoid overwhelming
+                        if link in self.visited_urls or processed_pages >= max_pages:
                             continue
-                        page_data = self.scrape_page(link)
-                        if not page_data:
+                        link_data = self.scrape_page(link)
+                        if not link_data:
                             continue
-                        page_data = self.process_webpage(page_data)
-                        if not page_data.get('url'):
+                        link_data = self.process_webpage(link_data)
+                        if not link_data.get('url'):
                             continue
-                        current_batch.append(page_data)
+                        current_batch.append(link_data)
                         processed_pages += 1
                 except Exception as e:
                     logger.error(f"Error fetching links from {url}: {str(e)}")
@@ -203,6 +211,10 @@ class ContentPipeline:
                 if len(current_batch) >= self.batch_size:
                     webpage_results.append({'batch': current_batch})
                     current_batch = []
+                
+                # Log progress
+                if processed_pages % 100 == 0:
+                    logger.info(f"Processed {processed_pages} pages, {len(to_visit_urls)} URLs remaining")
             
             # Process PDFs from collected URLs
             pdf_urls = [item['url'] for item in current_batch if item.get('type') == 'pdf']

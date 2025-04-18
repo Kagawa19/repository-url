@@ -248,6 +248,16 @@ class WebsiteScraper:
         except Exception as e:
             logger.error(f"Failed to initialize Chrome WebDriver: {e}")
             raise
+        
+        # Update CSS selectors to include experts and other content
+        self.config.css_selectors.update({
+            'expert_cards': [
+                '.staff-card', '.team-member', '.researcher-profile', '.person', '[class*="staff"]', '[class*="team"]'
+            ],
+            'content_cards': [
+                '.content-card', '.article', '.post', '.item', '[class*="content"]', '[class*="resource"]'
+            ]
+        })
         logger.info("WebsiteScraper initialized with configuration: %s", self.config.to_dict())
 
     def _setup_chrome_options(self) -> Options:
@@ -403,13 +413,14 @@ class WebsiteScraper:
         seen = set()
         return [k for k in keywords if not (k in seen or seen.add(k))]
 
-    def fetch_content(self, search_term: Optional[str] = None, max_pages: Optional[int] = None) -> List[Dict]:
+    def fetch_content(self, search_term: Optional[str] = None, max_pages: Optional[int] = 50) -> List[Dict]:
         cache_key = f"website_content_{search_term or 'all'}_{datetime.utcnow().strftime('%Y%m%d')}"
         cached_content = self.cache.get(cache_key)
         if cached_content:
-            logger.info(f"Retrieved {len(cached_content)} publications from cache")
+            logger.info(f"Retrieved {len(cached_content)} items from cache")
             return cached_content
-        publications = []
+        
+        items = []
         visited = set()
         try:
             logger.info(f"Accessing URL: {self.base_url}")
@@ -421,47 +432,57 @@ class WebsiteScraper:
             except Exception as e:
                 self.rate_limiter.record_failure()
                 logger.error(f"Error loading base URL: {e}")
-                return publications
+                return items
+            
             page_num = 1
             while max_pages is None or page_num <= max_pages:
                 try:
                     logger.info(f"Processing page {page_num}")
+                    # Process publication cards
                     publication_cards = self._find_all_with_selectors(
-                        self.driver, 
-                        self.config.css_selectors['publication_cards'],
-                        wait_time=5
+                        self.driver, self.config.css_selectors['publication_cards'], wait_time=5
                     )
-                    if not publication_cards:
-                        logger.warning("No publication cards found on current page")
-                        break
-                    logger.info(f"Found {len(publication_cards)} publication cards")
+                    expert_cards = self._find_all_with_selectors(
+                        self.driver, self.config.css_selectors['expert_cards'], wait_time=5
+                    )
+                    content_cards = self._find_all_with_selectors(
+                        self.driver, self.config.css_selectors['content_cards'], wait_time=5
+                    )
+                    
+                    logger.info(f"Found {len(publication_cards)} publication cards, "
+                            f"{len(expert_cards)} expert cards, {len(content_cards)} content cards")
+                    
                     futures = []
-                    for card in publication_cards:
-                        future = self.executor.submit(self._process_publication_card, card, visited)
+                    for card in publication_cards + expert_cards + content_cards:
+                        card_type = 'publication' if card in publication_cards else 'expert' if card in expert_cards else 'content'
+                        future = self.executor.submit(self._process_card, card, visited, card_type)
                         futures.append(future)
+                    
                     for future in concurrent.futures.as_completed(futures):
                         try:
-                            publication = future.result()
-                            if publication:
-                                publications.append(publication)
+                            item = future.result()
+                            if item:
+                                items.append(item)
                         except Exception as e:
-                            logger.error(f"Error processing publication card: {e}")
+                            logger.error(f"Error processing card: {e}")
+                    
                     if not self._click_load_more():
-                        logger.info("No more publications to load")
+                        logger.info("No more content to load")
                         break
                     page_num += 1
                 except Exception as e:
                     logger.error(f"Error processing page {page_num}: {e}")
                     break
-            if publications:
-                self.cache.set(cache_key, publications, expire=self.config.cache_ttl)
-            return publications
+            
+            if items:
+                self.cache.set(cache_key, items, expire=self.config.cache_ttl)
+            return items
         except Exception as e:
             logger.error(f"Error in fetch_content: {e}")
-            return publications
+            return items
         finally:
-            if not publications:
-                logger.warning("No publications were found")
+            if not items:
+                logger.warning("No items were found")
 
     def _find_all_with_selectors(self, driver, selectors, wait_time=5):
         elements = []
@@ -487,6 +508,175 @@ class WebsiteScraper:
             except:
                 unique_elements.append(element)
         return unique_elements
+    
+    @retry(
+    retry=retry_if_exception_type((NoSuchElementException, StaleElementReferenceException, WebDriverException)),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    stop=stop_after_attempt(3)
+)
+    def extract_details(self, card, card_type: str) -> Optional[Dict]:
+        start_time = time.time()
+        try:
+            url = self._extract_element_attribute(card, self.config.css_selectors['url'], "href")
+            if not url:
+                self.metrics.record_item_processed(False, time.time() - start_time)
+                return None
+            cache_key = f"{card_type}_details_{hashlib.md5(url.encode()).hexdigest()}"
+            cached_details = self.cache.get(cache_key)
+            if cached_details:
+                logger.debug(f"Retrieved {card_type} details from cache for URL: {url}")
+                return cached_details
+            title = self._extract_element_text(card, self.config.css_selectors['title']) or f"Untitled {card_type.capitalize()}"
+            content = self._extract_element_text(card, self.config.css_selectors['content']) or ''
+            year = self._extract_year(url, content)
+            authors = self._extract_authors(content)
+            domains = self._extract_keywords(content)
+            
+            details = {
+                'title': title,
+                'url': url,
+                'content': content,
+                'year': year,
+                'authors': authors,
+                'domains': domains
+            }
+            if card_type == 'expert':
+                affiliation = self._extract_element_text(card, ['.affiliation', '[class*="organization"]']) or 'APHRC'
+                contact_email = self._extract_element_attribute(card, ['a[href^="mailto:"]'], 'href')
+                contact_email = contact_email.replace('mailto:', '') if contact_email else None
+                details['affiliation'] = affiliation
+                details['contact_email'] = contact_email
+            
+            self.cache.set(cache_key, details, expire=self.config.cache_ttl)
+            self.metrics.record_item_processed(True, time.time() - start_time)
+            return details
+        except Exception as e:
+            self.metrics.record_item_processed(False, time.time() - start_time, error=e)
+            logger.error(f"Error extracting {card_type} details: {e}")
+            return None
+
+
+    def _process_card(self, card, visited: Set[str], card_type: str) -> Optional[Dict]:
+        start_time = time.time()
+        browser = None
+        try:
+            details = self.extract_details(card, card_type)
+            if not details:
+                return None
+            url = details['url']
+            if url in visited or url in self.seen_urls:
+                logger.debug(f"Skipping already processed URL: {url}")
+                return None
+            visited.add(url)
+            self.seen_urls.add(url)
+            logger.info(f"Processing {card_type} URL: {url}")
+            
+            if url.lower().endswith('.pdf'):
+                item = {
+                    'title': details['title'],
+                    'doi': url,
+                    'authors': details.get('authors', []),
+                    'domains': details.get('domains', []),
+                    'type': 'pdf',
+                    'publication_year': details.get('year'),
+                    'summary': details.get('content', '')[:1000] or "PDF Document",
+                    'source': 'website'
+                }
+                logger.info(f"Processed PDF: {details['title'][:100]}...")
+                self.metrics.record_item_processed(True, time.time() - start_time)
+                return item
+            
+            browser = self.browser_pool.get_browser()
+            if not browser:
+                logger.warning(f"No browser available for {card_type} - falling back to basic details")
+                item = {
+                    'title': details['title'],
+                    'doi': url,
+                    'authors': details.get('authors', []),
+                    'domains': details.get('domains', []),
+                    'type': card_type,
+                    'publication_year': details.get('year'),
+                    'summary': details.get('content', '')[:1000] or f"{card_type.capitalize()} about {details['title']}",
+                    'source': 'website'
+                }
+                if card_type == 'expert':
+                    item['affiliation'] = details.get('affiliation', 'APHRC')
+                    item['contact_email'] = details.get('contact_email')
+                self.metrics.record_item_processed(True, time.time() - start_time)
+                return item
+            
+            cache_key = f"{card_type}_{hashlib.md5(url.encode()).hexdigest()}"
+            cached_item = self.cache.get(cache_key)
+            if cached_item:
+                logger.debug(f"Retrieved {card_type} from cache: {url}")
+                self.browser_pool.release_browser(browser)
+                return cached_item
+            
+            try:
+                logger.debug(f"Navigating to {card_type} URL: {url}")
+                browser.get(url)
+                wait = WebDriverWait(browser, self.config.browser_timeout)
+                content_selectors = self.config.css_selectors['content_page']
+                content_text = ""
+                for selector in content_selectors:
+                    try:
+                        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+                        content_elems = browser.find_elements(By.CSS_SELECTOR, selector)
+                        content_text = "\n".join(elem.text.strip() for elem in content_elems if elem.text.strip())
+                        if content_text:
+                            break
+                    except:
+                        continue
+                
+                if not details['authors']:
+                    details['authors'] = self._extract_authors(content_text)
+                if not details['domains']:
+                    details['domains'] = self._extract_keywords(content_text)
+                if not details['year']:
+                    details['year'] = self._extract_year(url, content_text)
+                
+                item = {
+                    'title': details['title'],
+                    'doi': url,
+                    'authors': details['authors'],
+                    'domains': details['domains'],
+                    'type': card_type,
+                    'publication_year': details['year'],
+                    'summary': content_text[:1000] or details.get('content', '')[:1000] or f"{card_type.capitalize()} about {details['title']}",
+                    'source': 'website'
+                }
+                if card_type == 'expert':
+                    item['affiliation'] = details.get('affiliation', 'APHRC')
+                    item['contact_email'] = details.get('contact_email')
+                
+                self.cache.set(cache_key, item, expire=self.config.cache_ttl)
+                logger.info(f"Processed {card_type.capitalize()}: {details['title'][:100]}...")
+                self.metrics.record_item_processed(True, time.time() - start_time)
+                return item
+            except Exception as e:
+                logger.error(f"Error extracting {card_type} content: {e}")
+                item = {
+                    'title': details['title'],
+                    'doi': url,
+                    'authors': details.get('authors', []),
+                    'domains': details.get('domains', []),
+                    'type': card_type,
+                    'publication_year': details.get('year'),
+                    'summary': details.get('content', '')[:1000] or f"{card_type.capitalize()} about {details['title']}",
+                    'source': 'website'
+                }
+                if card_type == 'expert':
+                    item['affiliation'] = details.get('affiliation', 'APHRC')
+                    item['contact_email'] = details.get('contact_email')
+                self.metrics.record_item_processed(True, time.time() - start_time)
+                return item
+        except Exception as e:
+            self.metrics.record_item_processed(False, time.time() - start_time, error=e)
+            logger.error(f"Error processing {card_type} card: {e}")
+            return None
+        finally:
+            if browser:
+                self.browser_pool.release_browser(browser)
 
     def _click_load_more(self) -> bool:
         for selector in self.config.css_selectors['load_more']:
@@ -705,13 +895,16 @@ class WebsiteScraper:
                 self.executor.shutdown(wait=True)
             logger.debug("Closing browser pool...")
             if hasattr(self, 'browser_pool'):
-                self.browser_pool.close_all()
+                try:
+                    self.browser_pool.close_all()
+                except Exception as e:
+                    logger.warning(f"Error closing browser pool: {e}")
             logger.debug("Closing main driver...")
             if hasattr(self, 'driver'):
                 try:
                     self.driver.quit()
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Error closing main driver: {e}")
             logger.debug("Closing cache...")
             if hasattr(self, 'cache'):
                 self.cache.close()

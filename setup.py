@@ -189,7 +189,7 @@ class SystemInitializer:
             pdfs = [item for item in items if item.get('type') == 'pdf']
             
             logger.info(f"Found {len(publications)} publications, {len(experts)} experts, "
-                       f"and {len(pdfs)} PDFs to process")
+                    f"and {len(pdfs)} PDFs to process")
             
             # Map publications to resources_resource
             successful_mappings = 0
@@ -218,7 +218,7 @@ class SystemInitializer:
                 except Exception as e:
                     logger.error(f"Failed to map publication {doi or 'unknown'}: {str(e)}")
             
-            # Log results
+            # Log results and scraper metrics
             logger.info(f"""Web Content Processing Results:
                 Pages Processed: {results.get('processed_pages', 0)}
                 Pages Updated: {results.get('updated_pages', 0)}
@@ -229,6 +229,7 @@ class SystemInitializer:
                 Processing Time: {processing_time:.2f} seconds
                 Average Time Per Page: {processing_time/max(results.get('processed_pages', 1), 1):.2f} seconds
             """)
+            logger.info(f"WebsiteScraper metrics: {self.web_processor.content_pipeline.scraper.get_metrics()}")
             
             return results
         except Exception as e:
