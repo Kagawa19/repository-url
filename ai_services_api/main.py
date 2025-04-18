@@ -1,5 +1,5 @@
 from ai_services_api.core.openapi import Contact
-from ai_services_api.services.search.core.personalization import create_pool
+
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -15,6 +15,38 @@ from ai_services_api.controllers.analytics_router import api_router as analytics
 
 # Add this to your application's startup code (e.g., in your main.py or __init__.py)
 import logging
+from ai_services_api.services.search.core.database import (
+    create_pool,
+    close_pool,
+    test_connection
+)
+from ai_services_api.services.search.core.modelz import load_embedding_model
+
+app = FastAPI()
+
+@app.on_event("startup")
+async def startup():
+    # Initialize database
+    await create_pool()
+    if not await test_connection():
+        raise RuntimeError("Database connection failed")
+    
+    # Load ML model
+    app.state.embedding_model = load_embedding_model()
+    logger.info("Application startup completed")
+
+@app.on_event("shutdown")
+async def shutdown():
+    await close_pool()
+    logger.info("Application shutdown complete")
+
+# Example endpoint using both components
+@app.get("/health")
+async def health_check():
+    return {
+        "database": await test_connection(),
+        "model_loaded": hasattr(app.state, "embedding_model")
+    }
 
 
 # Define allowed GET routes
@@ -95,9 +127,7 @@ async def read_index():
         return f.read()
     
 
-@app.on_event("startup")
-async def startup():
-    await create_pool()
+
 
 @app.get("/chatbot", response_class=HTMLResponse)
 async def read_chatbot():
