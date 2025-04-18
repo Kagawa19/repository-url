@@ -2095,7 +2095,7 @@ class GeminiLLMManager:
     def format_navigation_context(self, sections: List[Dict[str, Any]]) -> str:
         """
         Format navigation information into Markdown format for rendering in the frontend.
-        Updated to work with the new navigation schema from the webpages table.
+        Updated to handle sitemap URLs better.
         
         Args:
             sections: List of navigation section dictionaries
@@ -2130,17 +2130,26 @@ class GeminiLLMManager:
                         content = content[:197] + '...'
                     markdown_text += f"    - Description: {content}\n\n"
                 
-                # URL
+                # URL - improved handling
                 url = section.get('url', '')
                 if url:
-                    # Format URL as a proper link
-                    if not url.startswith(('http://', 'https://')):
-                        display_url = url
-                        url = f"https://{url}" if not url.startswith('www.') else f"https://{url}"
-                    else:
-                        display_url = url.replace('https://', '').replace('http://', '')
+                    # Clean up URL from sitemap format
+                    cleaned_url = self._clean_sitemap_url(url)
                     
-                    markdown_text += f"    - Link: [{display_url}]({url})\n\n"
+                    if cleaned_url:
+                        # Format URL as a proper link
+                        if not cleaned_url.startswith(('http://', 'https://')):
+                            display_url = cleaned_url
+                            cleaned_url = f"https://{cleaned_url}" if not cleaned_url.startswith(('www.', '/')) else f"https://aphrc.org{cleaned_url}" if cleaned_url.startswith('/') else f"https://{cleaned_url}"
+                        else:
+                            # Get domain for display
+                            try:
+                                parsed_url = urlparse(cleaned_url)
+                                display_url = parsed_url.netloc + parsed_url.path
+                            except:
+                                display_url = cleaned_url.replace('https://', '').replace('http://', '')
+                        
+                        markdown_text += f"    - Link: [{display_url}]({cleaned_url})\n\n"
                 
                 # Content Type
                 content_type = section.get('content_type', '')
@@ -2189,8 +2198,6 @@ class GeminiLLMManager:
 
         markdown_text += "\nWould you like more details about any of these sections or help navigating to a specific resource?"
         return markdown_text
-                #    criteria = section['matche
-
     def _create_tailored_prompt(self, intent, context_type: str, message_style: str, user_interests: str = "") -> str:
         """
         Create a tailored system prompt based on detected intent, context type, message style,

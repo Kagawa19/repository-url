@@ -700,9 +700,49 @@ class ExpertRedisIndexManager:
             logger.error(f"Error creating text content for navigation {navigation.get('id', 'Unknown')}: {e}")
             return "Error Processing Navigation Item"
 
+    # Add this method to ExpertRedisIndexManager
+    def _normalize_url(self, url: str) -> str:
+        """
+        Normalize URLs from sitemap to ensure they are properly formatted.
+        Handles common issues with sitemap URLs.
+        
+        Args:
+            url: Raw URL from database
+            
+        Returns:
+            Normalized URL ready for storage and display
+        """
+        if not url:
+            return ""
+            
+        # Remove any XML namespace or sitemap artifacts
+        url = re.sub(r'<\?xml.*?\?>', '', url)
+        url = re.sub(r'<urlset.*?>', '', url)
+        url = re.sub(r'</urlset>', '', url)
+        url = re.sub(r'<url>', '', url)
+        url = re.sub(r'</url>', '', url)
+        url = re.sub(r'<loc>', '', url)
+        url = re.sub(r'</loc>', '', url)
+        
+        # Trim whitespace
+        url = url.strip()
+        
+        # Ensure URL has proper protocol
+        if url and not url.startswith(('http://', 'https://')):
+            # Check if it's a relative URL
+            if url.startswith('/'):
+                # Assume it's a relative URL to the main domain
+                url = f"https://aphrc.org{url}"
+            else:
+                # Add https:// prefix if missing
+                url = f"https://{url}"
+        
+        return url
+
+    # Update the _store_navigation_data method to use the normalized URL
     def _store_navigation_data(self, navigation: Dict[str, Any], text_content: str, embedding: np.ndarray) -> None:
         """
-        Stores navigation data in Redis using consistent key patterns.
+        Stores navigation data in Redis using consistent key patterns with normalized URLs.
         
         Args:
             navigation: The navigation data dictionary
@@ -714,6 +754,9 @@ class ExpertRedisIndexManager:
         try:
             # Get navigation ID
             navigation_id = navigation['id']
+            
+            # Normalize the URL
+            normalized_url = self._normalize_url(navigation.get('url', ''))
             
             # Use consistent key pattern for all navigation data
             base_key = f"navigation:{navigation_id}"
@@ -728,11 +771,12 @@ class ExpertRedisIndexManager:
                 embedding.astype(np.float32).tobytes()
             )
             
-            # Store all available metadata fields
+            # Store all available metadata fields with normalized URL
             metadata = {
                 'id': str(navigation_id),
                 'title': str(navigation.get('title', '')),
-                'url': str(navigation.get('url', '')),
+                'url': normalized_url,  # Use normalized URL
+                'original_url': str(navigation.get('url', '')),  # Keep original for reference
                 'content_type': str(navigation.get('content_type', '')),
                 'navigation_text': str(navigation.get('navigation_text', '')),
                 'last_updated': str(navigation.get('last_updated', '')),
@@ -745,7 +789,7 @@ class ExpertRedisIndexManager:
             
             # Execute all commands
             pipeline.execute()
-            logger.info(f"Successfully stored navigation {navigation_id}")
+            logger.info(f"Successfully stored navigation {navigation_id} with normalized URL")
             
         except Exception as e:
             if pipeline:
@@ -753,6 +797,50 @@ class ExpertRedisIndexManager:
                 logger.debug("Reset Redis pipeline due to error")
             logger.error(f"Error storing navigation {navigation.get('id')}: {e}")
             raise
+
+    # Update the format_navigation_context method to better handle URLs
+    
+
+    def _clean_sitemap_url(self, url: str) -> str:
+        """
+        Clean URLs from sitemap to make them usable for display and navigation.
+        
+        Args:
+            url: URL potentially from sitemap
+            
+        Returns:
+            Cleaned URL
+        """
+        if not url:
+            return ""
+            
+        # Remove XML tags often found in sitemap URLs
+        url = re.sub(r'<\?xml.*?\?>', '', url)
+        url = re.sub(r'<urlset.*?>', '', url)
+        url = re.sub(r'</urlset>', '', url)
+        url = re.sub(r'<url>', '', url)
+        url = re.sub(r'</url>', '', url)
+        url = re.sub(r'<loc>', '', url)
+        url = re.sub(r'</loc>', '', url)
+        
+        # Remove whitespace, newlines and excessive spaces
+        url = re.sub(r'\s+', ' ', url).strip()
+        
+        # Handle common sitemap URL issues
+        if url.startswith('http'):
+            # Extract just the URL if it's embedded in other text
+            url_match = re.search(r'(https?://[^\s<>"]+)', url)
+            if url_match:
+                url = url_match.group(1)
+                
+        # Remove trailing XML or HTML invalid characters
+        url = re.sub(r'[<>"]', '', url)
+        
+        # Ensure URL has proper domain if it's a relative path
+        if url.startswith('/'):
+            url = f"https://aphrc.org{url}"
+            
+        return url
 
     def create_navigation_redis_index(self) -> bool:
         """Create Redis indexes for navigation items."""
