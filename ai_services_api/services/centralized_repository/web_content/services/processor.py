@@ -5,6 +5,11 @@ from datetime import datetime
 from ai_services_api.services.centralized_repository.database_manager import DatabaseManager
 from ai_services_api.services.centralized_repository.web_content.services.content_pipeline import ContentPipeline
 import hashlib
+from ai_services_api.services.centralized_repository.database_manager import DatabaseManager
+from ai_services_api.services.centralized_repository.web_content.services.web_scraper import WebsiteScraper
+from ai_services_api.services.centralized_repository.web_content.services.pdf_processor import PDFProcessor
+from ai_services_api.services.centralized_repository.web_content.services.content_pipeline import ContentPipeline
+import os
 
 logging.basicConfig(
     level=logging.INFO,
@@ -13,20 +18,59 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class WebContentProcessor:
-    """Processes web content by scraping and storing webpage data without embeddings."""
-    
-    def __init__(self, max_workers: int = 5, batch_size: int = 100, processing_checkpoint_hours: int = 24):
-        """Initialize processor with database and pipeline."""
-        self.db = DatabaseManager()
-        self.content_pipeline = ContentPipeline()
-        self.max_workers = max_workers
-        self.batch_size = batch_size
-        self.processing_checkpoint_hours = processing_checkpoint_hours
-        self._validate_config()
-        logger.info(f"WebContentProcessor initialized with max_workers={max_workers}, "
-                   f"batch_size={batch_size}, checkpoint_hours={processing_checkpoint_hours}")
 
+
+class WebContentProcessor:
+    def __init__(self, db: DatabaseManager, config: dict = None):
+        self.db = db
+        self.config = config or {}
+        self.skip_publications = self.config.get('skip_publications', False)
+        
+        # Initialize ContentPipeline with required arguments
+        start_urls = [os.getenv('WEBSITE_BASE_URL', 'https://aphrc.org')]
+        self.content_pipeline = ContentPipeline(
+            start_urls=start_urls,
+            scraper=WebsiteScraper(max_browsers=2),  # Reduced for OOM prevention
+            pdf_processor=PDFProcessor(),
+            db=self.db,
+            batch_size=self.config.get('batch_size', 100)
+        )
+        logger.info("WebContentProcessor initialized with start URLs: %s", start_urls)
+
+    async def process_content(self) -> Dict:
+        """Process web content using the content pipeline."""
+        try:
+            logger.info("Starting web content processing...")
+            if self.skip_publications:
+                logger.warning("Skipping publication processing due to --skip-publications flag")
+                # Optionally process only experts and webpages
+                results = await self.content_pipeline.run(exclude_publications=True)
+            else:
+                results = await self.content_pipeline.run()
+            
+            if not isinstance(results, dict):
+                logger.error("ContentPipeline.run() did not return a dictionary")
+                raise ValueError("Invalid pipeline results format")
+            
+            required_keys = ['processed_pages', 'processing_details']
+            if not all(key in results for key in required_keys):
+                logger.error(f"Pipeline results missing required keys: {results}")
+                raise ValueError("Invalid pipeline results format")
+            
+            if 'webpage_results' not in results['processing_details']:
+                logger.error("Pipeline results missing webpage_results")
+                raise ValueError("Invalid pipeline results format")
+            
+            logger.info(f"Processed {results['processed_pages']} pages, "
+                       f"inserted/updated {results['updated_pages']} items, "
+                       f"found {results['processed_publications']} publications, "
+                       f"{results['processed_experts']} experts, "
+                       f"{results['processed_resources']} resources")
+            
+            return results
+        except Exception as e:
+            logger.error(f"Error processing web content: {str(e)}", exc_info=True)
+            raise
     def _validate_config(self):
         """Validate configuration parameters."""
         if self.max_workers < 1:
@@ -121,47 +165,7 @@ class WebContentProcessor:
             logger.error(f"Error inserting webpage {url or 'unknown'}: {str(e)}", exc_info=True)
             return 0
 
-    async def process_content(self) -> Dict:
-        """Process web content using the content pipeline."""
-        try:
-            logger.info("Starting web content processing...")
-            # Ensure ContentPipeline.run() is awaited
-            pipeline_results = await self.content_pipeline.run()
-            
-            # Validate results
-            if not isinstance(pipeline_results, dict):
-                logger.error("ContentPipeline.run() did not return a dictionary")
-                raise ValueError("Invalid pipeline results format")
-            
-            required_keys = ['processed_pages', 'processing_details']
-            if not all(key in pipeline_results for key in required_keys):
-                logger.error(f"Pipeline results missing required keys: {pipeline_results}")
-                raise ValueError("Invalid pipeline results format")
-            
-            if 'webpage_results' not in pipeline_results['processing_details']:
-                logger.error("Pipeline results missing webpage_results")
-                raise ValueError("Invalid pipeline results format")
-            
-            # Aggregate metrics
-            results = {
-                'processed_pages': pipeline_results.get('processed_pages', 0),
-                'updated_pages': pipeline_results.get('updated_pages', 0),
-                'processed_publications': pipeline_results.get('processed_publications', 0),
-                'processed_experts': pipeline_results.get('processed_experts', 0),
-                'processed_resources': pipeline_results.get('processed_resources', 0),
-                'processing_details': pipeline_results['processing_details']
-            }
-            
-            logger.info(f"Processed {results['processed_pages']} pages, "
-                    f"inserted/updated {results['updated_pages']} items, "
-                    f"found {results['processed_publications']} publications, "
-                    f"{results['processed_experts']} experts, "
-                    f"{results['processed_resources']} resources")
-            
-            return results
-        except Exception as e:
-            logger.error(f"Error processing web content: {str(e)}", exc_info=True)
-            raise
+    
     def cleanup(self):
         """Clean up resources."""
         try:

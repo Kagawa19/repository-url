@@ -8,6 +8,7 @@ from ai_services_api.services.centralized_repository.ai_summarizer import TextSu
 from ai_services_api.services.centralized_repository.web_content.services.web_scraper import WebsiteScraper, ScraperConfig
 from ai_services_api.services.centralized_repository.web_content.services.pdf_processor import PDFProcessor
 import re
+import warnings
 
 import psutil
 import gc
@@ -15,8 +16,10 @@ import hashlib
 from urllib.parse import urljoin
 from typing import Dict, List, Set, Optional
 from ai_services_api.services.centralized_repository.database_manager import DatabaseManager
-
-import warnings
+from ai_services_api.services.centralized_repository.web_content.services.web_scraper import WebsiteScraper
+from ai_services_api.services.centralized_repository.web_content.services.pdf_processor import PDFProcessor
+import requests
+from bs4 import BeautifulSoup
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
@@ -27,9 +30,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 class ContentPipeline:
-    """Manages web content scraping and processing pipeline with summarization."""
-    
     def __init__(
         self,
         start_urls: List[str],
@@ -41,11 +43,276 @@ class ContentPipeline:
         self.start_urls = start_urls
         self.scraper = scraper
         self.pdf_processor = pdf_processor
-        self.db = db  # Initialize DatabaseManager
+        self.db = db
         self.batch_size = batch_size
         self.visited_urls: Set[str] = set()
         logger.info("ContentPipeline initialized with %d start URLs", len(start_urls))
 
+    async def run(self, exclude_publications: bool = False) -> Dict:
+        """
+        Run the scraping pipeline, saving experts, webpages, and optionally publications every 10 pages.
+        Stores navigation text in webpages.navigation_text.
+        """
+        results = {
+            'processed_pages': 0,
+            'updated_pages': 0,
+            'processed_publications': 0,
+            'processed_experts': 0,
+            'processed_resources': 0,
+            'processing_details': {'webpage_results': []}
+        }
+        
+        try:
+            logger.info("Starting content pipeline...")
+            webpage_results = []
+            current_batch = []
+            processed_urls: Set[str] = set()
+            to_visit_urls: Set[str] = set(self.start_urls)
+            max_pages = 500
+            max_depth = 3
+            depth_map = {url: 0 for url in to_visit_urls}
+            save_batch_size = 10
+            
+            # Log initial memory usage
+            process = psutil.Process()
+            logger.debug(f"Initial memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+            
+            # Fetch existing URLs
+            try:
+                query = """
+                    SELECT url FROM experts WHERE url IS NOT NULL
+                    UNION
+                    SELECT url FROM webpages WHERE url IS NOT NULL
+                """
+                if not exclude_publications:
+                    query = "SELECT doi FROM publications WHERE doi IS NOT NULL UNION " + query
+                existing_urls = self.db.execute(query)
+                processed_urls.update(row[0] for row in existing_urls)
+                logger.info(f"Loaded {len(processed_urls)} existing URLs from database")
+            except Exception as e:
+                logger.error(f"Error loading existing URLs: {str(e)}", exc_info=True)
+                processed_urls = set()
+            
+            # Fetch initial content using WebsiteScraper
+            try:
+                publications = self.scraper.fetch_content(max_pages=20)
+                logger.info(f"Fetched {len(publications)} items from WebsiteScraper")
+                current_batch.extend([p for p in publications if p.get('url') not in processed_urls])
+                if not exclude_publications:
+                    results['processed_publications'] += len([p for p in publications if p.get('type') == 'publication'])
+                    results['processed_resources'] += len([p for p in publications if p.get('type') == 'pdf'])
+                results['processed_experts'] += len([p for p in publications if p.get('type') == 'expert'])
+            except Exception as e:
+                logger.error(f"Error fetching publications from WebsiteScraper: {str(e)}", exc_info=True)
+            
+            # Save initial batch if >= 10 items
+            if len(current_batch) >= save_batch_size:
+                try:
+                    self._save_batch(current_batch, results, exclude_publications)
+                    webpage_results.append({'batch': current_batch})
+                    results['updated_pages'] += len(current_batch)
+                    processed_urls.update(item.get('url') or item.get('doi', '') for item in current_batch)
+                    current_batch = []
+                    gc.collect()
+                    logger.debug(f"Memory usage after saving batch: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+                except Exception as e:
+                    logger.error(f"Error saving initial batch: {str(e)}", exc_info=True)
+            
+            # Recursively crawl additional pages
+            while to_visit_urls and results['processed_pages'] < max_pages:
+                url = to_visit_urls.pop()
+                current_depth = depth_map.get(url, 0)
+                if url in processed_urls or url in self.visited_urls:
+                    logger.debug(f"Skipping already processed URL: {url}")
+                    continue
+                if current_depth >= max_depth:
+                    logger.debug(f"Skipping URL {url} at depth {current_depth} (max_depth={max_depth})")
+                    continue
+                
+                try:
+                    page_data = self.scrape_page(url)
+                    if not page_data or not page_data.get('url'):
+                        logger.debug(f"No valid data scraped for URL: {url}")
+                        continue
+                    
+                    # Extract navigation text
+                    try:
+                        response = requests.get(url, timeout=10)
+                        response.raise_for_status()
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        nav_elements = (
+                            soup.select('.nav-menu, .main-nav, .menu, .navbar, nav') +
+                            soup.select('.breadcrumb, .breadcrumbs, .nav-path')
+                        )
+                        nav_texts = [elem.get_text(strip=True) for elem in nav_elements if elem.get_text(strip=True)]
+                        page_data['navigation_text'] = ' | '.join(nav_texts)[:1000] if nav_texts else ''
+                    except Exception as e:
+                        logger.error(f"Error extracting navigation text for {url}: {str(e)}")
+                        page_data['navigation_text'] = ''
+                    
+                    page_data = self.process_webpage(page_data)
+                    if not page_data.get('url'):
+                        logger.debug(f"No valid processed data for URL: {url}")
+                        continue
+                    
+                    current_batch.append(page_data)
+                    self.visited_urls.add(url)
+                    results['processed_pages'] += 1
+                    
+                    # Extract internal links
+                    try:
+                        links = set(
+                            urljoin(url, a.get('href'))
+                            for a in soup.find_all('a', href=True)
+                            if urljoin(url, a.get('href')).startswith('https://aphrc.org')
+                            and not any(ext in a.get('href').lower() for ext in ['.xml', '.jpg', '.png', '.css', '.js'])
+                        )
+                        logger.debug(f"Found {len(links)} internal links on {url}")
+                        for link in links:
+                            if link not in processed_urls and link not in self.visited_urls:
+                                to_visit_urls.add(link)
+                                depth_map[link] = current_depth + 1
+                    except Exception as e:
+                        logger.error(f"Error fetching links from {url}: {str(e)}")
+                    
+                    # Save batch every 10 pages
+                    if len(current_batch) >= save_batch_size:
+                        try:
+                            self._save_batch(current_batch, results, exclude_publications)
+                            webpage_results.append({'batch': current_batch})
+                            results['updated_pages'] += len(current_batch)
+                            processed_urls.update(item.get('url') or item.get('doi', '') for item in current_batch)
+                            current_batch = []
+                            gc.collect()
+                            logger.debug(f"Memory usage after saving batch: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+                        except Exception as e:
+                            logger.error(f"Error saving batch: {str(e)}", exc_info=True)
+                    
+                    # Log progress
+                    if results['processed_pages'] % 50 == 0:
+                        logger.info(f"Processed {results['processed_pages']} pages, {len(to_visit_urls)} URLs remaining")
+                        logger.debug(f"Memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+                except Exception as e:
+                    logger.error(f"Error processing URL {url}: {str(e)}", exc_info=True)
+                    continue
+            
+            # Save remaining batch
+            if current_batch:
+                try:
+                    self._save_batch(current_batch, results, exclude_publications)
+                    webpage_results.append({'batch': current_batch})
+                    results['updated_pages'] += len(current_batch)
+                    processed_urls.update(item.get('url') or item.get('doi', '') for item in current_batch)
+                except Exception as e:
+                    logger.error(f"Error saving final batch: {str(e)}", exc_info=True)
+            
+            # Process PDFs if not excluding publications
+            if not exclude_publications:
+                pdf_urls = [item['url'] for item in current_batch if item.get('type') == 'pdf' and item['url'] not in processed_urls]
+                if pdf_urls:
+                    try:
+                        pdf_results = self.pdf_processor.process_pdfs(pdf_urls)
+                        self._save_batch(pdf_results, results, exclude_publications)
+                        webpage_results.append({'batch': pdf_results})
+                        results['processed_resources'] += len(pdf_results)
+                        results['updated_pages'] += len(pdf_results)
+                        logger.info(f"Processed {len(pdf_results)} PDFs")
+                    except Exception as e:
+                        logger.error(f"Error processing PDFs: {str(e)}", exc_info=True)
+            
+            results['processing_details']['webpage_results'] = webpage_results
+            logger.info(f"Content pipeline completed: processed {results['processed_pages']} pages, "
+                       f"{results['processed_publications']} publications, "
+                       f"{results['processed_experts']} experts, "
+                       f"{results['processed_resources']} PDFs")
+            
+            # Log final memory usage and scraper metrics
+            logger.debug(f"Final memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+            logger.info(f"WebsiteScraper metrics: {self.scraper.get_metrics()}")
+            
+        except Exception as e:
+            logger.error(f"Critical error in content pipeline: {str(e)}", exc_info=True)
+        
+        return results
+
+    def _save_batch(self, batch: List[Dict], results: Dict, exclude_publications: bool) -> None:
+        """Save a batch of items to experts, webpages, and optionally publications."""
+        for item in batch:
+            try:
+                content_type = item.get('type')
+                url = item.get('url') or item.get('doi')
+                title = item.get('title')
+                if not url:
+                    logger.warning(f"Skipping item with missing url: {item}")
+                    continue
+                
+                # Save to webpages (content and navigation_text)
+                try:
+                    existing = self.db.execute("SELECT id FROM webpages WHERE url = %s", (url,))
+                    if not existing:
+                        content_hash = hashlib.md5(item.get('content', '').encode('utf-8')).hexdigest()
+                        self.db.execute("""
+                            INSERT INTO webpages (url, content, navigation_text, content_hash, last_updated)
+                            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        """, (
+                            url,
+                            item.get('content', '')[:10000],
+                            item.get('navigation_text', '')[:1000],
+                            content_hash
+                        ))
+                        logger.debug(f"Saved webpage with navigation text for: {url}")
+                except Exception as e:
+                    logger.error(f"Error saving webpage for {url}: {str(e)}")
+                
+                # Save to experts or publications
+                if content_type == 'expert':
+                    if not title:
+                        logger.warning(f"Skipping expert with missing title: {item}")
+                        continue
+                    existing = self.db.execute("SELECT id FROM experts WHERE url = %s", (url,))
+                    if not existing:
+                        self.db.execute("""
+                            INSERT INTO experts (name, affiliation, contact_email, url, is_active)
+                            VALUES (%s, %s, %s, %s, %s)
+                        """, (
+                            title or 'Unknown Expert',
+                            item.get('affiliation', 'APHRC'),
+                            item.get('contact_email'),
+                            url,
+                            True
+                        ))
+                        results['processed_experts'] += 1
+                        logger.debug(f"Saved expert to experts table: {url}")
+                
+                elif content_type in ['publication', 'pdf'] and not exclude_publications:
+                    if not title:
+                        logger.warning(f"Skipping publication/pdf with missing title: {item}")
+                        continue
+                    existing = self.db.execute("SELECT id FROM publications WHERE doi = %s", (url,))
+                    if not existing:
+                        self.db.execute("""
+                            INSERT INTO publications (title, summary, source, type, authors, domains, publication_year, doi, field, subfield)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (
+                            title or 'Untitled',
+                            item.get('summary', item.get('content', ''))[:1000],
+                            item.get('source', 'website'),
+                            content_type,
+                            item.get('authors', []),
+                            item.get('domains', []),
+                            item.get('publication_year'),
+                            url,
+                            item.get('field'),
+                            item.get('subfield')
+                        ))
+                        if content_type == 'publication':
+                            results['processed_publications'] += 1
+                        else:
+                            results['processed_resources'] += 1
+                        logger.debug(f"Saved {content_type} to publications table: {url}")
+                
+            except Exception as e:
+                logger.error(f"Error saving item {url or 'unknown'} to database: {str(e)}", exc_info=True)
 
     def process_webpage(self, page_data: Dict) -> Dict:
         """Process webpage data, summarize, and assign content_type."""
@@ -154,269 +421,7 @@ class ContentPipeline:
             logger.error(f"Error scraping {url}: {str(e)}")
             return {}
 
-
-    async def run(self) -> Dict:
-        """
-        Run the scraping pipeline, saving experts, publications, and navigation data every 10 pages.
-        Stores navigation text in webpages.navigation_text.
-        """
-        results = {
-            'processed_pages': 0,
-            'updated_pages': 0,
-            'processed_publications': 0,
-            'processed_experts': 0,
-            'processed_resources': 0,
-            'processing_details': {'webpage_results': []}
-        }
-        
-        try:
-            logger.info("Starting content pipeline...")
-            webpage_results = []
-            current_batch = []
-            processed_urls: Set[str] = set()
-            to_visit_urls: Set[str] = set(self.start_urls)
-            max_pages = 500
-            max_depth = 3
-            depth_map = {url: 0 for url in to_visit_urls}
-            save_batch_size = 10
-            
-            # Log initial memory usage
-            process = psutil.Process()
-            logger.debug(f"Initial memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-            
-            # Fetch existing URLs
-            try:
-                existing_urls = self.db.execute("""
-                    SELECT doi FROM publications WHERE doi IS NOT NULL
-                    UNION
-                    SELECT url FROM experts WHERE url IS NOT NULL
-                    UNION
-                    SELECT url FROM webpages WHERE url IS NOT NULL
-                """)
-                processed_urls.update(row[0] for row in existing_urls)
-                logger.info(f"Loaded {len(processed_urls)} existing URLs from database")
-            except Exception as e:
-                logger.error(f"Error loading existing URLs: {str(e)}", exc_info=True)
-                processed_urls = set()  # Proceed without skipping to avoid blocking
-            
-            # Fetch publications using WebsiteScraper
-            try:
-                publications = self.scraper.fetch_content(max_pages=20)
-                logger.info(f"Fetched {len(publications)} publications from WebsiteScraper")
-                current_batch.extend([p for p in publications if p.get('url') not in processed_urls])
-                results['processed_publications'] += len([p for p in publications if p.get('type') == 'publication'])
-                results['processed_experts'] += len([p for p in publications if p.get('type') == 'expert'])
-                results['processed_resources'] += len([p for p in publications if p.get('type') == 'pdf'])
-            except Exception as e:
-                logger.error(f"Error fetching publications from WebsiteScraper: {str(e)}", exc_info=True)
-            
-            # Save initial batch if >= 10 items
-            if len(current_batch) >= save_batch_size:
-                try:
-                    self._save_batch(current_batch, results)
-                    webpage_results.append({'batch': current_batch})
-                    results['updated_pages'] += len(current_batch)
-                    processed_urls.update(item.get('url') or item.get('doi', '') for item in current_batch)
-                    current_batch = []
-                    gc.collect()
-                    logger.debug(f"Memory usage after saving batch: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-                except Exception as e:
-                    logger.error(f"Error saving initial batch: {str(e)}", exc_info=True)
-            
-            # Recursively crawl additional pages
-            while to_visit_urls and results['processed_pages'] < max_pages:
-                url = to_visit_urls.pop()
-                current_depth = depth_map.get(url, 0)
-                if url in processed_urls or url in self.visited_urls:
-                    logger.debug(f"Skipping already processed URL: {url}")
-                    continue
-                if current_depth >= max_depth:
-                    logger.debug(f"Skipping URL {url} at depth {current_depth} (max_depth={max_depth})")
-                    continue
-                
-                try:
-                    page_data = self.scrape_page(url)
-                    if not page_data or not page_data.get('url'):
-                        logger.debug(f"No valid data scraped for URL: {url}")
-                        continue
-                    
-                    # Extract navigation text
-                    try:
-                        response = requests.get(url, timeout=10)
-                        response.raise_for_status()
-                        soup = BeautifulSoup(response.text, 'html.parser')
-                        nav_elements = (
-                            soup.select('.nav-menu, .main-nav, .menu, .navbar, nav') +
-                            soup.select('.breadcrumb, .breadcrumbs, .nav-path')
-                        )
-                        nav_texts = [elem.get_text(strip=True) for elem in nav_elements if elem.get_text(strip=True)]
-                        page_data['navigation_text'] = ' | '.join(nav_texts)[:1000] if nav_texts else ''
-                    except Exception as e:
-                        logger.error(f"Error extracting navigation text for {url}: {str(e)}")
-                        page_data['navigation_text'] = ''
-                    
-                    page_data = self.process_webpage(page_data)
-                    if not page_data.get('url'):
-                        logger.debug(f"No valid processed data for URL: {url}")
-                        continue
-                    
-                    current_batch.append(page_data)
-                    self.visited_urls.add(url)
-                    results['processed_pages'] += 1
-                    
-                    # Extract internal links
-                    try:
-                        links = set(
-                            urljoin(url, a.get('href'))
-                            for a in soup.find_all('a', href=True)
-                            if urljoin(url, a.get('href')).startswith('https://aphrc.org')
-                            and not any(ext in a.get('href').lower() for ext in ['.xml', '.jpg', '.png', '.css', '.js'])
-                        )
-                        logger.debug(f"Found {len(links)} internal links on {url}")
-                        for link in links:
-                            if link not in processed_urls and link not in self.visited_urls:
-                                to_visit_urls.add(link)
-                                depth_map[link] = current_depth + 1
-                    except Exception as e:
-                        logger.error(f"Error fetching links from {url}: {str(e)}")
-                    
-                    # Save batch every 10 pages
-                    if len(current_batch) >= save_batch_size:
-                        try:
-                            self._save_batch(current_batch, results)
-                            webpage_results.append({'batch': current_batch})
-                            results['updated_pages'] += len(current_batch)
-                            processed_urls.update(item.get('url') or item.get('doi', '') for item in current_batch)
-                            current_batch = []
-                            gc.collect()
-                            logger.debug(f"Memory usage after saving batch: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-                        except Exception as e:
-                            logger.error(f"Error saving batch: {str(e)}", exc_info=True)
-                    
-                    # Log progress
-                    if results['processed_pages'] % 50 == 0:
-                        logger.info(f"Processed {results['processed_pages']} pages, {len(to_visit_urls)} URLs remaining")
-                        logger.debug(f"Memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-                except Exception as e:
-                    logger.error(f"Error processing URL {url}: {str(e)}", exc_info=True)
-                    continue
-            
-            # Save remaining batch
-            if current_batch:
-                try:
-                    self._save_batch(current_batch, results)
-                    webpage_results.append({'batch': current_batch})
-                    results['updated_pages'] += len(current_batch)
-                    processed_urls.update(item.get('url') or item.get('doi', '') for item in current_batch)
-                except Exception as e:
-                    logger.error(f"Error saving final batch: {str(e)}", exc_info=True)
-            
-            # Process PDFs
-            pdf_urls = [item['url'] for item in current_batch if item.get('type') == 'pdf' and item['url'] not in processed_urls]
-            if pdf_urls:
-                try:
-                    pdf_results = self.pdf_processor.process_pdfs(pdf_urls)
-                    self._save_batch(pdf_results, results)
-                    webpage_results.append({'batch': pdf_results})
-                    results['processed_resources'] += len(pdf_results)
-                    results['updated_pages'] += len(pdf_results)
-                    logger.info(f"Processed {len(pdf_results)} PDFs")
-                except Exception as e:
-                    logger.error(f"Error processing PDFs: {str(e)}", exc_info=True)
-            
-            results['processing_details']['webpage_results'] = webpage_results
-            logger.info(f"Content pipeline completed: processed {results['processed_pages']} pages, "
-                       f"{results['processed_publications']} publications, "
-                       f"{results['processed_experts']} experts, "
-                       f"{results['processed_resources']} PDFs")
-            
-            # Log final memory usage and scraper metrics
-            logger.debug(f"Final memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-            logger.info(f"WebsiteScraper metrics: {self.scraper.get_metrics()}")
-            
-        except Exception as e:
-            logger.error(f"Critical error in content pipeline: {str(e)}", exc_info=True)
-        
-        return results
-
-    def _save_batch(self, batch: List[Dict], results: Dict) -> None:
-        """Save a batch of items to experts, publications, and webpages tables."""
-        for item in batch:
-            try:
-                content_type = item.get('type')
-                url = item.get('url') or item.get('doi')
-                title = item.get('title')
-                if not url:
-                    logger.warning(f"Skipping item with missing url: {item}")
-                    continue
-                
-                # Save to webpages (content and navigation_text)
-                try:
-                    existing = self.db.execute("SELECT id FROM webpages WHERE url = %s", (url,))
-                    if not existing:
-                        content_hash = hashlib.md5(item.get('content', '').encode('utf-8')).hexdigest()
-                        self.db.execute("""
-                            INSERT INTO webpages (url, content, navigation_text, content_hash, last_updated)
-                            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-                        """, (
-                            url,
-                            item.get('content', '')[:10000],
-                            item.get('navigation_text', '')[:1000],
-                            content_hash
-                        ))
-                        logger.debug(f"Saved webpage with navigation text for: {url}")
-                except Exception as e:
-                    logger.error(f"Error saving webpage for {url}: {str(e)}")
-                
-                # Save to experts or publications
-                if content_type == 'expert':
-                    if not title:
-                        logger.warning(f"Skipping expert with missing title: {item}")
-                        continue
-                    existing = self.db.execute("SELECT id FROM experts WHERE url = %s", (url,))
-                    if not existing:
-                        self.db.execute("""
-                            INSERT INTO experts (name, affiliation, contact_email, url, is_active)
-                            VALUES (%s, %s, %s, %s, %s)
-                        """, (
-                            title or 'Unknown Expert',
-                            item.get('affiliation', 'APHRC'),
-                            item.get('contact_email'),
-                            url,
-                            True
-                        ))
-                        results['processed_experts'] += 1
-                        logger.debug(f"Saved expert to experts table: {url}")
-                
-                elif content_type in ['publication', 'pdf']:
-                    if not title:
-                        logger.warning(f"Skipping publication/pdf with missing title: {item}")
-                        continue
-                    existing = self.db.execute("SELECT id FROM publications WHERE doi = %s", (url,))
-                    if not existing:
-                        self.db.execute("""
-                            INSERT INTO publications (title, summary, source, type, authors, domains, publication_year, doi, field, subfield)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """, (
-                            title or 'Untitled',
-                            item.get('summary', item.get('content', ''))[:1000],
-                            item.get('source', 'website'),
-                            content_type,
-                            item.get('authors', []),
-                            item.get('domains', []),
-                            item.get('publication_year'),
-                            url,
-                            item.get('field'),
-                            item.get('subfield')
-                        ))
-                        if content_type == 'publication':
-                            results['processed_publications'] += 1
-                        else:
-                            results['processed_resources'] += 1
-                        logger.debug(f"Saved {content_type} to publications table: {url}")
-                
-            except Exception as e:
-                logger.error(f"Error saving item {url or 'unknown'} to database: {str(e)}", exc_info=True)
+    
 
 
     def cleanup(self):
