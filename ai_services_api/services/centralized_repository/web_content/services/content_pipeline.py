@@ -143,11 +143,12 @@ class ContentPipeline:
             logger.error(f"Error scraping {url}: {str(e)}")
             return {}
 
+    
 
     async def run(self) -> Dict:
         """
-        Run the scraping pipeline with summarization and PDF processing, recursively fetching internal links.
-        Saves data to experts and publications tables every 10 pages for crash resilience.
+        Run the scraping pipeline, saving experts, publications, and navigation data every 10 pages.
+        Stores navigation text in webpages.navigation_text.
         Returns a dictionary with processed pages and results.
         """
         results = {
@@ -180,6 +181,8 @@ class ContentPipeline:
                     SELECT doi FROM publications WHERE doi IS NOT NULL
                     UNION
                     SELECT url FROM experts WHERE url IS NOT NULL
+                    UNION
+                    SELECT url FROM webpages WHERE url IS NOT NULL
                 """)
                 processed_urls.update(row[0] for row in existing_urls)
                 logger.info(f"Loaded {len(processed_urls)} existing URLs from database")
@@ -227,6 +230,21 @@ class ContentPipeline:
                         logger.debug(f"No valid data scraped for URL: {url}")
                         continue
                     
+                    # Extract navigation text
+                    try:
+                        response = requests.get(url, timeout=10)
+                        response.raise_for_status()
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        nav_elements = (
+                            soup.select('.nav-menu, .main-nav, .menu, .navbar, nav') +
+                            soup.select('.breadcrumb, .breadcrumbs, .nav-path')
+                        )
+                        nav_texts = [elem.get_text(strip=True) for elem in nav_elements if elem.get_text(strip=True)]
+                        page_data['navigation_text'] = ' | '.join(nav_texts)[:1000] if nav_texts else ''
+                    except Exception as e:
+                        logger.error(f"Error extracting navigation text for {url}: {str(e)}")
+                        page_data['navigation_text'] = ''
+                    
                     page_data = self.process_webpage(page_data)
                     if not page_data.get('url'):
                         logger.debug(f"No valid processed data for URL: {url}")
@@ -238,9 +256,6 @@ class ContentPipeline:
                     
                     # Extract internal links
                     try:
-                        response = requests.get(url, timeout=10)
-                        response.raise_for_status()
-                        soup = BeautifulSoup(response.text, 'html.parser')
                         links = set(
                             urljoin(url, a.get('href'))
                             for a in soup.find_all('a', href=True)
@@ -315,20 +330,40 @@ class ContentPipeline:
         return results
 
     def _save_batch(self, batch: List[Dict], results: Dict) -> None:
-        """Save a batch of items to the experts and publications tables."""
+        """Save a batch of items to experts, publications, and webpages tables."""
         for item in batch:
             try:
                 content_type = item.get('type')
                 url = item.get('url') or item.get('doi')
                 title = item.get('title')
-                if not url or not title:
-                    logger.warning(f"Skipping item with missing url or title: {item}")
+                if not url:
+                    logger.warning(f"Skipping item with missing url: {item}")
                     continue
                 
+                # Save to webpages (content and navigation_text)
+                try:
+                    existing = self.db.execute("SELECT id FROM webpages WHERE url = %s", (url,))
+                    if not existing:
+                        content_hash = hashlib.md5(item.get('content', '').encode('utf-8')).hexdigest()
+                        self.db.execute("""
+                            INSERT INTO webpages (url, content, navigation_text, content_hash, last_updated)
+                            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        """, (
+                            url,
+                            item.get('content', '')[:10000],  # Limit content size
+                            item.get('navigation_text', '')[:1000],
+                            content_hash
+                        ))
+                        logger.debug(f"Saved webpage with navigation text for: {url}")
+                except Exception as e:
+                    logger.error(f"Error saving webpage for {url}: {str(e)}")
+                
+                # Save to experts or publications
                 if content_type == 'expert':
-                    existing = self.db.execute("""
-                        SELECT id FROM experts WHERE url = %s
-                    """, (url,))
+                    if not title:
+                        logger.warning(f"Skipping expert with missing title: {item}")
+                        continue
+                    existing = self.db.execute("SELECT id FROM experts WHERE url = %s", (url,))
                     if not existing:
                         self.db.execute("""
                             INSERT INTO experts (name, affiliation, contact_email, url, is_active)
@@ -344,9 +379,10 @@ class ContentPipeline:
                         logger.debug(f"Saved expert to experts table: {url}")
                 
                 elif content_type in ['publication', 'pdf']:
-                    existing = self.db.execute("""
-                        SELECT id FROM publications WHERE doi = %s
-                    """, (url,))
+                    if not title:
+                        logger.warning(f"Skipping publication/pdf with missing title: {item}")
+                        continue
+                    existing = self.db.execute("SELECT id FROM publications WHERE doi = %s", (url,))
                     if not existing:
                         self.db.execute("""
                             INSERT INTO publications (title, summary, source, type, authors, domains, publication_year, doi, field, subfield)

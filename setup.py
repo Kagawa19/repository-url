@@ -4,9 +4,10 @@ import asyncio
 import os
 import sys
 import argparse
+import time
 import psutil
 import gc
-import time
+
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 from datetime import datetime
@@ -161,10 +162,9 @@ class SystemInitializer:
             logger.error(f"Failed to initialize web content processor: {str(e)}", exc_info=True)
             raise
 
-   
-
+  
     async def process_web_content(self) -> Dict:
-        """Process web content, relying on ContentPipeline's incremental saves to experts and publications."""
+        """Process web content, relying on ContentPipeline's incremental saves."""
         try:
             logger.info("\n" + "="*50)
             logger.info("Processing web content...")
@@ -186,7 +186,7 @@ class SystemInitializer:
                 logger.warning("No webpage results found in processing details")
                 return results
             
-            # Log results (no storage needed since ContentPipeline saves incrementally)
+            # Log results
             logger.info(f"""Web Content Processing Results:
                 Pages Processed: {results.get('processed_pages', 0)}
                 Pages Updated: {results.get('updated_pages', 0)}
@@ -203,7 +203,8 @@ class SystemInitializer:
             try:
                 pub_count = self.db.execute("SELECT COUNT(*) FROM publications")[0][0]
                 exp_count = self.db.execute("SELECT COUNT(*) FROM experts")[0][0]
-                logger.info(f"Database state: {pub_count} publications, {exp_count} experts")
+                web_count = self.db.execute("SELECT COUNT(*) FROM webpages")[0][0]
+                logger.info(f"Database state: {pub_count} publications, {exp_count} experts, {web_count} webpages")
             except Exception as e:
                 logger.error(f"Error querying database state: {str(e)}")
             
