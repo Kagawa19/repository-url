@@ -101,7 +101,6 @@ class ScraperMetrics:
             }
 
 class AdaptiveRateLimiter:
-class AdaptiveRateLimiter:
     def __init__(self, initial_delay: float = 2.0, min_delay: float = 1.0, max_delay: float = 10.0, backoff_factor: float = 1.5):
         self.current_delay = initial_delay
         self.min_delay = min_delay
@@ -113,40 +112,29 @@ class AdaptiveRateLimiter:
         self.last_request_time = 0
 
     def wait(self):
-        """Wait the appropriate amount of time before the next request."""
         with self._lock:
             current_time = time.time()
             elapsed = current_time - self.last_request_time
-            
-            # If we need to wait, do so
             if elapsed < self.current_delay:
                 time.sleep(self.current_delay - elapsed)
-            
-            # Update the last request time
             self.last_request_time = time.time()
 
     def record_success(self):
-        """Record a successful request and potentially decrease delay."""
         with self._lock:
             self.success_count += 1
             self.failure_count = 0
-            
-            # After 5 consecutive successes, we reduce the delay
             if self.success_count >= 5:
                 self.current_delay = max(self.current_delay / 1.2, self.min_delay)
                 self.success_count = 0
 
     def record_failure(self):
-        """Record a failed request and increase the delay."""
         with self._lock:
             self.failure_count += 1
             self.success_count = 0
-            
-            # Increase the delay more aggressively with consecutive failures
             self.current_delay = min(self.current_delay * (self.backoff_factor ** self.failure_count), self.max_delay)
 
 class BrowserPool:
-    def __init__(self, max_size: int = 3, chrome_options=None):
+    def __init__(self, max_size: int = 5, chrome_options=None):
         self.max_size = max_size
         self.chrome_options = chrome_options or self._default_chrome_options()
         self.browsers = []
@@ -167,28 +155,20 @@ class BrowserPool:
         
     def get_browser(self):
         with self._lock:
-            # Check if we have available browsers
             for browser in self.browsers:
                 if browser not in self.browsers_in_use:
                     self.browsers_in_use[browser] = True
                     return browser
-                    
-            # If pool is not at max size, create a new browser
             if len(self.browsers) < self.max_size:
                 try:
                     service = Service()
-                    browser = webdriver.Chrome(
-                        service=service,
-                        options=self.chrome_options
-                    )
+                    browser = webdriver.Chrome(service=service, options=self.chrome_options)
                     self.browsers.append(browser)
                     self.browsers_in_use[browser] = True
                     return browser
                 except Exception as e:
                     logger.error(f"Failed to create new browser: {e}")
                     raise
-                
-            # If we reach here, all browsers are in use and we're at max capacity
             return None
             
     def release_browser(self, browser):
@@ -206,28 +186,26 @@ class BrowserPool:
             self.browsers = []
             self.browsers_in_use = {}
 
-
 @dataclass
 class ScraperConfig:
-    """Configuration for the WebsiteScraper."""
-    base_url: str = os.getenv('WEBSITE_BASE_URL', 'https://aphrc.org') # Updated base URL
+    base_url: str = os.getenv('WEBSITE_BASE_URL', 'https://aphrc.org')
     cache_dir: str = os.getenv('WEBSITE_CACHE_DIR', '/tmp/website_cache')
-    cache_ttl: int = int(os.getenv('WEBSITE_CACHE_TTL', '86400'))  # 24 hours in seconds
+    cache_ttl: int = int(os.getenv('WEBSITE_CACHE_TTL', '86400'))
     request_timeout: int = int(os.getenv('WEBSITE_REQUEST_TIMEOUT', '30'))
     browser_timeout: int = int(os.getenv('WEBSITE_BROWSER_TIMEOUT', '20'))
-    max_workers: int = int(os.getenv('WEBSITE_MAX_WORKERS', '5')) # Increased workers
-    max_browsers: int = int(os.getenv('WEBSITE_MAX_BROWSERS', '5')) # Increased browsers
+    max_workers: int = int(os.getenv('WEBSITE_MAX_WORKERS', '5'))
+    max_browsers: int = int(os.getenv('WEBSITE_MAX_BROWSERS', '5'))
     max_retries: int = int(os.getenv('WEBSITE_MAX_RETRIES', '3'))
     initial_rate_limit_delay: float = float(os.getenv('WEBSITE_INITIAL_RATE_LIMIT', '2.0'))
-    batch_size: int = int(os.getenv('WEBSITE_BATCH_SIZE', '100')) # Increased batch size
+    batch_size: int = int(os.getenv('WEBSITE_BATCH_SIZE', '100'))
     css_selectors: Dict[str, List[str]] = field(default_factory=lambda: {
-        'links': [ # Generic link selectors
-            'a[href]', 'a[class*="-link"]', 'a[class*="button"]', 'a[class*="nav"]'
-        ],  
-        'text': [ # Generic text selectors
-            'p', 'article', 'div[class*="content"]', 'div[class*="text"]',
-            'section', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', '.post-content'
+        'publication_cards': [
+            '.publication-card', '.card', 'article', '.post', '.item', '[class*="publication"]'
         ],
+        'url': ['a[href]', '[class*="link"]', '[class*="button"]'],
+        'title': ['h1', 'h2', 'h3', '[class*="title"]', '[class*="heading"]'],
+        'content': ['.content', '.description', '.abstract', 'p', '[class*="text"]'],
+        'content_page': ['.entry-content', 'article', '.post-content', '.content', 'p'],
         'load_more': [
             '.alm-load-more-btn', '.load-more', 'a.next', '.pagination a', 
             'button[class*="load"]', '.nav-links .next'
@@ -256,13 +234,12 @@ class WebsiteScraper:
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1'
         }
-        # Optimize cache size
-        self.cache = diskcache.Cache(self.config.cache_dir, size_limit=500 * 1024 * 1024)  # 500 MB limit
+        self.cache = diskcache.Cache(self.config.cache_dir)
         self._summarizer = summarizer
         self.seen_urls = set()
         self.metrics = ScraperMetrics()
         chrome_options = self._setup_chrome_options()
-        self.browser_pool = BrowserPool(max_size=5, chrome_options=chrome_options)  # Reduced from 5
+        self.browser_pool = BrowserPool(max_size=self.config.max_browsers, chrome_options=chrome_options)
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.config.max_workers)
         try:
             self.driver = self.browser_pool.get_browser()
@@ -272,11 +249,8 @@ class WebsiteScraper:
             logger.error(f"Failed to initialize Chrome WebDriver: {e}")
             raise
         
-        # CSS selectors for content
+        # Update CSS selectors to include experts and other content
         self.config.css_selectors.update({
-            'publication_cards': [
-                '.publication-card', '.pub-card', '.research-item', '.article-card', '[class*="publication"]'
-            ],
             'expert_cards': [
                 '.staff-card', '.team-member', '.researcher-profile', '.person', '[class*="staff"]', '[class*="team"]'
             ],
@@ -301,14 +275,13 @@ class WebsiteScraper:
 
     def _create_session(self) -> requests.Session:
         session = requests.Session()
-        
-        # Configure connection pooling
-        adapter = HTTPAdapter(
-            pool_connections=20,  # Increase from default
-            pool_maxsize=20,      # Increase from default
-            max_retries=self.config.max_retries
+        retry_strategy = Retry(
+            total=self.config.max_retries,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET", "POST"]
         )
-        
+        adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         return session
@@ -368,103 +341,6 @@ class WebsiteScraper:
             except:
                 continue
         return None
-    
-    def fetch_content(self, search_term: Optional[str] = None, max_pages: Optional[int] = 50) -> List[Dict]:
-        cache_key = f"website_content_{search_term or 'all'}_{datetime.utcnow().strftime('%Y%m%d')}"
-        cached_content = self.cache.get(cache_key)
-        if cached_content:
-            logger.info(f"Retrieved {len(cached_content)} items from cache")
-            return cached_content
-        
-        items = []
-        visited = set()
-        try:
-            logger.info(f"Accessing URL: {self.base_url}")
-            self.rate_limiter.wait()
-            try:
-                self.driver.get(self.base_url)
-                self.rate_limiter.record_success()
-                time.sleep(5)
-            except Exception as e:
-                self.rate_limiter.record_failure()
-                logger.error(f"Error loading base URL: {e}")
-                return items
-            
-            # Add specific important URLs to check first
-            important_urls = [
-                f"{self.base_url}/publications/",
-                f"{self.base_url}/person/",
-                # Add more important sections here
-            ]
-            
-            for url in important_urls:
-                try:
-                    logger.info(f"Accessing important URL: {url}")
-                    self.rate_limiter.wait()
-                    self.driver.get(url)
-                    self.rate_limiter.record_success()
-                    time.sleep(5)
-                    
-                    # Process the page specifically based on its type
-                    if "/publications/" in url:
-                        publication_items = self._extract_publications_page()
-                        items.extend(publication_items)
-                    elif "/person/" in url:
-                        expert_items = self._extract_experts_page()
-                        items.extend(expert_items)
-                    
-                except Exception as e:
-                    logger.error(f"Error processing important URL {url}: {e}")
-            
-            page_num = 1
-            while max_pages is None or page_num <= max_pages:
-                try:
-                    logger.info(f"Processing page {page_num}")
-                    # Process publication cards
-                    publication_cards = self._find_all_with_selectors(
-                        self.driver, self.config.css_selectors['publication_cards'], wait_time=5
-                    )
-                    expert_cards = self._find_all_with_selectors(
-                        self.driver, self.config.css_selectors['expert_cards'], wait_time=5
-                    )
-                    content_cards = self._find_all_with_selectors(
-                        self.driver, self.config.css_selectors['content_cards'], wait_time=5
-                    )
-                    
-                    logger.info(f"Found {len(publication_cards)} publication cards, "
-                            f"{len(expert_cards)} expert cards, {len(content_cards)} content cards")
-                    
-                    futures = []
-                    for card in publication_cards + expert_cards + content_cards:
-                        card_type = 'publication' if card in publication_cards else 'expert' if card in expert_cards else 'content'
-                        future = self.executor.submit(self._process_card, card, visited, card_type)
-                        futures.append(future)
-                    
-                    for future in concurrent.futures.as_completed(futures):
-                        try:
-                            item = future.result()
-                            if item:
-                                items.append(item)
-                        except Exception as e:
-                            logger.error(f"Error processing card: {e}")
-                    
-                    if not self._click_load_more():
-                        logger.info("No more content to load")
-                        break
-                    page_num += 1
-                except Exception as e:
-                    logger.error(f"Error processing page {page_num}: {e}")
-                    break
-            
-            if items:
-                self.cache.set(cache_key, items, expire=self.config.cache_ttl)
-            return items
-        except Exception as e:
-            logger.error(f"Error in fetch_content: {e}")
-            return items
-        finally:
-            if not items:
-                logger.warning("No items were found")
 
     def _extract_element_attribute(self, element, selectors, attribute) -> Optional[str]:
         for selector in selectors:
@@ -537,412 +413,76 @@ class WebsiteScraper:
         seen = set()
         return [k for k in keywords if not (k in seen or seen.add(k))]
 
-    def _extract_publications_page(self) -> List[Dict]:
-        """Extract publications from a publications listing page"""
-        publications = []
+    def fetch_content(self, search_term: Optional[str] = None, max_pages: Optional[int] = 50) -> List[Dict]:
+        cache_key = f"website_content_{search_term or 'all'}_{datetime.utcnow().strftime('%Y%m%d')}"
+        cached_content = self.cache.get(cache_key)
+        if cached_content:
+            logger.info(f"Retrieved {len(cached_content)} items from cache")
+            return cached_content
+        
+        items = []
+        visited = set()
         try:
-            # Look for publication cards/items
-            publication_elements = self._find_all_with_selectors(
-                self.driver, 
-                ['.publication-item', '.publication', '.resource-item', 'article', '.post']
-            )
+            logger.info(f"Accessing URL: {self.base_url}")
+            self.rate_limiter.wait()
+            try:
+                self.driver.get(self.base_url)
+                self.rate_limiter.record_success()
+                time.sleep(5)
+            except Exception as e:
+                self.rate_limiter.record_failure()
+                logger.error(f"Error loading base URL: {e}")
+                return items
             
-            logger.info(f"Found {len(publication_elements)} publication elements")
-            
-            for element in publication_elements:
+            page_num = 1
+            while max_pages is None or page_num <= max_pages:
                 try:
-                    url = self._extract_element_attribute(element, ['.title a', 'a'], 'href')
-                    if not url:
-                        continue
-                    
-                    title = self._extract_element_text(element, ['.title', 'h2', 'h3'])
-                    summary = self._extract_element_text(element, ['.excerpt', '.summary', '.content', 'p'])
-                    date_text = self._extract_element_text(element, ['.date', '.meta', '.published'])
-                    
-                    # Try to extract year from date if available
-                    year = None
-                    if date_text:
-                        year_match = re.search(r'\b(19|20)\d{2}\b', date_text)
-                        if year_match:
-                            year = int(year_match.group(0))
-                    
-                    publication = {
-                        'title': title or 'Untitled Publication',
-                        'url': url,
-                        'doi': url,  # Use URL as DOI for website publications
-                        'summary': summary or f"Publication: {title}",
-                        'publication_year': year,
-                        'type': 'publication',
-                        'source': 'website'
-                    }
-                    
-                    publications.append(publication)
-                    logger.info(f"Extracted publication: {title}")
-                    
-                except Exception as e:
-                    logger.error(f"Error extracting publication details: {e}")
-            
-            # Check if there's pagination and process additional pages
-            max_pages_to_crawl = 5  # Limit to prevent excessive crawling
-            current_page = 1
-            
-            while current_page < max_pages_to_crawl:
-                # Look for pagination elements
-                pagination_selectors = [
-                    '.pagination', '.nav-links', '.page-numbers', '.next', 
-                    'a.next', '.load-more', '.pager'
-                ]
-                
-                next_page = None
-                for selector in pagination_selectors:
-                    try:
-                        next_links = self.driver.find_elements(By.CSS_SELECTOR, f"{selector} a.next, {selector} a[rel='next'], {selector} a:contains('Next')")
-                        if next_links and len(next_links) > 0:
-                            next_page = next_links[0]
-                            break
-                        
-                        # Try finding a "Load More" button
-                        load_more = self.driver.find_elements(By.CSS_SELECTOR, ".load-more, .alm-load-more-btn, button:contains('Load More')")
-                        if load_more and len(load_more) > 0 and load_more[0].is_displayed():
-                            next_page = load_more[0]
-                            break
-                    except:
-                        continue
-                
-                if not next_page:
-                    logger.info("No more publication pages to process")
-                    break
-                    
-                try:
-                    # Scroll to the element to ensure it's visible
-                    self.driver.execute_script("arguments[0].scrollIntoView(true);", next_page)
-                    time.sleep(1)
-                    
-                    # Click the next page or load more button
-                    next_page.click()
-                    self.rate_limiter.wait()
-                    time.sleep(3)  # Wait for page to load
-                    
-                    # Find and process new publications on this page
-                    new_elements = self._find_all_with_selectors(
-                        self.driver, 
-                        ['.publication-item', '.publication', '.resource-item', 'article', '.post']
+                    logger.info(f"Processing page {page_num}")
+                    # Process publication cards
+                    publication_cards = self._find_all_with_selectors(
+                        self.driver, self.config.css_selectors['publication_cards'], wait_time=5
+                    )
+                    expert_cards = self._find_all_with_selectors(
+                        self.driver, self.config.css_selectors['expert_cards'], wait_time=5
+                    )
+                    content_cards = self._find_all_with_selectors(
+                        self.driver, self.config.css_selectors['content_cards'], wait_time=5
                     )
                     
-                    # Only process elements we haven't seen before
-                    new_count = 0
-                    processed_ids = set()
+                    logger.info(f"Found {len(publication_cards)} publication cards, "
+                            f"{len(expert_cards)} expert cards, {len(content_cards)} content cards")
                     
-                    for element in new_elements:
-                        element_id = element.get_attribute('id') or element.get_attribute('data-id')
-                        if element_id in processed_ids:
-                            continue
-                            
-                        processed_ids.add(element_id)
-                        
+                    futures = []
+                    for card in publication_cards + expert_cards + content_cards:
+                        card_type = 'publication' if card in publication_cards else 'expert' if card in expert_cards else 'content'
+                        future = self.executor.submit(self._process_card, card, visited, card_type)
+                        futures.append(future)
+                    
+                    for future in concurrent.futures.as_completed(futures):
                         try:
-                            url = self._extract_element_attribute(element, ['.title a', 'a'], 'href')
-                            if not url or any(p['url'] == url for p in publications):
-                                continue
-                            
-                            title = self._extract_element_text(element, ['.title', 'h2', 'h3'])
-                            summary = self._extract_element_text(element, ['.excerpt', '.summary', '.content', 'p'])
-                            date_text = self._extract_element_text(element, ['.date', '.meta', '.published'])
-                            
-                            # Try to extract year from date if available
-                            year = None
-                            if date_text:
-                                year_match = re.search(r'\b(19|20)\d{2}\b', date_text)
-                                if year_match:
-                                    year = int(year_match.group(0))
-                            
-                            publication = {
-                                'title': title or 'Untitled Publication',
-                                'url': url,
-                                'doi': url,
-                                'summary': summary or f"Publication: {title}",
-                                'publication_year': year,
-                                'type': 'publication',
-                                'source': 'website'
-                            }
-                            
-                            publications.append(publication)
-                            new_count += 1
-                            logger.info(f"Extracted publication: {title}")
-                            
+                            item = future.result()
+                            if item:
+                                items.append(item)
                         except Exception as e:
-                            logger.error(f"Error extracting publication details on page {current_page+1}: {e}")
+                            logger.error(f"Error processing card: {e}")
                     
-                    logger.info(f"Processed page {current_page+1}, found {new_count} new publications")
-                    
-                    # If we didn't find any new publications, break the loop
-                    if new_count == 0:
-                        logger.info("No new publications found on next page, stopping pagination")
+                    if not self._click_load_more():
+                        logger.info("No more content to load")
                         break
-                        
-                    current_page += 1
-                    
+                    page_num += 1
                 except Exception as e:
-                    logger.error(f"Error navigating to next page: {e}")
+                    logger.error(f"Error processing page {page_num}: {e}")
                     break
             
-            return publications
-            
+            if items:
+                self.cache.set(cache_key, items, expire=self.config.cache_ttl)
+            return items
         except Exception as e:
-            logger.error(f"Error extracting publications page: {e}")
-            return []
-
-    def _extract_experts_page(self) -> List[Dict]:
-        """Extract experts from an experts listing page"""
-        experts = []
-        try:
-            # Try to find "View All" button for team/staff page
-            try:
-                view_all = self.driver.find_element(By.XPATH, "//a[contains(text(), 'View All')]")
-                if view_all:
-                    view_all.click()
-                    time.sleep(3)
-                    logger.info("Clicked 'View All' button for experts")
-            except:
-                pass
-                
-            # Cast a wider net with more selectors
-            expert_elements = self._find_all_with_selectors(
-                self.driver, 
-                ['.team-member', '.person', '.staff-member', '.expert', 'article', '.team-block', 
-                '.col-md-4', '.team-item', '.profile-card', 'figure', '[class*="profile"]']
-            )
-            
-            logger.info(f"Found {len(expert_elements)} expert elements")
-            
-            # Try to directly find links to expert profiles
-            profile_links = []
-            try:
-                all_links = self.driver.find_elements(By.TAG_NAME, 'a')
-                for link in all_links:
-                    href = link.get_attribute('href')
-                    if href and '/person/' in href:
-                        profile_links.append(href)
-                
-                profile_links = list(set(profile_links))  # Remove duplicates
-                logger.info(f"Found {len(profile_links)} direct expert profile links")
-            except Exception as e:
-                logger.error(f"Error finding expert profile links: {e}")
-            
-            # Process profile links directly
-            for profile_url in profile_links:
-                if profile_url in self.seen_urls:
-                    continue
-                    
-                self.seen_urls.add(profile_url)
-                
-                expert_data = {
-                    'name': os.path.basename(profile_url).replace('-', ' ').title(),
-                    'url': profile_url,
-                    'type': 'expert',
-                    'source': 'website'
-                }
-                
-                # Visit the expert's profile page
-                try:
-                    expert_data = self._extract_expert_profile(profile_url, expert_data)
-                    if expert_data.get('name') and expert_data.get('name') != 'Unknown Expert':
-                        experts.append(expert_data)
-                        logger.info(f"Extracted expert from direct link: {expert_data.get('name')}")
-                except Exception as e:
-                    logger.error(f"Error extracting expert profile for {profile_url}: {e}")
-            
-            # Process expert cards if no direct links worked
-            if not experts:
-                for element in expert_elements:
-                    try:
-                        url = self._extract_element_attribute(element, ['a'], 'href')
-                        if not url or '/person/' not in url or url in self.seen_urls:
-                            continue
-                        
-                        self.seen_urls.add(url)
-                        
-                        name = self._extract_element_text(element, ['.name', 'h2', 'h3', 'h4', 'figcaption', '.title'])
-                        title = self._extract_element_text(element, ['.position', '.role', '.designation', '.job-title', 'p'])
-                        
-                        expert_data = {
-                            'name': name or os.path.basename(url).replace('-', ' ').title(),
-                            'title': title or 'Researcher',
-                            'url': url,
-                            'type': 'expert',
-                            'source': 'website'
-                        }
-                        
-                        # Visit the expert's profile page
-                        try:
-                            expert_data = self._extract_expert_profile(url, expert_data)
-                            experts.append(expert_data)
-                            logger.info(f"Extracted expert: {name}")
-                        except Exception as e:
-                            logger.error(f"Error extracting expert profile for {url}: {e}")
-                        
-                    except Exception as e:
-                        logger.error(f"Error extracting expert card details: {e}")
-            
-            return experts
-            
-        except Exception as e:
-            logger.error(f"Error extracting experts page: {e}")
-            return []
-
-    def _extract_expert_profile(self, url: str, expert_data: Dict) -> Dict:
-        """Extract detailed information from an expert's profile page"""
-        try:
-            browser = self.browser_pool.get_browser()
-            if not browser:
-                logger.warning(f"No browser available for expert profile {url} - creating new browser")
-                try:
-                    service = Service()
-                    temp_browser = webdriver.Chrome(service=service, options=self._setup_chrome_options())
-                    browser = temp_browser
-                except Exception as e:
-                    logger.error(f"Failed to create new browser: {e}")
-                    return expert_data
-                
-            try:
-                browser.get(url)
-                time.sleep(3)  # Allow page to load fully
-                
-                # Extract name - try multiple approaches
-                if not expert_data.get('name') or expert_data['name'] == 'Unknown Expert':
-                    try:
-                        name_elem = browser.find_element(By.CSS_SELECTOR, 'h1, .page-title, .entry-title, header h2, .bio-title')
-                        if name_elem and name_elem.text.strip():
-                            expert_data['name'] = name_elem.text.strip()
-                    except:
-                        # If still no name, extract from URL
-                        if not expert_data.get('name'):
-                            name_from_url = os.path.basename(url).replace('-', ' ').title()
-                            if name_from_url and len(name_from_url.split()) >= 2:
-                                expert_data['name'] = name_from_url
-                
-                # Extract contact email
-                try:
-                    email_elements = browser.find_elements(By.XPATH, "//a[contains(@href, 'mailto:')]")
-                    for email_elem in email_elements:
-                        email = email_elem.get_attribute('href').replace('mailto:', '')
-                        if email and '@' in email:
-                            expert_data['contact_email'] = email
-                            break
-                except:
-                    pass
-                    
-                # Extract affiliation
-                if not expert_data.get('affiliation'):
-                    try:
-                        affiliation_selectors = [
-                            '.affiliation', '.organization', '[class*="affiliation"]', 
-                            '[class*="organization"]', '.institution', '.department'
-                        ]
-                        for selector in affiliation_selectors:
-                            try:
-                                affiliation_elem = browser.find_element(By.CSS_SELECTOR, selector)
-                                if affiliation_elem and affiliation_elem.text.strip():
-                                    expert_data['affiliation'] = affiliation_elem.text.strip()
-                                    break
-                            except:
-                                continue
-                    except:
-                        pass
-                    
-                    if not expert_data.get('affiliation'):
-                        expert_data['affiliation'] = 'APHRC'
-                    
-                # Extract biography text
-                biography = ""
-                try:
-                    # Try multiple approaches to find the biography
-                    bio_selectors = [
-                        '.bio', '.biography', '.content', '.entry-content p', '.about', 
-                        'article p', '.profile-content', '.description', '.team-bio'
-                    ]
-                    
-                    for selector in bio_selectors:
-                        try:
-                            bio_elems = browser.find_elements(By.CSS_SELECTOR, selector)
-                            if bio_elems:
-                                bio_text = '\n'.join([elem.text for elem in bio_elems if elem.text.strip()])
-                                if bio_text:
-                                    biography = bio_text
-                                    break
-                        except:
-                            continue
-                    
-                    # If biography is still empty, try getting all paragraphs
-                    if not biography:
-                        paragraphs = browser.find_elements(By.TAG_NAME, 'p')
-                        biography = '\n'.join([p.text for p in paragraphs if p.text.strip()])
-                    
-                    if biography:
-                        expert_data['bio'] = biography[:5000]  # Limit size
-                except:
-                    pass
-                    
-                # Extract areas of expertise/research interests
-                try:
-                    expertise_selectors = [
-                        '.expertise', '.skills', '.research-areas', '.interests', 
-                        '.specialties', '.keywords', '[class*="expertise"]', '[class*="research"]'
-                    ]
-                    
-                    for selector in expertise_selectors:
-                        try:
-                            expertise_elems = browser.find_elements(By.CSS_SELECTOR, selector)
-                            if expertise_elems:
-                                domains = []
-                                for elem in expertise_elems:
-                                    if elem.text.strip():
-                                        domains.extend([d.strip() for d in elem.text.strip().split(',')])
-                                
-                                if domains:
-                                    expert_data['domains'] = domains
-                                    break
-                        except:
-                            continue
-                    
-                    # If no explicit expertise found, extract from biography
-                    if biography and not expert_data.get('domains'):
-                        # Extract research keywords from biography
-                        research_terms = [
-                            "research", "expertise", "specialize", "focus", "interest",
-                            "field", "area", "study", "investigate", "work on"
-                        ]
-                        
-                        for term in research_terms:
-                            if term in biography.lower():
-                                # Extract sentence containing research term
-                                sentences = biography.split('.')
-                                for sentence in sentences:
-                                    if term in sentence.lower():
-                                        expert_data['domains'] = [sentence.strip()]
-                                        break
-                                if expert_data.get('domains'):
-                                    break
-                except:
-                    pass
-                    
-                return expert_data
-                
-            except Exception as e:
-                logger.error(f"Error extracting expert profile data for {url}: {e}")
-                return expert_data
-                
-            finally:
-                if browser and browser in self.browser_pool.browsers:
-                    self.browser_pool.release_browser(browser)
-                elif browser:
-                    try:
-                        browser.quit()
-                    except:
-                        pass
-        except Exception as e:
-            logger.error(f"Error in _extract_expert_profile for {url}: {e}")
-            return expert_data
+            logger.error(f"Error in fetch_content: {e}")
+            return items
+        finally:
+            if not items:
+                logger.warning("No items were found")
 
     def _find_all_with_selectors(self, driver, selectors, wait_time=5):
         elements = []
