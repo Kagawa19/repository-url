@@ -3,6 +3,7 @@ from typing import Any, List, Dict, Optional
 from pydantic import BaseModel
 import logging
 import redis
+from redis.asyncio import Redis
 import uuid
 from ai_services_api.services.search.gemini.gemini_predictor import GoogleAutocompletePredictor
 from fastapi import APIRouter, HTTPException, Request, Depends, Body
