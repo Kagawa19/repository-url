@@ -166,6 +166,10 @@ class SystemInitializer:
             logger.info("Processing web content...")
             logger.info("="*50)
             
+            # Log initial memory usage
+            process = psutil.Process()
+            logger.debug(f"Initial memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+            
             if not self.web_processor:
                 await self.initialize_web_content_processor()
             
@@ -178,7 +182,7 @@ class SystemInitializer:
                 logger.warning("No webpage results found in processing details")
                 return results
             
-            # Extract publications, experts, and PDFs from webpage_results
+            # Extract and process items incrementally
             items = [
                 item for batch in results['processing_details']['webpage_results']
                 for item in batch.get('batch', [])
@@ -213,6 +217,8 @@ class SystemInitializer:
                     )
                     successful_pub_mappings += 1
                     logger.debug(f"Mapped publication: {doi}")
+                    # Clear memory after each publication
+                    gc.collect()
                 except Exception as e:
                     logger.error(f"Failed to map publication {doi or 'unknown'}: {str(e)}")
             
@@ -226,7 +232,6 @@ class SystemInitializer:
                         logger.warning(f"Skipping expert with missing url or name: {expert}")
                         continue
                     
-                    # Check if expert already exists
                     existing = self.db.execute("""
                         SELECT id FROM experts_expert WHERE url = %s
                     """, (url,))
@@ -244,10 +249,12 @@ class SystemInitializer:
                         ))
                         successful_exp_mappings += 1
                         logger.debug(f"Mapped expert: {url}")
+                    # Clear memory after each expert
+                    gc.collect()
                 except Exception as e:
                     logger.error(f"Failed to map expert {url or 'unknown'}: {str(e)}")
             
-            # Log results and scraper metrics
+            # Log results and memory usage
             logger.info(f"""Web Content Processing Results:
                 Pages Processed: {results.get('processed_pages', 0)}
                 Pages Updated: {results.get('updated_pages', 0)}
@@ -260,11 +267,13 @@ class SystemInitializer:
                 Average Time Per Page: {processing_time/max(results.get('processed_pages', 1), 1):.2f} seconds
             """)
             logger.info(f"WebsiteScraper metrics: {self.web_processor.content_pipeline.scraper.get_metrics()}")
+            logger.debug(f"Final memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
             
             return results
         except Exception as e:
             logger.error(f"Error processing web content: {str(e)}", exc_info=True)
             raise
+  
 
     async def match_experts_with_resources(self) -> None:
         """Match experts with resources based on author names."""

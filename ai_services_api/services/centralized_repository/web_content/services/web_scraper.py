@@ -234,12 +234,13 @@ class WebsiteScraper:
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1'
         }
-        self.cache = diskcache.Cache(self.config.cache_dir)
+        # Optimize cache size
+        self.cache = diskcache.Cache(self.config.cache_dir, size_limit=500 * 1024 * 1024)  # 500 MB limit
         self._summarizer = summarizer
         self.seen_urls = set()
         self.metrics = ScraperMetrics()
         chrome_options = self._setup_chrome_options()
-        self.browser_pool = BrowserPool(max_size=self.config.max_browsers, chrome_options=chrome_options)
+        self.browser_pool = BrowserPool(max_size=2, chrome_options=chrome_options)  # Reduced from 5
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.config.max_workers)
         try:
             self.driver = self.browser_pool.get_browser()
@@ -249,8 +250,11 @@ class WebsiteScraper:
             logger.error(f"Failed to initialize Chrome WebDriver: {e}")
             raise
         
-        # Update CSS selectors to include experts and other content
+        # CSS selectors for content
         self.config.css_selectors.update({
+            'publication_cards': [
+                '.publication-card', '.pub-card', '.research-item', '.article-card', '[class*="publication"]'
+            ],
             'expert_cards': [
                 '.staff-card', '.team-member', '.researcher-profile', '.person', '[class*="staff"]', '[class*="team"]'
             ],

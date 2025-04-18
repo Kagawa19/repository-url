@@ -9,6 +9,8 @@ from ai_services_api.services.centralized_repository.web_content.services.web_sc
 from ai_services_api.services.centralized_repository.web_content.services.pdf_processor import PDFProcessor
 import re
 import warnings
+import psutil
+import gc
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
@@ -139,9 +141,11 @@ class ContentPipeline:
             logger.error(f"Error scraping {url}: {str(e)}")
             return {}
 
+ 
+
     async def run(self) -> Dict:
         """
-        Run the scraping pipeline with summarization and PDF processing, recursively fetching all internal links.
+        Run the scraping pipeline with summarization and PDF processing, recursively fetching internal links.
         Returns a dictionary with processed pages and results.
         """
         results = {
@@ -159,11 +163,17 @@ class ContentPipeline:
             current_batch = []
             processed_urls = set()
             to_visit_urls = set(self.start_urls)  # Start with base URLs
-            max_pages = 1000  # Limit for recursive crawling
+            max_pages = 500  # Reduced from 1000 to conserve resources
+            max_depth = 3    # Limit recursion depth
+            depth_map = {url: 0 for url in to_visit_urls}  # Track depth of each URL
+            
+            # Log initial memory usage
+            process = psutil.Process()
+            logger.debug(f"Initial memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
             
             # Fetch publications using WebsiteScraper
             try:
-                publications = self.scraper.fetch_content(max_pages=50)
+                publications = self.scraper.fetch_content(max_pages=20)  # Reduced from 50
                 logger.info(f"Fetched {len(publications)} publications from WebsiteScraper")
                 current_batch.extend(publications)
                 processed_urls.update(item.get('url') or item.get('doi', '') for item in publications)
@@ -176,8 +186,12 @@ class ContentPipeline:
             # Recursively crawl additional pages
             while to_visit_urls and results['processed_pages'] < max_pages:
                 url = to_visit_urls.pop()
+                current_depth = depth_map.get(url, 0)
                 if url in processed_urls or url in self.visited_urls:
                     logger.debug(f"Skipping already visited URL: {url}")
+                    continue
+                if current_depth >= max_depth:
+                    logger.debug(f"Skipping URL {url} at depth {current_depth} (max_depth={max_depth})")
                     continue
                 
                 try:
@@ -208,7 +222,10 @@ class ContentPipeline:
                             and not any(ext in a.get('href').lower() for ext in ['.xml', '.jpg', '.png', '.css', '.js'])
                         )
                         logger.debug(f"Found {len(links)} internal links on {url}")
-                        to_visit_urls.update(links - processed_urls - self.visited_urls)
+                        for link in links:
+                            if link not in processed_urls and link not in self.visited_urls:
+                                to_visit_urls.add(link)
+                                depth_map[link] = current_depth + 1
                     except Exception as e:
                         logger.error(f"Error fetching links from {url}: {str(e)}")
                     
@@ -217,10 +234,14 @@ class ContentPipeline:
                         webpage_results.append({'batch': current_batch})
                         results['updated_pages'] += len(current_batch)
                         current_batch = []
+                        # Clear memory
+                        gc.collect()
+                        logger.debug(f"Memory usage after batch: {process.memory_info().rss / 1024 / 1024:.2f} MB")
                     
                     # Log progress
-                    if results['processed_pages'] % 100 == 0:
+                    if results['processed_pages'] % 50 == 0:
                         logger.info(f"Processed {results['processed_pages']} pages, {len(to_visit_urls)} URLs remaining")
+                        logger.debug(f"Memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
                 except Exception as e:
                     logger.error(f"Error processing URL {url}: {str(e)}", exc_info=True)
                     continue
@@ -248,13 +269,15 @@ class ContentPipeline:
                     f"{results['processed_experts']} experts, "
                     f"{results['processed_resources']} PDFs")
             
-            # Log scraper metrics
+            # Log final memory usage and scraper metrics
+            logger.debug(f"Final memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
             logger.info(f"WebsiteScraper metrics: {self.scraper.get_metrics()}")
             
         except Exception as e:
             logger.error(f"Critical error in content pipeline: {str(e)}", exc_info=True)
         
         return results
+
 
     def cleanup(self):
         """Clean up resources."""
