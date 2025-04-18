@@ -1,5 +1,6 @@
 import os
 import re
+from psycopg2.extras import RealDictCursor
 import time
 from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Request, Depends
